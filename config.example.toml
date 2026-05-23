@@ -1,0 +1,26 @@
+[general]
+refresh_interval = 300
+
+[deepseek]
+enabled = true
+api_key = ""                        # DeepSeek API Key, or leave empty to auto-detect from env DEEPSEEK_API_KEY
+
+[claude]
+enabled = true
+# auth_file = ""                    # Path to .credentials.json, auto-detected by default
+
+[codex]
+enabled = true
+# auth_file = ""                    # Path to codex auth.json, auto-detected by default
+
+[gemini]
+enabled = true
+api_key = ""                        # Gemini API Key, or leave empty to auto-detect from env GEMINI_API_KEY / GOOGLE_API_KEY
+
+[opencode]
+enabled = true
+api_key = ""                        # OpenCode API Key, or leave empty to auto-detect from ~/.local/share/opencode/auth.json
+
+[mimo]
+enabled = false
+api_key = ""                        # Xiaomi MiMo platform API Key
