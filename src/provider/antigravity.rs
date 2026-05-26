@@ -43,7 +43,7 @@ impl AntigravityProvider {
     fn oauth_credentials_path() -> Option<PathBuf> {
         Some(
             dirs::home_dir()?
-                .join(".antigravity")
+                .join(".gemini")
                 .join("oauth_creds.json"),
         )
     }
@@ -117,7 +117,7 @@ impl Provider for AntigravityProvider {
 
         let credentials = Self::read_oauth_credentials().with_context(|| {
             if self.has_configured_api_key() {
-                "Antigravity API key is configured, but usage quota requires Antigravity CLI OAuth credentials at ~/.antigravity/oauth_creds.json"
+                "Antigravity API key is configured, but usage quota requires Antigravity CLI OAuth credentials at ~/.gemini/oauth_creds.json"
             } else {
                 "Antigravity OAuth credentials not found. Run Antigravity CLI OAuth login first"
             }
