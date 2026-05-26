@@ -152,7 +152,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                 || std::env::var("ANTIGRAVITY_API_KEY").is_ok()
                 || dirs::home_dir()
                     .unwrap_or_default()
-                    .join(".antigravity")
+                    .join(".gemini")
                     .join("oauth_creds.json")
                     .exists()
             {

@@ -154,7 +154,10 @@ impl Provider for AntigravityProvider {
 impl AntigravityProvider {
     async fn fetch_quota_with_token(&self, access_token: &str) -> Result<serde_json::Value> {
         let project = match self.load_code_assist_project(access_token).await {
-            Ok(project) => project,
+            Ok(project) => {
+                tracing::debug!("Antigravity loadCodeAssist project: {project:?}");
+                project
+            }
             Err(e) => {
                 tracing::debug!("Antigravity loadCodeAssist project discovery failed: {e}");
                 self.discover_project_fallback(access_token)
@@ -329,9 +332,12 @@ impl AntigravityProvider {
             anyhow::bail!("Antigravity quota API error: {status} - {body}");
         }
 
-        resp.json()
+        let json = resp
+            .json()
             .await
-            .context("Failed to parse Antigravity quota response")
+            .context("Failed to parse Antigravity quota response")?;
+        tracing::debug!("Antigravity quota raw response: {json:?}");
+        Ok(json)
     }
 }
 
@@ -594,7 +600,10 @@ fn collect_quota_entries(
             )
             .or_else(|| {
                 model_hint
-                    .filter(|hint| hint.to_ascii_lowercase().contains("antigravity"))
+                    .filter(|hint| {
+                        let lower = hint.to_ascii_lowercase();
+                        lower.contains("antigravity") || lower.contains("gemini")
+                    })
                     .map(ToString::to_string)
             });
 
