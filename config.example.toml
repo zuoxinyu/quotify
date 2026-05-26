@@ -19,7 +19,9 @@ api_key = ""                        # Gemini API Key, or leave empty to auto-det
 
 [opencode]
 enabled = true
-api_key = ""                        # OpenCode API Key, or leave empty to auto-detect from ~/.local/share/opencode/auth.json
+api_key = ""                        # Reserved; Go usage is read from opencode.ai browser auth cookie
+workspace_id = ""                   # Optional wrk_... ID or opencode.ai workspace URL; env: OPENCODE_WORKSPACE_ID / CODEXBAR_OPENCODEGO_WORKSPACE_ID
+auth_cookie = ""                    # Optional auth cookie value or full Cookie header; env: OPENCODE_AUTH_COOKIE
 
 [mimo]
 enabled = false

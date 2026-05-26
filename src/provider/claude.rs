@@ -225,9 +225,9 @@ impl ClaudeProvider {
                 .claude_ai_oauth
                 .and_then(|o| o.access_token)
                 .filter(|t| !t.is_empty())
-            {
-                return Some(token);
-            }
+        {
+            return Some(token);
+        }
 
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
         [
@@ -362,33 +362,35 @@ impl Provider for ClaudeProvider {
 
         // Method 2: Try browser cookie (sessionKey from claude.ai)
         if windows.is_empty()
-            && let Some(session_key) = self.read_cookie_session_key() {
-                tracing::debug!("Using Claude sessionKey from browser cookie");
-                match self.fetch_via_cookie(&session_key).await {
-                    Ok((w, c)) => {
-                        windows = w;
-                        credits = c;
-                        source = "cookie";
-                    }
-                    Err(e) => {
-                        tracing::debug!("Claude cookie fetch failed: {e}");
-                    }
+            && let Some(session_key) = self.read_cookie_session_key()
+        {
+            tracing::debug!("Using Claude sessionKey from browser cookie");
+            match self.fetch_via_cookie(&session_key).await {
+                Ok((w, c)) => {
+                    windows = w;
+                    credits = c;
+                    source = "cookie";
+                }
+                Err(e) => {
+                    tracing::debug!("Claude cookie fetch failed: {e}");
                 }
             }
+        }
 
         // Method 3: Try API key (Anthropic API, including proxies)
         if windows.is_empty()
-            && let Some((api_key, base_url)) = self.read_api_key() {
-                match self.fetch_via_api_key(&api_key, base_url.as_deref()).await {
-                    Ok(w) => {
-                        windows = w;
-                        source = "api_key";
-                    }
-                    Err(e) => {
-                        tracing::debug!("Claude API key fetch failed: {e}");
-                    }
+            && let Some((api_key, base_url)) = self.read_api_key()
+        {
+            match self.fetch_via_api_key(&api_key, base_url.as_deref()).await {
+                Ok(w) => {
+                    windows = w;
+                    source = "api_key";
+                }
+                Err(e) => {
+                    tracing::debug!("Claude API key fetch failed: {e}");
                 }
             }
+        }
 
         if windows.is_empty() {
             windows.push(UsageWindow {

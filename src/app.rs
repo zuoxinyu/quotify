@@ -109,13 +109,32 @@ impl eframe::App for QuotifyApp {
         // Set WinUI 3 typography metrics
         let mut style = (*ctx.style()).clone();
         style.text_styles = [
-            (egui::TextStyle::Heading, egui::FontId::new(20.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Name("Title".into()), egui::FontId::new(28.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Body, egui::FontId::new(14.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Monospace, egui::FontId::new(14.0, egui::FontFamily::Monospace)),
-            (egui::TextStyle::Button, egui::FontId::new(14.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Small, egui::FontId::new(12.0, egui::FontFamily::Proportional)),
-        ].into();
+            (
+                egui::TextStyle::Heading,
+                egui::FontId::new(20.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Name("Title".into()),
+                egui::FontId::new(28.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Body,
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Monospace,
+                egui::FontId::new(14.0, egui::FontFamily::Monospace),
+            ),
+            (
+                egui::TextStyle::Button,
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Small,
+                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            ),
+        ]
+        .into();
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         ctx.set_style(style);
 
@@ -144,32 +163,32 @@ impl eframe::App for QuotifyApp {
             .frame(popup_frame)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                        ui.add_space(4.0);
-                        ui.heading(egui::RichText::new("Quotify").strong().size(20.0));
-                        ui.label(
-                            egui::RichText::new("AI Provider Quota Monitor")
-                                .weak()
-                                .size(11.5),
-                        );
+                    ui.add_space(4.0);
+                    ui.heading(egui::RichText::new("Quotify").strong().size(20.0));
+                    ui.label(
+                        egui::RichText::new("AI Provider Quota Monitor")
+                            .weak()
+                            .size(11.5),
+                    );
 
-                        let last = *self.last_refresh.read();
-                        let elapsed = (chrono::Utc::now() - last).num_seconds();
-                        let refresh_msg = if elapsed < 60 {
-                            format!("Refreshed {elapsed}s ago")
-                        } else {
-                            format!("Refreshed {}m ago", elapsed / 60)
-                        };
-                        ui.label(egui::RichText::new(refresh_msg).small().weak());
-                    });
+                    let last = *self.last_refresh.read();
+                    let elapsed = (chrono::Utc::now() - last).num_seconds();
+                    let refresh_msg = if elapsed < 60 {
+                        format!("Refreshed {elapsed}s ago")
+                    } else {
+                        format!("Refreshed {}m ago", elapsed / 60)
+                    };
+                    ui.label(egui::RichText::new(refresh_msg).small().weak());
+                });
 
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .hscroll(false)
-                        .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .hscroll(false)
+                    .show(ui, |ui| {
                         let data = self.data.read().clone();
                         let all_providers = [
                             ("deepseek", "DeepSeek"),

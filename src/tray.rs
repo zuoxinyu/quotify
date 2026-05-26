@@ -9,10 +9,10 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, HICON, HWND_MESSAGE, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW,
-    SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP, WNDCLASSW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, HICON, HWND_MESSAGE, MF_SEPARATOR,
+    MF_STRING, PostMessageW, RegisterClassW, SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONUP,
+    WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
 use windows::core::w;
 
@@ -45,93 +45,99 @@ unsafe extern "system" fn tray_wnd_proc(
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-) -> LRESULT { unsafe {
-    static TASKBAR_CREATED_MSG: OnceLock<u32> = OnceLock::new();
-    let taskbar_created = *TASKBAR_CREATED_MSG.get_or_init(|| {
-        windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(w!("TaskbarCreated"))
-    });
+) -> LRESULT {
+    unsafe {
+        static TASKBAR_CREATED_MSG: OnceLock<u32> = OnceLock::new();
+        let taskbar_created = *TASKBAR_CREATED_MSG.get_or_init(|| {
+            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(w!("TaskbarCreated"))
+        });
 
-    if msg == taskbar_created {
-        if let Some(shicon) = *CURRENT_HICON.lock() {
-            let _ = register_tray_icon(hwnd, shicon.0);
-        }
-        return LRESULT(1);
-    }
-
-    match msg {
-        WM_CREATE => LRESULT(0),
-        WM_TRAYICON => {
-            let event = lparam.0 as u32;
-            match event {
-                WM_LBUTTONUP => {
-                    if let Some(&shwnd) = MAIN_HWND.get() {
-                        let _ = PostMessageW(Some(shwnd.0), WM_APP_SHOW, WPARAM(0), LPARAM(0));
-                    }
-                }
-                WM_RBUTTONUP => {
-                    let mut pt = POINT { x: 0, y: 0 };
-                    let _ = GetCursorPos(&mut pt);
-
-                    let _ = SetForegroundWindow(hwnd);
-
-                    if let Ok(hmenu) = CreatePopupMenu() {
-                        let _ =
-                            AppendMenuW(hmenu, MF_STRING, IDM_SHOW, w!("显示面板 (Show Details)"));
-                        let _ = AppendMenuW(
-                            hmenu,
-                            MF_STRING,
-                            IDM_REFRESH,
-                            w!("立即刷新 (Refresh Now)"),
-                        );
-                        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-                        let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("退出 (Quit)"));
-
-                        let _ = TrackPopupMenu(
-                            hmenu,
-                            TPM_LEFTALIGN | TPM_RIGHTBUTTON,
-                            pt.x,
-                            pt.y,
-                            Some(0),
-                            hwnd,
-                            None,
-                        );
-                        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-                        let _ = DestroyMenu(hmenu);
-                    }
-                }
-                _ => {}
+        if msg == taskbar_created {
+            if let Some(shicon) = *CURRENT_HICON.lock() {
+                let _ = register_tray_icon(hwnd, shicon.0);
             }
-            LRESULT(0)
+            return LRESULT(1);
         }
-        WM_COMMAND => {
-            let id = wparam.0 & 0xFFFF;
-            match id {
-                IDM_SHOW => {
-                    if let Some(&shwnd) = MAIN_HWND.get() {
-                        let _ = PostMessageW(Some(shwnd.0), WM_APP_SHOW, WPARAM(0), LPARAM(0));
+
+        match msg {
+            WM_CREATE => LRESULT(0),
+            WM_TRAYICON => {
+                let event = lparam.0 as u32;
+                match event {
+                    WM_LBUTTONUP => {
+                        if let Some(&shwnd) = MAIN_HWND.get() {
+                            let _ = PostMessageW(Some(shwnd.0), WM_APP_SHOW, WPARAM(0), LPARAM(0));
+                        }
                     }
-                }
-                IDM_REFRESH => {
-                    REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                IDM_QUIT => {
-                    if let Some(&shwnd) = MAIN_HWND.get() {
-                        let _ = PostMessageW(Some(shwnd.0), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+                    WM_RBUTTONUP => {
+                        let mut pt = POINT { x: 0, y: 0 };
+                        let _ = GetCursorPos(&mut pt);
+
+                        let _ = SetForegroundWindow(hwnd);
+
+                        if let Ok(hmenu) = CreatePopupMenu() {
+                            let _ = AppendMenuW(
+                                hmenu,
+                                MF_STRING,
+                                IDM_SHOW,
+                                w!("显示面板 (Show Details)"),
+                            );
+                            let _ = AppendMenuW(
+                                hmenu,
+                                MF_STRING,
+                                IDM_REFRESH,
+                                w!("立即刷新 (Refresh Now)"),
+                            );
+                            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("退出 (Quit)"));
+
+                            let _ = TrackPopupMenu(
+                                hmenu,
+                                TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+                                pt.x,
+                                pt.y,
+                                Some(0),
+                                hwnd,
+                                None,
+                            );
+                            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+                            let _ = DestroyMenu(hmenu);
+                        }
                     }
-                    let _ = DestroyWindow(hwnd);
+                    _ => {}
                 }
-                _ => {}
+                LRESULT(0)
             }
-            LRESULT(0)
+            WM_COMMAND => {
+                let id = wparam.0 & 0xFFFF;
+                match id {
+                    IDM_SHOW => {
+                        if let Some(&shwnd) = MAIN_HWND.get() {
+                            let _ = PostMessageW(Some(shwnd.0), WM_APP_SHOW, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                    IDM_REFRESH => {
+                        REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    IDM_QUIT => {
+                        if let Some(&shwnd) = MAIN_HWND.get() {
+                            let _ = PostMessageW(Some(shwnd.0), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+                        }
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    _ => {}
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let _ = remove_tray_icon(hwnd);
+                windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-        WM_DESTROY => {
-            let _ = remove_tray_icon(hwnd);
-            windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
-}}
+}
 
 fn register_tray_icon(hwnd: HWND, hicon: HICON) -> windows::core::Result<()> {
     let tooltip = "Quotify - AI Quota Monitor";

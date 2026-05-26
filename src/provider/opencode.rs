@@ -1,138 +1,85 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::Deserialize;
 
 use super::{CreditsInfo, Provider, UsageData, UsageWindow};
 use crate::cookies;
 
 const OPENCODE_SERVER_URL: &str = "https://opencode.ai/_server";
 const OPENCODE_WORKSPACES_FUNCTION_ID: &str =
-    "6e46dc687363358d99b3aff307cf93451c5f4ea8930ccf7d419eb45d6653ea1b";
+    "0c8d84b0a700eb0de440ca4c9105b42d6c9ede971d6bf592fa4f91bbeaaa1e6b";
 const OPENCODE_SUBSCRIPTION_FUNCTION_ID: &str =
     "7abeebee372f304e050aaaf92be863f4a86490e382f8c79db68fd94040d691b4";
+const OPENCODE_COOKIE_DOMAINS: &[&str] = &["opencode.ai", ".opencode.ai", "www.opencode.ai"];
 
 pub struct OpenCodeProvider {
-    api_key: Option<String>,
     client: reqwest::Client,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenCodeAuthEntry {
-    #[serde(rename = "type")]
-    auth_type: Option<String>,
-    key: Option<String>,
-    access: Option<String>,
-    #[expect(dead_code)]
-    refresh: Option<String>,
-    #[serde(default)]
-    #[expect(dead_code)]
-    expires: Option<i64>,
-}
-
-#[expect(dead_code)]
-struct OpenCodeBalanceResponse {
-    balance: Option<f64>,
-    credits: Option<f64>,
-    total: Option<f64>,
-}
-
-struct SessionStats {
-    total_cost: f64,
-    total_input: i64,
-    total_output: i64,
-    total_cache_read: i64,
-    #[expect(dead_code)]
-    total_cache_write: i64,
-    #[expect(dead_code)]
-    session_count: i64,
+    workspace_id: Option<String>,
+    auth_cookie: Option<String>,
 }
 
 impl OpenCodeProvider {
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(workspace_id: Option<String>, auth_cookie: Option<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            api_key,
-            client: reqwest::Client::new(),
+            client,
+            workspace_id: workspace_id.and_then(|value| normalize_workspace_id(&value)),
+            auth_cookie: auth_cookie.and_then(|value| normalize_auth_cookie(&value)),
         }
     }
 
-    fn resolve_api_key(&self) -> Option<String> {
-        if let Some(ref key) = self.api_key
-            && !key.is_empty() {
-                return Some(key.clone());
-            }
-
-        if let Ok(key) = std::env::var("OPENCODE_API_KEY")
-            && !key.is_empty() {
-                return Some(key);
-            }
-
-        Self::read_auth_file()
+    fn configured_workspace_id(&self) -> Option<String> {
+        self.workspace_id.clone().or_else(|| {
+            std::env::var("OPENCODE_WORKSPACE_ID")
+                .or_else(|_| std::env::var("CODEXBAR_OPENCODEGO_WORKSPACE_ID"))
+                .or_else(|_| std::env::var("CODEXBAR_OPENCODE_WORKSPACE_ID"))
+                .or_else(|_| std::env::var("CODEXBAR_OPENCODE_GO_WORKSPACE_ID"))
+                .ok()
+                .and_then(|value| normalize_workspace_id(&value))
+        })
     }
 
-    fn read_auth_file() -> Option<String> {
-        let home = dirs::home_dir()?;
-        let path = home
-            .join(".local")
-            .join("share")
-            .join("opencode")
-            .join("auth.json");
-        if !path.exists() {
-            return None;
-        }
-
-        let content = std::fs::read_to_string(&path).ok()?;
-        let auth: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&content).ok()?;
-
-        let priority_keys = ["opencode-go", "opencode", "default"];
-        for pk in &priority_keys {
-            if let Some(entry_val) = auth.get(*pk)
-                && let Ok(entry) = serde_json::from_value::<OpenCodeAuthEntry>(entry_val.clone()) {
-                    if entry.auth_type.as_deref() == Some("api")
-                        && let Some(key) = entry.key.filter(|k| !k.is_empty()) {
-                            return Some(key);
-                        }
-                    if entry.auth_type.as_deref() == Some("oauth")
-                        && let Some(access) = entry.access.filter(|k| !k.is_empty()) {
-                            return Some(access);
-                        }
-                }
-        }
-
-        for (_name, entry_val) in &auth {
-            if let Ok(entry) = serde_json::from_value::<OpenCodeAuthEntry>(entry_val.clone())
-                && entry.auth_type.as_deref() == Some("api")
-                    && let Some(key) = entry.key.filter(|k| !k.is_empty()) {
-                        return Some(key);
-                    }
-        }
-
-        None
-    }
-
-    fn is_go_key(key: &str) -> bool {
-        key.starts_with("sk-opcode-go-") || key.contains("-go-")
-    }
-
-    fn has_go_auth() -> bool {
-        let home = dirs::home_dir().unwrap_or_default();
-        let path = home
-            .join(".local")
-            .join("share")
-            .join("opencode")
-            .join("auth.json");
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            content.contains("opencode-go")
-        } else {
-            false
-        }
-    }
-
-    fn configured_workspace_id() -> Option<String> {
+    pub fn has_workspace_hint() -> bool {
         std::env::var("OPENCODE_WORKSPACE_ID")
+            .or_else(|_| std::env::var("CODEXBAR_OPENCODEGO_WORKSPACE_ID"))
             .or_else(|_| std::env::var("CODEXBAR_OPENCODE_WORKSPACE_ID"))
+            .or_else(|_| std::env::var("CODEXBAR_OPENCODE_GO_WORKSPACE_ID"))
             .ok()
             .and_then(|value| normalize_workspace_id(&value))
+            .is_some()
+    }
+
+    pub fn has_auth_cookie_hint() -> bool {
+        std::env::var("OPENCODE_AUTH_COOKIE")
+            .ok()
+            .and_then(|value| normalize_auth_cookie(&value))
+            .is_some()
+    }
+
+    fn find_dashboard_cookie_header(&self) -> Result<String> {
+        if let Some(cookie) = &self.auth_cookie {
+            return Ok(cookie.clone());
+        }
+
+        if let Ok(cookie) = std::env::var("OPENCODE_AUTH_COOKIE")
+            && let Some(cookie) = normalize_auth_cookie(&cookie)
+        {
+            return Ok(cookie);
+        }
+
+        let header = cookies::find_cookie_header(OPENCODE_COOKIE_DOMAINS)?;
+        if header
+            .split(';')
+            .any(|pair| pair.trim_start().starts_with("auth="))
+        {
+            Ok(header)
+        } else {
+            let auth = cookies::find_cookie_multiple(OPENCODE_COOKIE_DOMAINS, "auth")
+                .context("OpenCode auth cookie not found")?;
+            Ok(format!("auth={auth}"))
+        }
     }
 }
 
@@ -143,138 +90,17 @@ impl Provider for OpenCodeProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let api_key = self.resolve_api_key();
-        let mut windows = Vec::new();
-        let mut credits = None;
+        // OpenCode Go does not expose a stable public quota API. Use the logged-in
+        // dashboard cookies and parse the same server data that the web app loads.
+        let cookie_header = self
+            .find_dashboard_cookie_header()
+            .context("OpenCode requires an auth cookie from config, OPENCODE_AUTH_COOKIE, or opencode.ai browser cookies")?;
+        tracing::debug!("Found opencode.ai auth cookie, trying server functions");
 
-        // Method 1: Try authenticated opencode.ai dashboard server functions.
-        if let Ok(cookie_header) = cookies::find_cookie_header(&["opencode.ai", ".opencode.ai"]) {
-            tracing::debug!("Found opencode.ai browser cookies, trying server functions");
-            match self.fetch_via_server_cookie(&cookie_header).await {
-                Ok((w, c)) => {
-                    windows = w;
-                    credits = c;
-                }
-                Err(e) => {
-                    tracing::debug!("OpenCode server cookie fetch failed: {e}");
-                }
-            }
-        }
-
-        // Method 2: Try API endpoint (if key available)
-        if let Some(ref key) = api_key
-            && windows.is_empty() {
-                let base = if Self::is_go_key(key) || Self::has_go_auth() {
-                    "https://opencode.ai/zen/go/v1"
-                } else {
-                    "https://opencode.ai/zen/v1"
-                };
-
-                let endpoints = vec![
-                    format!("{}/balance", base),
-                    format!("{}/usage", base),
-                    "https://opencode.ai/api/v1/balance".to_string(),
-                    "https://opencode.ai/api/v1/usage".to_string(),
-                ];
-
-                for endpoint in &endpoints {
-                    let resp = self
-                        .client
-                        .get(endpoint)
-                        .header("Authorization", format!("Bearer {key}"))
-                        .send()
-                        .await;
-
-                    match resp {
-                        Ok(r) if r.status().is_success() => {
-                            if let Ok(value) = r.json::<serde_json::Value>().await {
-                                tracing::debug!(
-                                    "OpenCode API response from {endpoint}: {value:#?}"
-                                );
-
-                                let total = value
-                                    .get("total")
-                                    .or_else(|| value.get("total_credits"))
-                                    .or_else(|| value.get("limit"))
-                                    .and_then(|v| v.as_f64());
-
-                                let used = value
-                                    .get("used")
-                                    .or_else(|| value.get("used_credits"))
-                                    .and_then(|v| v.as_f64());
-
-                                let balance_val = value
-                                    .get("balance")
-                                    .or_else(|| value.get("remaining"))
-                                    .or_else(|| value.get("credits"))
-                                    .and_then(|v| v.as_f64());
-
-                                if let Some(bal) = balance_val {
-                                    let total_with_used =
-                                        total.unwrap_or(bal + used.unwrap_or(0.0));
-                                    let used_pct = if total_with_used > 0.0 {
-                                        (used.unwrap_or(0.0) / total_with_used * 100.0).min(100.0)
-                                    } else {
-                                        0.0
-                                    };
-
-                                    credits = Some(CreditsInfo {
-                                        balance: bal,
-                                        currency: "USD".to_string(),
-                                        total_granted: Some(total_with_used),
-                                        topped_up: None,
-                                    });
-
-                                    windows.push(UsageWindow {
-                                        label: "Usage".to_string(),
-                                        used_percent: used_pct,
-                                        limit: Some(total_with_used),
-                                        used,
-                                        unit: Some("USD".to_string()),
-                                        resets_at: None,
-                                    });
-                                    break;
-                                } else if let Some(tot) = total {
-                                    let used_pct = if tot > 0.0 {
-                                        (used.unwrap_or(0.0) / tot * 100.0).min(100.0)
-                                    } else {
-                                        0.0
-                                    };
-                                    windows.push(UsageWindow {
-                                        label: "Usage".to_string(),
-                                        used_percent: used_pct,
-                                        limit: Some(tot),
-                                        used,
-                                        unit: Some("USD".to_string()),
-                                        resets_at: None,
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(r) => {
-                            tracing::debug!("OpenCode endpoint {endpoint} returned {}", r.status());
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::debug!("OpenCode endpoint {endpoint} error: {e}");
-                            continue;
-                        }
-                    }
-                }
-            }
-
-
-        if windows.is_empty() {
-            windows.push(UsageWindow {
-                label: "No data".to_string(),
-                used_percent: 0.0,
-                limit: None,
-                used: None,
-                unit: None,
-                resets_at: None,
-            });
-        }
+        let (windows, credits) = self
+            .fetch_via_server_cookie(&cookie_header)
+            .await
+            .context("Failed to fetch OpenCode Go usage from opencode.ai dashboard")?;
 
         Ok(UsageData {
             provider: self.name().to_string(),
@@ -291,7 +117,8 @@ impl OpenCodeProvider {
         &self,
         cookie_header: &str,
     ) -> Result<(Vec<UsageWindow>, Option<CreditsInfo>)> {
-        let workspace_id = if let Some(workspace_id) = Self::configured_workspace_id() {
+        let workspace_id = if let Some(workspace_id) = self.configured_workspace_id() {
+            tracing::debug!("Using configured OpenCode workspace ID: {workspace_id}");
             workspace_id
         } else {
             let body = self
@@ -300,6 +127,15 @@ impl OpenCodeProvider {
                 .context("Failed to fetch OpenCode workspaces")?;
             parse_workspace_id(&body).context("OpenCode workspace ID not found")?
         };
+
+        match self
+            .fetch_go_page(cookie_header, &workspace_id)
+            .await
+            .with_context(|| format!("Failed to fetch OpenCode Go page for {workspace_id}"))
+        {
+            Ok(result) => return Ok(result),
+            Err(err) => tracing::debug!("OpenCode Go page fetch failed: {err:#}"),
+        }
 
         let body = self
             .post_server_function(
@@ -318,6 +154,52 @@ impl OpenCodeProvider {
         let (windows, credits) = parse_subscription_usage(&body);
         if windows.is_empty() {
             anyhow::bail!("OpenCode subscription response did not contain usage data");
+        }
+
+        Ok((windows, credits))
+    }
+
+    async fn fetch_go_page(
+        &self,
+        cookie_header: &str,
+        workspace_id: &str,
+    ) -> Result<(Vec<UsageWindow>, Option<CreditsInfo>)> {
+        let url = format!("https://opencode.ai/workspace/{workspace_id}/go");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Cookie", cookie_header)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Referer", "https://opencode.ai/")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
+            .send()
+            .await
+            .context("Failed to request OpenCode Go page")?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("OpenCode Go page error {status}: {body}");
+        }
+        if body.starts_with("<!DOCTYPE") && !body.contains("rollingUsage") {
+            anyhow::bail!("OpenCode Go page did not contain usage data");
+        }
+
+        tracing::debug!(
+            "OpenCode Go page response (first 500 chars): {}",
+            &body[..body.len().min(500)]
+        );
+
+        let (windows, credits) = parse_subscription_usage(&body);
+        if windows.is_empty() {
+            anyhow::bail!("OpenCode Go page response did not contain usage data");
         }
 
         Ok((windows, credits))
@@ -409,11 +291,33 @@ fn normalize_workspace_id(value: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
+fn normalize_auth_cookie(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let cookie = trimmed
+        .strip_prefix("Cookie:")
+        .or_else(|| trimmed.strip_prefix("cookie:"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if cookie.is_empty() {
+        None
+    } else if cookie.contains('=') || cookie.contains(';') {
+        Some(cookie.to_string())
+    } else {
+        Some(format!("auth={cookie}"))
+    }
+}
+
 fn parse_workspace_id(body: &str) -> Option<String> {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body)
-        && let Some(found) = find_string_matching(&json, |s| s.starts_with("wrk_")) {
-            return Some(found);
-        }
+        && let Some(found) = find_string_matching(&json, |s| s.starts_with("wrk_"))
+    {
+        return Some(found);
+    }
 
     normalize_workspace_id(body)
 }
@@ -429,6 +333,9 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
         if let Some((pct, reset)) = usage_from_json(&json, "weeklyUsage") {
             windows.push(usage_window("Weekly Usage", pct, reset));
         }
+        if let Some((pct, reset)) = usage_from_json(&json, "monthlyUsage") {
+            windows.push(usage_window("Monthly Usage", pct, reset));
+        }
 
         if let Some(balance) = find_number_by_keys(&json, &["credits", "balance"]) {
             credits = Some(CreditsInfo {
@@ -443,8 +350,10 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
     if windows.is_empty() {
         let rolling_pct = regex_after_key_f64(body, "rollingUsage", "usagePercent");
         let weekly_pct = regex_after_key_f64(body, "weeklyUsage", "usagePercent");
+        let monthly_pct = regex_after_key_f64(body, "monthlyUsage", "usagePercent");
         let rolling_reset = regex_after_key_f64(body, "rollingUsage", "resetInSec");
         let weekly_reset = regex_after_key_f64(body, "weeklyUsage", "resetInSec");
+        let monthly_reset = regex_after_key_f64(body, "monthlyUsage", "resetInSec");
 
         if let Some(pct) = rolling_pct {
             windows.push(usage_window("Rolling Usage", pct, rolling_reset));
@@ -452,19 +361,23 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
         if let Some(pct) = weekly_pct {
             windows.push(usage_window("Weekly Usage", pct, weekly_reset));
         }
+        if let Some(pct) = monthly_pct {
+            windows.push(usage_window("Monthly Usage", pct, monthly_reset));
+        }
 
         if credits.is_none()
             && let Some(balance) = regex_extract_f64(
                 body,
                 r#"(?s)(?:credits|balance)["']?\s*[:=,]\s*(\d+(?:\.\d+)?)"#,
-            ) {
-                credits = Some(CreditsInfo {
-                    balance,
-                    currency: "USD".to_string(),
-                    total_granted: None,
-                    topped_up: None,
-                });
-            }
+            )
+        {
+            credits = Some(CreditsInfo {
+                balance,
+                currency: "USD".to_string(),
+                total_granted: None,
+                topped_up: None,
+            });
+        }
     }
 
     (windows, credits)
@@ -549,12 +462,19 @@ fn number_value(value: &serde_json::Value) -> Option<f64> {
 }
 
 fn regex_after_key_f64(text: &str, outer_key: &str, field: &str) -> Option<f64> {
-    let pattern = format!(
-        r#"(?s){}.*?{}["']?\s*[:=,]\s*(\d+(?:\.\d+)?)"#,
+    let strict_pattern = format!(
+        r#"(?s)["']?{}["']?\s*[:=]\s*(?:\$R\[\d+\]\s*=\s*)?\{{[^{{}}]*["']?{}["']?\s*[:=,]\s*(\d+(?:\.\d+)?)"#,
         regex::escape(outer_key),
         regex::escape(field)
     );
-    regex_extract_f64(text, &pattern)
+    regex_extract_f64(text, &strict_pattern).or_else(|| {
+        let loose_pattern = format!(
+            r#"(?s)["']?{}["']?\s*[:=]\s*(?:\$R\[\d+\]\s*=\s*)?\{{.*?["']?{}["']?\s*[:=,]\s*(\d+(?:\.\d+)?)"#,
+            regex::escape(outer_key),
+            regex::escape(field)
+        );
+        regex_extract_f64(text, &loose_pattern)
+    })
 }
 
 fn regex_extract_f64(text: &str, pattern: &str) -> Option<f64> {

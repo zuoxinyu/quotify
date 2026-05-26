@@ -125,17 +125,18 @@ impl CodexProvider {
                 for line in reader.lines().flatten() {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
                         && json.get("type").and_then(|v| v.as_str()) == Some("token_count")
-                            && let Some(ts) = json.get("timestamp").and_then(|v| v.as_i64())
-                                && ts > latest_ts {
-                                    latest_ts = ts;
-                                    if let Some(rl) = json.get("rate_limits")
-                                        && let Ok(parsed) =
-                                            serde_json::from_value::<CodexRateLimits>(rl.clone())
-                                        {
-                                            latest_primary = parsed.primary;
-                                            latest_secondary = parsed.secondary;
-                                        }
-                                }
+                        && let Some(ts) = json.get("timestamp").and_then(|v| v.as_i64())
+                        && ts > latest_ts
+                    {
+                        latest_ts = ts;
+                        if let Some(rl) = json.get("rate_limits")
+                            && let Ok(parsed) =
+                                serde_json::from_value::<CodexRateLimits>(rl.clone())
+                        {
+                            latest_primary = parsed.primary;
+                            latest_secondary = parsed.secondary;
+                        }
+                    }
                 }
             }
         }
@@ -172,7 +173,6 @@ impl CodexProvider {
 
         Ok(windows)
     }
-
 }
 
 #[async_trait::async_trait]
@@ -246,15 +246,16 @@ impl Provider for CodexProvider {
                             // primary_window (session/5h)
                             if let Some(pw) = rate_limit.get("primary_window")
                                 && let Some(w) = parse_window("primary_window", "Session (5h)", pw)
-                                {
-                                    windows.push(w);
-                                }
+                            {
+                                windows.push(w);
+                            }
 
                             // secondary_window (weekly)
                             if let Some(sw) = rate_limit.get("secondary_window")
-                                && let Some(w) = parse_window("secondary_window", "Weekly", sw) {
-                                    windows.push(w);
-                                }
+                                && let Some(w) = parse_window("secondary_window", "Weekly", sw)
+                            {
+                                windows.push(w);
+                            }
                         }
 
                         // Parse credits
@@ -281,47 +282,48 @@ impl Provider for CodexProvider {
 
                         // Fallback: try generic flat structure
                         if windows.is_empty()
-                            && let Some(obj) = usage.as_object() {
-                                for (key, value) in obj {
-                                    if key == "rate_limit"
-                                        || key == "credits"
-                                        || key == "account_id"
-                                        || key == "email"
-                                        || key == "plan_type"
-                                        || key == "user_id"
-                                    {
-                                        continue;
-                                    }
-                                    if let Some(inner) = value.as_object() {
-                                        let pct = inner
-                                            .get("used_percent")
-                                            .or_else(|| inner.get("percentage"))
-                                            .and_then(|v| v.as_f64());
-                                        let limit = inner.get("limit").and_then(|v| v.as_f64());
-                                        let used = inner.get("used").and_then(|v| v.as_f64());
-                                        let resets_at = inner
-                                            .get("resets_at")
-                                            .or_else(|| inner.get("reset_at"))
-                                            .and_then(|v| v.as_str())
-                                            .and_then(|s| {
-                                                chrono::DateTime::parse_from_rfc3339(s)
-                                                    .ok()
-                                                    .map(|dt| dt.to_utc())
-                                            });
+                            && let Some(obj) = usage.as_object()
+                        {
+                            for (key, value) in obj {
+                                if key == "rate_limit"
+                                    || key == "credits"
+                                    || key == "account_id"
+                                    || key == "email"
+                                    || key == "plan_type"
+                                    || key == "user_id"
+                                {
+                                    continue;
+                                }
+                                if let Some(inner) = value.as_object() {
+                                    let pct = inner
+                                        .get("used_percent")
+                                        .or_else(|| inner.get("percentage"))
+                                        .and_then(|v| v.as_f64());
+                                    let limit = inner.get("limit").and_then(|v| v.as_f64());
+                                    let used = inner.get("used").and_then(|v| v.as_f64());
+                                    let resets_at = inner
+                                        .get("resets_at")
+                                        .or_else(|| inner.get("reset_at"))
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| {
+                                            chrono::DateTime::parse_from_rfc3339(s)
+                                                .ok()
+                                                .map(|dt| dt.to_utc())
+                                        });
 
-                                        if pct.is_some() || used.is_some() || limit.is_some() {
-                                            windows.push(UsageWindow {
-                                                label: key.clone(),
-                                                used_percent: pct.unwrap_or(0.0),
-                                                limit,
-                                                used,
-                                                unit: None,
-                                                resets_at,
-                                            });
-                                        }
+                                    if pct.is_some() || used.is_some() || limit.is_some() {
+                                        windows.push(UsageWindow {
+                                            label: key.clone(),
+                                            used_percent: pct.unwrap_or(0.0),
+                                            limit,
+                                            used,
+                                            unit: None,
+                                            resets_at,
+                                        });
                                     }
                                 }
                             }
+                        }
                     }
                 }
                 Ok(r) => {

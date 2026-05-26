@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::{Provider, UsageData, UsageWindow};
 
-const ANTIGRAVITY_QUOTA_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
+const ANTIGRAVITY_QUOTA_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
 const ANTIGRAVITY_LOAD_CODE_ASSIST_URL: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const GOOGLE_PROJECTS_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
@@ -40,7 +41,11 @@ impl AntigravityProvider {
     }
 
     fn oauth_credentials_path() -> Option<PathBuf> {
-        Some(dirs::home_dir()?.join(".antigravity").join("oauth_creds.json"))
+        Some(
+            dirs::home_dir()?
+                .join(".antigravity")
+                .join("oauth_creds.json"),
+        )
     }
 
     fn read_oauth_credentials() -> Option<AntigravityCredentials> {
@@ -123,10 +128,9 @@ impl Provider for AntigravityProvider {
             Ok(quota) => quota,
             Err(e) if is_auth_error(&e) => {
                 tracing::debug!("Antigravity quota token rejected, refreshing and retrying: {e}");
-                let refresh_token = credentials
-                    .refresh_token
-                    .clone()
-                    .context("Antigravity OAuth token was rejected and no refresh token is available")?;
+                let refresh_token = credentials.refresh_token.clone().context(
+                    "Antigravity OAuth token was rejected and no refresh token is available",
+                )?;
                 let refreshed = self
                     .refresh_access_token(credentials, &refresh_token)
                     .await
@@ -434,10 +438,11 @@ fn find_antigravity_oauth_client() -> Option<(String, String)> {
     if let (Ok(id), Ok(secret)) = (
         std::env::var("ANTIGRAVITY_OAUTH_CLIENT_ID"),
         std::env::var("ANTIGRAVITY_OAUTH_CLIENT_SECRET"),
-    )
-        && !id.is_empty() && !secret.is_empty() {
-            return Some((id, secret));
-        }
+    ) && !id.is_empty()
+        && !secret.is_empty()
+    {
+        return Some((id, secret));
+    }
 
     let mut roots = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -454,9 +459,10 @@ fn find_antigravity_oauth_client() -> Option<(String, String)> {
 
     for root in &roots {
         if let Some(path) = find_file_named(root, "oauth2.js", 8)
-            && let Some(client) = parse_oauth_client_from_file(&path) {
-                return Some(client);
-            }
+            && let Some(client) = parse_oauth_client_from_file(&path)
+        {
+            return Some(client);
+        }
     }
 
     for root in roots {
@@ -479,13 +485,15 @@ fn find_oauth_client_in_js(root: &Path, depth: usize) -> Option<(String, String)
         if path.is_file()
             && path.extension().is_some_and(|ext| ext == "js")
             && path.to_string_lossy().contains("antigravity")
-            && let Some(client) = parse_oauth_client_from_file(&path) {
-                return Some(client);
-            }
+            && let Some(client) = parse_oauth_client_from_file(&path)
+        {
+            return Some(client);
+        }
         if path.is_dir()
-            && let Some(client) = find_oauth_client_in_js(&path, depth - 1) {
-                return Some(client);
-            }
+            && let Some(client) = find_oauth_client_in_js(&path, depth - 1)
+        {
+            return Some(client);
+        }
     }
 
     None
@@ -508,9 +516,10 @@ fn find_file_named(root: &Path, file_name: &str, depth: usize) -> Option<PathBuf
             return Some(path);
         }
         if path.is_dir()
-            && let Some(found) = find_file_named(&path, file_name, depth - 1) {
-                return Some(found);
-            }
+            && let Some(found) = find_file_named(&path, file_name, depth - 1)
+        {
+            return Some(found);
+        }
     }
 
     None

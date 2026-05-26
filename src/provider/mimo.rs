@@ -51,7 +51,9 @@ impl Provider for MimoProvider {
 
     async fn fetch_usage(&self) -> Result<UsageData> {
         let cookie_header = cookies::find_cookie_header(&["xiaomimimo.com", ".xiaomimimo.com"])
-            .context("No Xiaomi MiMo browser session found. Please log in at platform.xiaomimimo.com")?;
+            .context(
+                "No Xiaomi MiMo browser session found. Please log in at platform.xiaomimimo.com",
+            )?;
 
         let url = std::env::var("MIMO_API_URL")
             .unwrap_or_else(|_| "https://platform.xiaomimimo.com/api/v1/balance".to_string());
@@ -60,7 +62,10 @@ impl Provider for MimoProvider {
             .client
             .get(&url)
             .header("Cookie", cookie_header)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
             .send()
             .await
             .context("Failed to connect to MiMo API")?;
@@ -138,4 +143,3 @@ impl Provider for MimoProvider {
         })
     }
 }
-

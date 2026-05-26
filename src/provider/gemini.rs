@@ -434,10 +434,11 @@ fn find_gemini_oauth_client() -> Option<(String, String)> {
     if let (Ok(id), Ok(secret)) = (
         std::env::var("GEMINI_OAUTH_CLIENT_ID"),
         std::env::var("GEMINI_OAUTH_CLIENT_SECRET"),
-    )
-        && !id.is_empty() && !secret.is_empty() {
-            return Some((id, secret));
-        }
+    ) && !id.is_empty()
+        && !secret.is_empty()
+    {
+        return Some((id, secret));
+    }
 
     let mut roots = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -454,9 +455,10 @@ fn find_gemini_oauth_client() -> Option<(String, String)> {
 
     for root in &roots {
         if let Some(path) = find_file_named(root, "oauth2.js", 8)
-            && let Some(client) = parse_oauth_client_from_file(&path) {
-                return Some(client);
-            }
+            && let Some(client) = parse_oauth_client_from_file(&path)
+        {
+            return Some(client);
+        }
     }
 
     for root in roots {
@@ -479,13 +481,15 @@ fn find_oauth_client_in_js(root: &Path, depth: usize) -> Option<(String, String)
         if path.is_file()
             && path.extension().is_some_and(|ext| ext == "js")
             && path.to_string_lossy().contains("gemini")
-            && let Some(client) = parse_oauth_client_from_file(&path) {
-                return Some(client);
-            }
+            && let Some(client) = parse_oauth_client_from_file(&path)
+        {
+            return Some(client);
+        }
         if path.is_dir()
-            && let Some(client) = find_oauth_client_in_js(&path, depth - 1) {
-                return Some(client);
-            }
+            && let Some(client) = find_oauth_client_in_js(&path, depth - 1)
+        {
+            return Some(client);
+        }
     }
 
     None
@@ -508,9 +512,10 @@ fn find_file_named(root: &Path, file_name: &str, depth: usize) -> Option<PathBuf
             return Some(path);
         }
         if path.is_dir()
-            && let Some(found) = find_file_named(&path, file_name, depth - 1) {
-                return Some(found);
-            }
+            && let Some(found) = find_file_named(&path, file_name, depth - 1)
+        {
+            return Some(found);
+        }
     }
 
     None

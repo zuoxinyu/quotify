@@ -58,6 +58,10 @@ pub struct OpenCodeConfig {
     pub enabled: bool,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub auth_cookie: String,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]

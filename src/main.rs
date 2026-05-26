@@ -146,13 +146,22 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "opencode" => {
-            let api_key = if !config.opencode.api_key.is_empty() {
-                Some(config.opencode.api_key.clone())
-            } else {
+            let workspace_id = if config.opencode.workspace_id.is_empty() {
                 None
+            } else {
+                Some(config.opencode.workspace_id.clone())
             };
+            let auth_cookie = if config.opencode.auth_cookie.is_empty() {
+                None
+            } else {
+                Some(config.opencode.auth_cookie.clone())
+            };
+
             if config.opencode.enabled
-                || api_key.is_some()
+                || workspace_id.is_some()
+                || auth_cookie.is_some()
+                || OpenCodeProvider::has_workspace_hint()
+                || OpenCodeProvider::has_auth_cookie_hint()
                 || dirs::home_dir()
                     .unwrap_or_default()
                     .join(".local")
@@ -160,9 +169,8 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     .join("opencode")
                     .join("auth.json")
                     .exists()
-                || std::env::var("OPENCODE_API_KEY").is_ok()
             {
-                Some(Box::new(OpenCodeProvider::new(api_key)))
+                Some(Box::new(OpenCodeProvider::new(workspace_id, auth_cookie)))
             } else {
                 None
             }
@@ -654,80 +662,82 @@ unsafe extern "system" fn main_window_subclass(
     lparam: LPARAM,
     _id: usize,
     _ref_data: usize,
-) -> LRESULT { unsafe {
-    use windows::Win32::UI::Shell::DefSubclassProc;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
-        WM_DESTROY,
-    };
+) -> LRESULT {
+    unsafe {
+        use windows::Win32::UI::Shell::DefSubclassProc;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
+            WM_DESTROY,
+        };
 
-    match msg {
-        tray::WM_APP_SHOW => {
-            let win_w = 400.0_f32;
-            let win_h = 520.0_f32;
-            let pos = compute_popup_position(win_w, win_h);
+        match msg {
+            tray::WM_APP_SHOW => {
+                let win_w = 400.0_f32;
+                let win_h = 520.0_f32;
+                let pos = compute_popup_position(win_w, win_h);
 
-            use windows::Win32::UI::WindowsAndMessaging::{
-                SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
-            };
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                pos[0] as i32,
-                pos[1] as i32,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
-            );
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
+                };
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    pos[0] as i32,
+                    pos[1] as i32,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                );
 
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
 
-            use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-            let _ = SetFocus(Some(hwnd));
+                use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+                let _ = SetFocus(Some(hwnd));
 
-            if let Some(ctx) = EGUI_CONTEXT.get() {
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                if let Some(ctx) = EGUI_CONTEXT.get() {
+                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                }
+
+                LRESULT(0)
             }
-
-            LRESULT(0)
-        }
-        WM_ACTIVATE => {
-            let active_state = (wparam.0 & 0xFFFF) as u32;
-            if active_state == WA_INACTIVE {
+            WM_ACTIVATE => {
+                let active_state = (wparam.0 & 0xFFFF) as u32;
+                if active_state == WA_INACTIVE {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    if let Some(ctx) = EGUI_CONTEXT.get() {
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
+                    }
+                }
+                DefSubclassProc(hwnd, msg, wparam, lparam)
+            }
+            WM_CLOSE => {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 if let Some(ctx) = EGUI_CONTEXT.get() {
                     ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
                 }
+                LRESULT(0)
             }
-            DefSubclassProc(hwnd, msg, wparam, lparam)
-        }
-        WM_CLOSE => {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            if let Some(ctx) = EGUI_CONTEXT.get() {
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
+            tray::WM_APP_UPDATE_DATA => {
+                if let Some(ctx) = EGUI_CONTEXT.get() {
+                    ctx.request_repaint();
+                }
+                LRESULT(0)
             }
-            LRESULT(0)
-        }
-        tray::WM_APP_UPDATE_DATA => {
-            if let Some(ctx) = EGUI_CONTEXT.get() {
-                ctx.request_repaint();
+            tray::WM_APP_QUIT => {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                LRESULT(0)
             }
-            LRESULT(0)
+            WM_DESTROY => {
+                let _ = windows::Win32::UI::Shell::RemoveWindowSubclass(
+                    hwnd,
+                    Some(main_window_subclass),
+                    1,
+                );
+                DefSubclassProc(hwnd, msg, wparam, lparam)
+            }
+            _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
-        tray::WM_APP_QUIT => {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            let _ = windows::Win32::UI::Shell::RemoveWindowSubclass(
-                hwnd,
-                Some(main_window_subclass),
-                1,
-            );
-            DefSubclassProc(hwnd, msg, wparam, lparam)
-        }
-        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
     }
-}}
+}
