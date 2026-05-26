@@ -263,6 +263,7 @@ impl ClaudeProvider {
         Some((api_key, base_url))
     }
 
+    #[allow(dead_code)]
     fn read_stats_cache(&self) -> Option<Vec<UsageWindow>> {
         let home = dirs::home_dir()?;
         let stats_path = home.join(".claude").join("stats-cache.json");

@@ -7,6 +7,7 @@ use crate::provider::UsageData;
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
+    #[allow(dead_code)]
     pub config: crate::config::AppConfig,
 }
 
@@ -200,7 +201,7 @@ impl eframe::App for QuotifyApp {
                             ("mimo", "MiMo"),
                         ];
 
-                        let card_width = (ui.available_width() - 2.0).min(352.0).max(0.0);
+                        let card_width = (ui.available_width() - 2.0).clamp(0.0, 352.0);
                         for &(name, display_name) in &all_providers {
                             let provider_data = data.iter().find(|d| d.provider == name);
                             render_provider(ui, name, display_name, provider_data, card_width);

@@ -516,7 +516,6 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
         }
 
         // Try to get actual tray icon rect
-        let mut has_icon_rect = false;
         if let Some(&shwnd) = crate::tray::TRAY_HWND.get() {
             let identifier = NOTIFYICONIDENTIFIER {
                 cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
@@ -526,7 +525,6 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
             };
             unsafe {
                 if let Ok(rect) = Shell_NotifyIconGetRect(&identifier) {
-                    has_icon_rect = true;
                     // Use icon center as the reference point instead of arbitrary cursor pos
                     pt.x = rect.left + (rect.right - rect.left) / 2;
                     pt.y = rect.top + (rect.bottom - rect.top) / 2;
@@ -548,12 +546,7 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
                 // Determine taskbar position by comparing work area to monitor area
                 if work.bottom < monitor.bottom {
                     // Taskbar is at the bottom
-                    let mut x = if has_icon_rect {
-                        // Fluent style: Align center to icon, but keep within screen bounds
-                        pt.x as f32 - win_w / 2.0
-                    } else {
-                        pt.x as f32 - win_w / 2.0
-                    };
+                    let mut x = pt.x as f32 - win_w / 2.0;
                     x = x.clamp(
                         work.left as f32 + margin,
                         (work.right as f32 - win_w - margin).max(work.left as f32),
@@ -562,11 +555,7 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
                     return [x, y];
                 } else if work.top > monitor.top {
                     // Taskbar is at the top
-                    let mut x = if has_icon_rect {
-                        pt.x as f32 - win_w / 2.0
-                    } else {
-                        pt.x as f32 - win_w / 2.0
-                    };
+                    let mut x = pt.x as f32 - win_w / 2.0;
                     x = x.clamp(
                         work.left as f32 + margin,
                         (work.right as f32 - win_w - margin).max(work.left as f32),
@@ -576,11 +565,7 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
                 } else if work.left > monitor.left {
                     // Taskbar is on the left
                     let x = work.left as f32 + margin;
-                    let mut y = if has_icon_rect {
-                        pt.y as f32 - win_h / 2.0
-                    } else {
-                        pt.y as f32 - win_h / 2.0
-                    };
+                    let mut y = pt.y as f32 - win_h / 2.0;
                     y = y.clamp(
                         work.top as f32 + margin,
                         (work.bottom as f32 - win_h - margin).max(work.top as f32),
@@ -589,11 +574,7 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
                 } else if work.right < monitor.right {
                     // Taskbar is on the right
                     let x = work.right as f32 - win_w - margin;
-                    let mut y = if has_icon_rect {
-                        pt.y as f32 - win_h / 2.0
-                    } else {
-                        pt.y as f32 - win_h / 2.0
-                    };
+                    let mut y = pt.y as f32 - win_h / 2.0;
                     y = y.clamp(
                         work.top as f32 + margin,
                         (work.bottom as f32 - win_h - margin).max(work.top as f32),

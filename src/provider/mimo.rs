@@ -5,6 +5,7 @@ use super::{CreditsInfo, Provider, UsageData, UsageWindow};
 use crate::cookies;
 
 pub struct MimoProvider {
+    #[allow(dead_code)]
     api_key: String,
     client: reqwest::Client,
 }

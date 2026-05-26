@@ -179,6 +179,7 @@ const FONT_3X5: &[[[u8; 3]; 5]] = &[
     [[1, 1, 1], [1, 0, 1], [1, 1, 1], [0, 0, 1], [1, 1, 1]], // 9
 ];
 
+#[allow(clippy::needless_range_loop)]
 fn draw_text_centered(rgba: &mut [u8], size: u32, text: &str) {
     let chars: Vec<u8> = text.bytes().filter(|b| b.is_ascii_digit()).collect();
     let is_max = text.starts_with('M');
@@ -247,6 +248,7 @@ fn draw_text_centered(rgba: &mut [u8], size: u32, text: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn set_pixel(rgba: &mut [u8], size: u32, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
     if x >= 0 && x < size as i32 && y >= 0 && y < size as i32 {
         let idx = ((y as u32 * size + x as u32) * 4) as usize;

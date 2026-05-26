@@ -38,6 +38,7 @@ pub struct UsageData {
 }
 
 impl UsageData {
+    #[allow(dead_code)]
     pub fn max_used_percent(&self) -> f64 {
         self.windows
             .iter()

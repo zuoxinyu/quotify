@@ -42,6 +42,7 @@ struct CodexUsageData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CodexRateLimits {
     #[serde(default)]
     primary: Option<CodexRateWindow>,
@@ -50,6 +51,7 @@ struct CodexRateLimits {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CodexRateWindow {
     used_percent: Option<f64>,
     resets_at: Option<String>,
@@ -96,6 +98,7 @@ impl CodexProvider {
             .context("No access_token found in Codex auth file")
     }
 
+    #[allow(dead_code)]
     fn parse_session_files(&self) -> Result<Vec<UsageWindow>> {
         let home = dirs::home_dir().context("Cannot find home directory")?;
         let sessions_dir = home.join(".codex").join("sessions");
@@ -113,7 +116,7 @@ impl CodexProvider {
             Ok(e) => e,
             Err(_) => return Ok(windows),
         };
-        for entry in entries.flatten() {
+        for entry in entries.map_while(Result::ok) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
@@ -122,7 +125,7 @@ impl CodexProvider {
             if let Ok(file) = std::fs::File::open(&path) {
                 use std::io::{BufRead, BufReader};
                 let reader = BufReader::new(file);
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
                         && json.get("type").and_then(|v| v.as_str()) == Some("token_count")
                         && let Some(ts) = json.get("timestamp").and_then(|v| v.as_i64())
