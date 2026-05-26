@@ -42,7 +42,8 @@ impl eframe::App for QuotifyApp {
         // but ONLY if the window is active/focused. When the window loses focus,
         // it hides itself. If we request repaint while hidden, winit's swapchain
         // will instantly fail and cause a 100% CPU busy loop trying to VSync.
-        if ctx.input(|i| i.focused) {
+        let is_visible = crate::tray::WINDOW_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
+        if is_visible && ctx.input(|i| i.focused) {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
@@ -140,22 +141,18 @@ impl eframe::App for QuotifyApp {
 
         ctx.set_visuals(visuals);
 
-        // Semi-transparent popup panel with rounded corners and subtle border
+        // Semi-transparent popup panel to let native Mica show through.
+        // We let Windows DWM handle the window rounded corners and native border/shadow,
+        // avoiding drawing a second rounded border in egui to prevent mismatched curvatures.
         let panel_bg = if is_dark {
-            egui::Color32::from_rgba_premultiplied(32, 32, 32, 200)
+            egui::Color32::from_rgba_premultiplied(20, 20, 20, 30)
         } else {
-            egui::Color32::from_rgba_premultiplied(243, 243, 243, 200)
-        };
-        let border_color = if is_dark {
-            egui::Color32::from_rgba_premultiplied(80, 80, 80, 140)
-        } else {
-            egui::Color32::from_rgba_premultiplied(200, 200, 200, 180)
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)
         };
 
         let popup_frame = egui::Frame::NONE
             .fill(panel_bg)
-            .stroke(egui::Stroke::new(1.0, border_color))
-            .corner_radius(14)
+            .corner_radius(12)
             .inner_margin(12)
             .outer_margin(0);
 
@@ -203,9 +200,10 @@ impl eframe::App for QuotifyApp {
                             ("mimo", "MiMo"),
                         ];
 
+                        let card_width = (ui.available_width() - 2.0).min(352.0).max(0.0);
                         for &(name, display_name) in &all_providers {
                             let provider_data = data.iter().find(|d| d.provider == name);
-                            render_provider(ui, name, display_name, provider_data);
+                            render_provider(ui, name, display_name, provider_data, card_width);
                             ui.add_space(6.0);
                         }
                     });
@@ -218,6 +216,7 @@ fn render_provider(
     _provider_name: &str,
     provider_display_name: &str,
     data: Option<&UsageData>,
+    card_width: f32,
 ) {
     let status = match data {
         Some(d) if d.error.is_some() => ProviderStatus::Error,
@@ -238,130 +237,181 @@ fn render_provider(
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(10, 8));
 
-    card_frame.show(ui, |ui| {
-        // Header Row
-        ui.horizontal(|ui| {
-            // Status Dot
-            let dot_color = if is_dark {
-                match status {
-                    ProviderStatus::Active => egui::Color32::from_rgb(108, 203, 95), // Fluent Green
-                    ProviderStatus::Error => egui::Color32::from_rgb(255, 108, 108), // Fluent Red
-                    ProviderStatus::Disabled => egui::Color32::from_rgb(161, 161, 161), // Fluent Gray
-                }
-            } else {
-                match status {
-                    ProviderStatus::Active => egui::Color32::from_rgb(16, 124, 65), // Fluent Green (Darker)
-                    ProviderStatus::Error => egui::Color32::from_rgb(196, 43, 28), // Fluent Red (Darker)
-                    ProviderStatus::Disabled => egui::Color32::from_rgb(118, 118, 118), // Fluent Gray (Darker)
-                }
-            };
-            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-            ui.painter()
-                .circle_filled(dot_rect.center(), 4.0, dot_color);
-            ui.add_space(6.0);
-
-            // Title
-            ui.label(
-                egui::RichText::new(provider_display_name)
-                    .strong()
-                    .size(13.5),
-            );
-            ui.add_space(6.0);
-
-            // Fluent-styled Badging (bordered plates with soft tints)
-            let (status_text, bg_color, border_color, fg_color) = if is_dark {
-                match status {
-                    ProviderStatus::Active => (
-                        "ACTIVE",
-                        egui::Color32::from_rgb(29, 45, 36),
-                        egui::Color32::from_rgb(108, 203, 95),
-                        egui::Color32::from_rgb(108, 203, 95),
-                    ),
-                    ProviderStatus::Error => (
-                        "ERROR",
-                        egui::Color32::from_rgb(62, 30, 30),
-                        egui::Color32::from_rgb(255, 108, 108),
-                        egui::Color32::from_rgb(255, 108, 108),
-                    ),
-                    ProviderStatus::Disabled => (
-                        "OFFLINE",
-                        egui::Color32::from_rgb(40, 40, 40),
-                        egui::Color32::from_rgb(80, 80, 80),
-                        egui::Color32::from_rgb(161, 161, 161),
-                    ),
-                }
-            } else {
-                match status {
-                    ProviderStatus::Active => (
-                        "ACTIVE",
-                        egui::Color32::from_rgb(225, 244, 229),
-                        egui::Color32::from_rgb(16, 124, 65),
-                        egui::Color32::from_rgb(16, 124, 65),
-                    ),
-                    ProviderStatus::Error => (
-                        "ERROR",
-                        egui::Color32::from_rgb(253, 232, 232),
-                        egui::Color32::from_rgb(196, 43, 28),
-                        egui::Color32::from_rgb(196, 43, 28),
-                    ),
-                    ProviderStatus::Disabled => (
-                        "OFFLINE",
-                        egui::Color32::from_rgb(243, 243, 243),
-                        egui::Color32::from_rgb(204, 204, 204),
-                        egui::Color32::from_rgb(118, 118, 118),
-                    ),
-                }
-            };
-
-            let badge_frame = egui::Frame::NONE
-                .fill(bg_color)
-                .stroke(egui::Stroke::new(1.0, border_color))
-                .corner_radius(4)
-                .inner_margin(egui::Margin::symmetric(5, 2));
-            badge_frame.show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(status_text)
-                        .strong()
-                        .size(8.0)
-                        .color(fg_color),
+    let left_indent = ((ui.available_width() - card_width) / 2.0).max(0.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(left_indent);
+        ui.allocate_ui_with_layout(
+            egui::vec2(card_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_width(card_width);
+                ui.set_max_width(card_width);
+                render_provider_card(
+                    ui,
+                    provider_display_name,
+                    status,
+                    credits,
+                    error_msg,
+                    windows,
+                    is_dark,
+                    card_frame,
+                    card_width,
                 );
-            });
+            },
+        );
+    });
+}
 
-            // Credits Badge (Windows 11 accent tint badge)
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(c) = credits {
-                    let credit_text = format!("{:.2} {}", c.balance, c.currency);
+#[allow(clippy::too_many_arguments)]
+fn render_provider_card(
+    ui: &mut egui::Ui,
+    provider_display_name: &str,
+    status: ProviderStatus,
+    credits: Option<&crate::provider::CreditsInfo>,
+    error_msg: Option<&str>,
+    windows: &[crate::provider::UsageWindow],
+    is_dark: bool,
+    card_frame: egui::Frame,
+    card_width: f32,
+) {
+    let response = card_frame.show(ui, |ui| {
+        // Enforce uniform width across all cards based on parent width minus horizontal margins (cast i8 margins to f32)
+        let margin_x = (card_frame.inner_margin.left
+            + card_frame.inner_margin.right
+            + card_frame.outer_margin.left
+            + card_frame.outer_margin.right) as f32;
+        let content_width = (card_width - margin_x).max(0.0);
+        ui.set_min_width(content_width);
+        ui.set_max_width(content_width);
+        // Header Row - allocate the full content width to ensure all cards are identical in size
+        ui.allocate_ui_with_layout(
+            egui::vec2(content_width, 24.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                // Status Dot
+                let dot_color = if is_dark {
+                    match status {
+                        ProviderStatus::Active => egui::Color32::from_rgb(108, 203, 95), // Fluent Green
+                        ProviderStatus::Error => egui::Color32::from_rgb(255, 108, 108), // Fluent Red
+                        ProviderStatus::Disabled => egui::Color32::from_rgb(161, 161, 161), // Fluent Gray
+                    }
+                } else {
+                    match status {
+                        ProviderStatus::Active => egui::Color32::from_rgb(16, 124, 65), // Fluent Green (Darker)
+                        ProviderStatus::Error => egui::Color32::from_rgb(196, 43, 28), // Fluent Red (Darker)
+                        ProviderStatus::Disabled => egui::Color32::from_rgb(118, 118, 118), // Fluent Gray (Darker)
+                    }
+                };
+                let (dot_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(dot_rect.center(), 4.0, dot_color);
+                ui.add_space(6.0);
 
-                    let (credits_bg, credits_border, credits_fg) = if is_dark {
-                        (
-                            egui::Color32::from_rgb(28, 46, 60),
-                            egui::Color32::from_rgb(96, 205, 255), // Fluent Accent Blue
-                            egui::Color32::from_rgb(96, 205, 255),
-                        )
-                    } else {
-                        (
-                            egui::Color32::from_rgb(224, 244, 255),
-                            egui::Color32::from_rgb(0, 120, 212), // Fluent Accent Blue (Light)
-                            egui::Color32::from_rgb(0, 120, 212),
-                        )
-                    };
+                // Title
+                ui.label(
+                    egui::RichText::new(provider_display_name)
+                        .strong()
+                        .size(13.5),
+                );
+                ui.add_space(6.0);
 
-                    let credits_frame = egui::Frame::NONE
-                        .fill(credits_bg)
-                        .stroke(egui::Stroke::new(1.0, credits_border))
-                        .corner_radius(4)
-                        .inner_margin(egui::Margin::symmetric(8, 3));
-                    credits_frame.show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(credit_text)
-                                .strong()
-                                .size(10.0)
-                                .color(credits_fg),
-                        );
-                    });
-                }
-            });
-        });
+                // Fluent-styled Badging (bordered plates with soft tints)
+                let (status_text, bg_color, border_color, fg_color) = if is_dark {
+                    match status {
+                        ProviderStatus::Active => (
+                            "ACTIVE",
+                            egui::Color32::from_rgb(29, 45, 36),
+                            egui::Color32::from_rgb(108, 203, 95),
+                            egui::Color32::from_rgb(108, 203, 95),
+                        ),
+                        ProviderStatus::Error => (
+                            "ERROR",
+                            egui::Color32::from_rgb(62, 30, 30),
+                            egui::Color32::from_rgb(255, 108, 108),
+                            egui::Color32::from_rgb(255, 108, 108),
+                        ),
+                        ProviderStatus::Disabled => (
+                            "OFFLINE",
+                            egui::Color32::from_rgb(40, 40, 40),
+                            egui::Color32::from_rgb(80, 80, 80),
+                            egui::Color32::from_rgb(161, 161, 161),
+                        ),
+                    }
+                } else {
+                    match status {
+                        ProviderStatus::Active => (
+                            "ACTIVE",
+                            egui::Color32::from_rgb(225, 244, 229),
+                            egui::Color32::from_rgb(16, 124, 65),
+                            egui::Color32::from_rgb(16, 124, 65),
+                        ),
+                        ProviderStatus::Error => (
+                            "ERROR",
+                            egui::Color32::from_rgb(253, 232, 232),
+                            egui::Color32::from_rgb(196, 43, 28),
+                            egui::Color32::from_rgb(196, 43, 28),
+                        ),
+                        ProviderStatus::Disabled => (
+                            "OFFLINE",
+                            egui::Color32::from_rgb(243, 243, 243),
+                            egui::Color32::from_rgb(204, 204, 204),
+                            egui::Color32::from_rgb(118, 118, 118),
+                        ),
+                    }
+                };
+
+                let badge_frame = egui::Frame::NONE
+                    .fill(bg_color)
+                    .stroke(egui::Stroke::new(1.0, border_color))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(5, 2));
+                badge_frame.show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(status_text)
+                            .strong()
+                            .size(8.0)
+                            .color(fg_color),
+                    );
+                });
+
+                // Credits Badge (Windows 11 accent tint badge)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(c) = credits {
+                        let credit_text = format!("{:.2} {}", c.balance, c.currency);
+
+                        let (credits_bg, credits_border, credits_fg) = if is_dark {
+                            (
+                                egui::Color32::from_rgb(28, 46, 60),
+                                egui::Color32::from_rgb(96, 205, 255), // Fluent Accent Blue
+                                egui::Color32::from_rgb(96, 205, 255),
+                            )
+                        } else {
+                            (
+                                egui::Color32::from_rgb(224, 244, 255),
+                                egui::Color32::from_rgb(0, 120, 212), // Fluent Accent Blue (Light)
+                                egui::Color32::from_rgb(0, 120, 212),
+                            )
+                        };
+
+                        let credits_frame = egui::Frame::NONE
+                            .fill(credits_bg)
+                            .stroke(egui::Stroke::new(1.0, credits_border))
+                            .corner_radius(4)
+                            .inner_margin(egui::Margin::symmetric(8, 3));
+                        credits_frame.show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(credit_text)
+                                    .strong()
+                                    .size(10.0)
+                                    .color(credits_fg),
+                            );
+                        });
+                    }
+                });
+            },
+        );
 
         match status {
             ProviderStatus::Disabled => {}
@@ -482,6 +532,10 @@ fn render_provider(
             }
         }
     });
+
+    if response.response.rect.width() < card_width {
+        ui.allocate_space(egui::vec2(card_width, 0.0));
+    }
 }
 
 fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {

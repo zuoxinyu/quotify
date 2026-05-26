@@ -26,9 +26,28 @@ pub const IDM_REFRESH: usize = 2;
 pub const IDM_QUIT: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SendHWND(pub HWND);
+pub struct SendHWND(HWND);
 unsafe impl Send for SendHWND {}
 unsafe impl Sync for SendHWND {}
+
+impl SendHWND {
+    pub fn new(hwnd: HWND) -> Self {
+        Self(hwnd)
+    }
+
+    pub fn raw(&self) -> HWND {
+        self.0
+    }
+
+    pub fn post_message(
+        &self,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> windows::core::Result<()> {
+        unsafe { PostMessageW(Some(self.0), msg, wparam, lparam) }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SendHICON(pub HICON);
@@ -38,6 +57,7 @@ unsafe impl Sync for SendHICON {}
 pub static MAIN_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static TRAY_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
+pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
 static CURRENT_HICON: Mutex<Option<SendHICON>> = Mutex::new(None);
 
 unsafe extern "system" fn tray_wnd_proc(
@@ -66,7 +86,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 match event {
                     WM_LBUTTONUP => {
                         if let Some(&shwnd) = MAIN_HWND.get() {
-                            let _ = PostMessageW(Some(shwnd.0), WM_APP_SHOW, WPARAM(0), LPARAM(0));
+                            let _ = shwnd.post_message(WM_APP_SHOW, WPARAM(0), LPARAM(0));
                         }
                     }
                     WM_RBUTTONUP => {
@@ -113,7 +133,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 match id {
                     IDM_SHOW => {
                         if let Some(&shwnd) = MAIN_HWND.get() {
-                            let _ = PostMessageW(Some(shwnd.0), WM_APP_SHOW, WPARAM(0), LPARAM(0));
+                            let _ = shwnd.post_message(WM_APP_SHOW, WPARAM(0), LPARAM(0));
                         }
                     }
                     IDM_REFRESH => {
@@ -121,7 +141,7 @@ unsafe extern "system" fn tray_wnd_proc(
                     }
                     IDM_QUIT => {
                         if let Some(&shwnd) = MAIN_HWND.get() {
-                            let _ = PostMessageW(Some(shwnd.0), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+                            let _ = shwnd.post_message(WM_APP_QUIT, WPARAM(0), LPARAM(0));
                         }
                         let _ = DestroyWindow(hwnd);
                     }
@@ -247,7 +267,7 @@ unsafe impl Sync for TrayController {}
 impl TrayController {
     pub fn new() -> windows::core::Result<Self> {
         let hwnd = create_tray_window()?;
-        let _ = TRAY_HWND.set(SendHWND(hwnd));
+        let _ = TRAY_HWND.set(SendHWND::new(hwnd));
         Ok(Self { hwnd })
     }
 

@@ -40,6 +40,7 @@ egui_extras = "0.31"
 winit = { version = "0.30", default-features = false }
 image = { version = "0.25", features = ["png"] }
 parking_lot = "0.12"
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level = "z"

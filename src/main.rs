@@ -21,7 +21,6 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, TranslateMessage,
 };
-use windows::core::w;
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
@@ -392,14 +391,7 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
 
                 // Notify the main window to redraw with new data
                 if let Some(&main_hwnd) = tray::MAIN_HWND.get() {
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                            Some(main_hwnd.0),
-                            tray::WM_APP_UPDATE_DATA,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                    }
+                    let _ = main_hwnd.post_message(tray::WM_APP_UPDATE_DATA, WPARAM(0), LPARAM(0));
                 }
                 last_fetch = std::time::Instant::now(); // Update last_fetch here after a successful run
             }
@@ -427,7 +419,6 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
                 .with_resizable(true)
                 .with_decorations(false)
                 .with_taskbar(false)
-                .with_always_on_top()
                 .with_transparent(true)
                 .with_visible(false),
             event_loop_builder: Some(Box::new(|builder| {
@@ -466,21 +457,18 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
                     cc.egui_ctx.set_fonts(fonts);
                 }
 
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 use windows::Win32::UI::Shell::SetWindowSubclass;
-                use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
-                let title = w!("Quotify - AI Quota Monitor");
-                let mut hwnd = HWND(std::ptr::null_mut());
 
-                for _ in 0..20 {
-                    hwnd = unsafe { FindWindowW(None, title).unwrap_or(HWND::default()) };
-                    if !hwnd.0.is_null() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                let mut hwnd = HWND(std::ptr::null_mut());
+                if let Ok(RawWindowHandle::Win32(win32_handle)) =
+                    cc.window_handle().map(|h| h.as_raw())
+                {
+                    hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
                 }
 
                 if !hwnd.0.is_null() {
-                    let _ = tray::MAIN_HWND.set(tray::SendHWND(hwnd));
+                    let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
                     apply_mica_backdrop(hwnd);
                     apply_rounded_window_region(hwnd);
                     unsafe {
@@ -532,7 +520,7 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
         if let Some(&shwnd) = crate::tray::TRAY_HWND.get() {
             let identifier = NOTIFYICONIDENTIFIER {
                 cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-                hWnd: shwnd.0,
+                hWnd: shwnd.raw(),
                 uID: 1,
                 guidItem: Default::default(),
             };
@@ -660,26 +648,19 @@ fn apply_mica_backdrop(hwnd: HWND) {
 fn apply_rounded_window_region(hwnd: HWND) {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
-
-        let Some((width, height)) = actual_window_size(hwnd) else {
-            return;
+        use windows::Win32::Graphics::Dwm::{
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
         };
 
-        let diameter = 28;
-        unsafe {
-            let region = CreateRoundRectRgn(
-                0,
-                0,
-                width.round() as i32 + 1,
-                height.round() as i32 + 1,
-                diameter,
-                diameter,
-            );
-
-            if !region.0.is_null() {
-                // On success, SetWindowRgn takes ownership of the region handle.
-                let _ = SetWindowRgn(hwnd, Some(region), true);
+        if !hwnd.0.is_null() {
+            let preference = DWMWCP_ROUND.0;
+            unsafe {
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &preference as *const _ as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
             }
         }
     }
@@ -801,45 +782,83 @@ fn actual_window_size(hwnd: HWND) -> Option<(f32, f32)> {
     }
 }
 
+static CURRENT_ANIMATION_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn show_popup_window(hwnd: HWND, final_pos: [f32; 2]) {
     #[cfg(target_os = "windows")]
-    unsafe {
+    {
         use windows::Win32::UI::WindowsAndMessaging::{
             SW_SHOW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
         };
 
+        tray::WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+        let (_win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
         let anchor_y = popup_anchor_y().unwrap_or(final_pos[1] + 1.0);
         let start_y = if anchor_y < final_pos[1] {
-            final_pos[1] - 28.0
+            final_pos[1] - win_h
         } else {
-            final_pos[1] + 28.0
+            final_pos[1] + win_h
         };
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            final_pos[0] as i32,
-            start_y as i32,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER,
-        );
-        let _ = ShowWindow(hwnd, SW_SHOW);
-
-        for frame in 1..=8 {
-            let t = frame as f32 / 8.0;
-            let eased = 1.0 - (1.0 - t).powi(3);
-            let y = start_y + (final_pos[1] - start_y) * eased;
+        unsafe {
             let _ = SetWindowPos(
                 hwnd,
                 None,
                 final_pos[0] as i32,
-                y as i32,
+                start_y as i32,
                 0,
                 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                SWP_NOSIZE | SWP_NOZORDER,
             );
-            std::thread::sleep(Duration::from_millis(8));
+            let _ = ShowWindow(hwnd, SW_SHOW);
         }
+
+        let send_hwnd = tray::SendHWND::new(hwnd);
+        let anim_id = CURRENT_ANIMATION_ID.fetch_add(1, Ordering::SeqCst) + 1;
+
+        std::thread::spawn(move || {
+            let hwnd = send_hwnd.raw();
+            let steps = 18; // Butter-smooth 180ms animation
+            for frame in 1..=steps {
+                if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
+                    return; // Aborted
+                }
+                let t = frame as f32 / steps as f32;
+                let eased = 1.0 - (1.0 - t).powi(3); // Decelerating ease-out curve
+                let y = start_y + (final_pos[1] - start_y) * eased;
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        final_pos[0] as i32,
+                        y as i32,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
+                return; // Aborted
+            }
+
+            // Show animation finished, make the window topmost (always-on-top)
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+                };
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        });
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -858,7 +877,7 @@ fn popup_anchor_y() -> Option<f32> {
         if let Some(&shwnd) = crate::tray::TRAY_HWND.get() {
             let identifier = NOTIFYICONIDENTIFIER {
                 cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-                hWnd: shwnd.0,
+                hWnd: shwnd.raw(),
                 uID: 1,
                 guidItem: Default::default(),
             };
@@ -897,7 +916,7 @@ fn is_pointer_on_tray_icon() -> bool {
 
         let identifier = NOTIFYICONIDENTIFIER {
             cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-            hWnd: shwnd.0,
+            hWnd: shwnd.raw(),
             uID: 1,
             guidItem: Default::default(),
         };
@@ -928,13 +947,84 @@ fn is_pointer_on_tray_icon() -> bool {
 
 fn hide_popup_window(hwnd: HWND) {
     #[cfg(target_os = "windows")]
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SW_HIDE, ShowWindow};
         *inactive_guard().lock() = None;
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        if let Some(ctx) = EGUI_CONTEXT.get() {
-            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
+        tray::WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return;
+            }
         }
+
+        // BEFORE the slide-down animation starts, make it standard (NOTOPMOST) so it slides behind the taskbar
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+            };
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+
+        let send_hwnd = tray::SendHWND::new(hwnd);
+        let anim_id = CURRENT_ANIMATION_ID.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
+        let final_pos = compute_popup_position(win_w, win_h);
+        let anchor_y = popup_anchor_y().unwrap_or(final_pos[1] + 1.0);
+        let start_y = if anchor_y < final_pos[1] {
+            final_pos[1] - win_h
+        } else {
+            final_pos[1] + win_h
+        };
+
+        std::thread::spawn(move || {
+            let hwnd = send_hwnd.raw();
+            use windows::Win32::UI::WindowsAndMessaging::{SWP_NOSIZE, SWP_NOZORDER, SetWindowPos};
+
+            let steps = 15; // Smooth 150ms animation
+            for frame in 1..=steps {
+                if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
+                    return; // Aborted by a new show/hide animation
+                }
+                let t = frame as f32 / steps as f32;
+                // Easing curve: ease-in (starts slow, speeds up towards taskbar)
+                let eased = t.powi(3);
+                let y = final_pos[1] + (start_y - final_pos[1]) * eased;
+
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        final_pos[0] as i32,
+                        y as i32,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER,
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
+                return; // Aborted
+            }
+
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            if let Some(ctx) = EGUI_CONTEXT.get() {
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
+            }
+        });
     }
 
     #[cfg(not(target_os = "windows"))]

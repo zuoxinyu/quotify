@@ -3408,6 +3408,7 @@ dependencies = [
  "egui_extras",
  "image",
  "parking_lot",
+ "raw-window-handle",
  "regex",
  "reqwest",
  "rusqlite",

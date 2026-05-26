@@ -38,7 +38,6 @@ pub struct UsageData {
 }
 
 impl UsageData {
-    #[expect(dead_code)]
     pub fn max_used_percent(&self) -> f64 {
         self.windows
             .iter()
@@ -46,7 +45,6 @@ impl UsageData {
             .fold(0.0f64, f64::max)
     }
 
-    #[expect(dead_code)]
     pub fn has_data(&self) -> bool {
         !self.windows.is_empty()
             && self

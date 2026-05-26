@@ -41,11 +41,7 @@ impl AntigravityProvider {
     }
 
     fn oauth_credentials_path() -> Option<PathBuf> {
-        Some(
-            dirs::home_dir()?
-                .join(".gemini")
-                .join("oauth_creds.json"),
-        )
+        Some(dirs::home_dir()?.join(".gemini").join("oauth_creds.json"))
     }
 
     fn read_oauth_credentials() -> Option<AntigravityCredentials> {
