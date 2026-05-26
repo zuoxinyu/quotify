@@ -7,13 +7,16 @@ mod tray;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use provider::{
     Provider, UsageData, antigravity::AntigravityProvider, claude::ClaudeProvider,
     codex::CodexProvider, deepseek::DeepSeekProvider, gemini::GeminiProvider, mimo::MimoProvider,
     opencode::OpenCodeProvider,
 };
-use std::sync::{Arc, OnceLock, atomic::Ordering};
+use std::{
+    sync::{Arc, OnceLock, atomic::Ordering},
+    time::{Duration, Instant},
+};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, TranslateMessage,
@@ -22,6 +25,20 @@ use windows::core::w;
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
+static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+pub const PROVIDER_ORDER: [&str; 7] = [
+    "codex",
+    "opencode",
+    "claude",
+    "gemini",
+    "antigravity",
+    "deepseek",
+    "mimo",
+];
+
+fn inactive_guard() -> &'static Mutex<Option<Instant>> {
+    IGNORE_INACTIVE_UNTIL.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Parser)]
 #[command(
@@ -194,54 +211,21 @@ async fn fetch_all_providers(
     data: Arc<RwLock<Vec<UsageData>>>,
     last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
 ) {
-    let all_providers = [
-        "deepseek",
-        "claude",
-        "codex",
-        "gemini",
-        "antigravity",
-        "opencode",
-        "mimo",
-    ];
+    let all_providers = PROVIDER_ORDER;
 
-    let active: Vec<String> = all_providers
+    let provider_names: Vec<String> = all_providers
         .iter()
         .filter(|name| create_provider(name, config).is_some())
         .map(|s| s.to_string())
         .collect();
 
-    let provider_names = if active.is_empty() {
+    let provider_names = if provider_names.is_empty() {
         all_providers.iter().map(|s| s.to_string()).collect()
     } else {
-        active
+        provider_names
     };
 
-    let mut results = Vec::new();
-
-    for name in &provider_names {
-        if let Some(provider) = create_provider(name, config) {
-            match provider.fetch_usage().await {
-                Ok(d) => results.push(d),
-                Err(e) => {
-                    tracing::error!("Failed to fetch {}: {}", name, e);
-                    results.push(UsageData {
-                        provider: name.clone(),
-                        windows: vec![provider::UsageWindow {
-                            label: "Error".to_string(),
-                            used_percent: 0.0,
-                            limit: None,
-                            used: None,
-                            unit: None,
-                            resets_at: None,
-                        }],
-                        credits: None,
-                        fetched_at: chrono::Utc::now(),
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
-        }
-    }
+    let results = fetch_providers(config, provider_names).await;
 
     *data.write() = results;
     *last_refresh.write() = chrono::Utc::now();
@@ -285,15 +269,7 @@ fn main() -> Result<()> {
 }
 
 async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -> Result<()> {
-    let all_providers = [
-        "deepseek",
-        "claude",
-        "codex",
-        "gemini",
-        "antigravity",
-        "opencode",
-        "mimo",
-    ];
+    let all_providers = PROVIDER_ORDER;
 
     let provider_names = providers.unwrap_or_else(|| {
         let active: Vec<String> = all_providers
@@ -309,37 +285,62 @@ async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -
         }
     });
 
-    let mut results = Vec::new();
-
-    for name in &provider_names {
-        if let Some(provider) = create_provider(name, config) {
-            match provider.fetch_usage().await {
-                Ok(data) => results.push(data),
-                Err(e) => {
-                    tracing::error!("Failed to fetch {}: {}", name, e);
-                    results.push(UsageData {
-                        provider: name.clone(),
-                        windows: vec![provider::UsageWindow {
-                            label: "Error".to_string(),
-                            used_percent: 0.0,
-                            limit: None,
-                            used: None,
-                            unit: None,
-                            resets_at: None,
-                        }],
-                        credits: None,
-                        fetched_at: chrono::Utc::now(),
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
-        }
-    }
+    let results = fetch_providers(config, provider_names).await;
 
     let json = serde_json::to_string_pretty(&results)?;
     println!("{json}");
 
     Ok(())
+}
+
+async fn fetch_providers(
+    config: &config::AppConfig,
+    provider_names: Vec<String>,
+) -> Vec<UsageData> {
+    let mut handles = Vec::new();
+
+    for name in provider_names {
+        if let Some(provider) = create_provider(&name, config) {
+            handles.push((
+                name.clone(),
+                tokio::spawn(async move { provider.fetch_usage().await }),
+            ));
+        }
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for (name, handle) in handles {
+        match handle.await {
+            Ok(Ok(data)) => results.push(data),
+            Ok(Err(e)) => {
+                tracing::error!("Failed to fetch {}: {}", name, e);
+                results.push(provider_error_data(name, e.to_string()));
+            }
+            Err(e) => {
+                tracing::error!("Failed to join {} fetch task: {}", name, e);
+                results.push(provider_error_data(name, e.to_string()));
+            }
+        }
+    }
+
+    results
+}
+
+fn provider_error_data(provider: String, error: String) -> UsageData {
+    UsageData {
+        provider,
+        windows: vec![provider::UsageWindow {
+            label: "Error".to_string(),
+            used_percent: 0.0,
+            limit: None,
+            used: None,
+            unit: None,
+            resets_at: None,
+        }],
+        credits: None,
+        fetched_at: chrono::Utc::now(),
+        error: Some(error),
+    }
 }
 
 fn run_tray(config: config::AppConfig) -> Result<()> {
@@ -423,7 +424,7 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
                 .with_inner_size([win_w, win_h])
                 .with_position(eframe::egui::pos2(pos[0], pos[1]))
                 .with_title("Quotify - AI Quota Monitor")
-                .with_resizable(false)
+                .with_resizable(true)
                 .with_decorations(false)
                 .with_taskbar(false)
                 .with_always_on_top()
@@ -481,6 +482,7 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
                 if !hwnd.0.is_null() {
                     let _ = tray::MAIN_HWND.set(tray::SendHWND(hwnd));
                     apply_mica_backdrop(hwnd);
+                    apply_rounded_window_region(hwnd);
                     unsafe {
                         let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
                         // Initially hide the window so it only pops up on click
@@ -553,7 +555,7 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
             if GetMonitorInfoW(hmon, &mut mi).as_bool() {
                 let work = mi.rcWork;
                 let monitor = mi.rcMonitor;
-                let margin = 12.0;
+                let margin = 20.0;
 
                 // Determine taskbar position by comparing work area to monitor area
                 if work.bottom < monitor.bottom {
@@ -655,6 +657,39 @@ fn apply_mica_backdrop(hwnd: HWND) {
     }
 }
 
+fn apply_rounded_window_region(hwnd: HWND) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+
+        let Some((width, height)) = actual_window_size(hwnd) else {
+            return;
+        };
+
+        let diameter = 28;
+        unsafe {
+            let region = CreateRoundRectRgn(
+                0,
+                0,
+                width.round() as i32 + 1,
+                height.round() as i32 + 1,
+                diameter,
+                diameter,
+            );
+
+            if !region.0.is_null() {
+                // On success, SetWindowRgn takes ownership of the region handle.
+                let _ = SetWindowRgn(hwnd, Some(region), true);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+    }
+}
+
 unsafe extern "system" fn main_window_subclass(
     hwnd: HWND,
     msg: u32,
@@ -666,30 +701,22 @@ unsafe extern "system" fn main_window_subclass(
     unsafe {
         use windows::Win32::UI::Shell::DefSubclassProc;
         use windows::Win32::UI::WindowsAndMessaging::{
-            SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
-            WM_DESTROY,
+            IsWindowVisible, SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
+            WM_CLOSE, WM_DESTROY, WM_SIZE,
         };
 
         match msg {
             tray::WM_APP_SHOW => {
-                let win_w = 400.0_f32;
-                let win_h = 520.0_f32;
+                if IsWindowVisible(hwnd).as_bool() {
+                    hide_popup_window(hwnd);
+                    return LRESULT(0);
+                }
+
+                let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
                 let pos = compute_popup_position(win_w, win_h);
-
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
-                };
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    pos[0] as i32,
-                    pos[1] as i32,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
-                );
-
-                let _ = ShowWindow(hwnd, SW_SHOW);
+                *inactive_guard().lock() = Some(Instant::now() + Duration::from_millis(350));
+                apply_rounded_window_region(hwnd);
+                show_popup_window(hwnd, pos);
                 let _ = SetForegroundWindow(hwnd);
 
                 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
@@ -704,18 +731,17 @@ unsafe extern "system" fn main_window_subclass(
             WM_ACTIVATE => {
                 let active_state = (wparam.0 & 0xFFFF) as u32;
                 if active_state == WA_INACTIVE {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                    if let Some(ctx) = EGUI_CONTEXT.get() {
-                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
+                    let ignore_inactive = inactive_guard()
+                        .lock()
+                        .is_some_and(|until| Instant::now() < until);
+                    if !ignore_inactive && !is_pointer_on_tray_icon() {
+                        hide_popup_window(hwnd);
                     }
                 }
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             WM_CLOSE => {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                if let Some(ctx) = EGUI_CONTEXT.get() {
-                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
-                }
+                hide_popup_window(hwnd);
                 LRESULT(0)
             }
             tray::WM_APP_UPDATE_DATA => {
@@ -723,6 +749,10 @@ unsafe extern "system" fn main_window_subclass(
                     ctx.request_repaint();
                 }
                 LRESULT(0)
+            }
+            WM_SIZE => {
+                apply_rounded_window_region(hwnd);
+                DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             tray::WM_APP_QUIT => {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -739,5 +769,176 @@ unsafe extern "system" fn main_window_subclass(
             }
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+fn actual_window_size(hwnd: HWND) -> Option<(f32, f32)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+        if hwnd.0.is_null() {
+            return None;
+        }
+
+        let mut rect = RECT::default();
+        unsafe {
+            if GetWindowRect(hwnd, &mut rect).is_ok() {
+                let width = rect.right - rect.left;
+                let height = rect.bottom - rect.top;
+                if width > 0 && height > 0 {
+                    return Some((width as f32, height as f32));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
+fn show_popup_window(hwnd: HWND, final_pos: [f32; 2]) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SW_SHOW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
+        };
+
+        let anchor_y = popup_anchor_y().unwrap_or(final_pos[1] + 1.0);
+        let start_y = if anchor_y < final_pos[1] {
+            final_pos[1] - 28.0
+        } else {
+            final_pos[1] + 28.0
+        };
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            final_pos[0] as i32,
+            start_y as i32,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER,
+        );
+        let _ = ShowWindow(hwnd, SW_SHOW);
+
+        for frame in 1..=8 {
+            let t = frame as f32 / 8.0;
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let y = start_y + (final_pos[1] - start_y) * eased;
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                final_pos[0] as i32,
+                y as i32,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            );
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (hwnd, final_pos);
+    }
+}
+
+fn popup_anchor_y() -> Option<f32> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        if let Some(&shwnd) = crate::tray::TRAY_HWND.get() {
+            let identifier = NOTIFYICONIDENTIFIER {
+                cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+                hWnd: shwnd.0,
+                uID: 1,
+                guidItem: Default::default(),
+            };
+            unsafe {
+                if let Ok(rect) = Shell_NotifyIconGetRect(&identifier) {
+                    return Some((rect.top + (rect.bottom - rect.top) / 2) as f32);
+                }
+            }
+        }
+
+        let mut pt = POINT { x: 0, y: 0 };
+        unsafe {
+            if GetCursorPos(&mut pt).is_ok() {
+                return Some(pt.y as f32);
+            }
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+fn is_pointer_on_tray_icon() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        let Some(&shwnd) = crate::tray::TRAY_HWND.get() else {
+            return false;
+        };
+
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: shwnd.0,
+            uID: 1,
+            guidItem: Default::default(),
+        };
+
+        let mut pt = POINT { x: 0, y: 0 };
+        unsafe {
+            if GetCursorPos(&mut pt).is_err() {
+                return false;
+            }
+
+            let Ok(rect) = Shell_NotifyIconGetRect(&identifier) else {
+                return false;
+            };
+
+            let padding = 6;
+            pt.x >= rect.left - padding
+                && pt.x <= rect.right + padding
+                && pt.y >= rect.top - padding
+                && pt.y <= rect.bottom + padding
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+fn hide_popup_window(hwnd: HWND) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+        *inactive_guard().lock() = None;
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        if let Some(ctx) = EGUI_CONTEXT.get() {
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
     }
 }

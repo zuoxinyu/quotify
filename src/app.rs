@@ -155,33 +155,36 @@ impl eframe::App for QuotifyApp {
         let popup_frame = egui::Frame::NONE
             .fill(panel_bg)
             .stroke(egui::Stroke::new(1.0, border_color))
-            .corner_radius(12)
+            .corner_radius(14)
             .inner_margin(12)
             .outer_margin(0);
 
         egui::CentralPanel::default()
             .frame(popup_frame)
             .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(4.0);
-                    ui.heading(egui::RichText::new("Quotify").strong().size(20.0));
-                    ui.label(
-                        egui::RichText::new("AI Provider Quota Monitor")
-                            .weak()
-                            .size(11.5),
-                    );
+                let last = *self.last_refresh.read();
+                let elapsed = (chrono::Utc::now() - last).num_seconds();
+                let refresh_msg = if elapsed < 60 {
+                    format!("Refreshed {elapsed}s ago")
+                } else {
+                    format!("Refreshed {}m ago", elapsed / 60)
+                };
 
-                    let last = *self.last_refresh.read();
-                    let elapsed = (chrono::Utc::now() - last).num_seconds();
-                    let refresh_msg = if elapsed < 60 {
-                        format!("Refreshed {elapsed}s ago")
-                    } else {
-                        format!("Refreshed {}m ago", elapsed / 60)
-                    };
-                    ui.label(egui::RichText::new(refresh_msg).small().weak());
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [130.0, 24.0],
+                        egui::Label::new(egui::RichText::new("Quotify").strong().size(18.0)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_sized(
+                            [150.0, 24.0],
+                            egui::Label::new(egui::RichText::new(refresh_msg).small().weak())
+                                .truncate(),
+                        );
+                    });
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(8.0);
 
@@ -191,19 +194,19 @@ impl eframe::App for QuotifyApp {
                     .show(ui, |ui| {
                         let data = self.data.read().clone();
                         let all_providers = [
-                            ("deepseek", "DeepSeek"),
+                            ("codex", "Codex / OpenAI"),
+                            ("opencode", "OpenCode"),
                             ("claude", "Claude"),
                             ("gemini", "Gemini"),
                             ("antigravity", "Antigravity"),
-                            ("codex", "Codex / OpenAI"),
-                            ("opencode", "OpenCode"),
+                            ("deepseek", "DeepSeek"),
                             ("mimo", "MiMo"),
                         ];
 
                         for &(name, display_name) in &all_providers {
                             let provider_data = data.iter().find(|d| d.provider == name);
                             render_provider(ui, name, display_name, provider_data);
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
                         }
                     });
             });
@@ -212,7 +215,7 @@ impl eframe::App for QuotifyApp {
 
 fn render_provider(
     ui: &mut egui::Ui,
-    provider_name: &str,
+    _provider_name: &str,
     provider_display_name: &str,
     data: Option<&UsageData>,
 ) {
@@ -233,7 +236,7 @@ fn render_provider(
         .fill(ui.visuals().widgets.noninteractive.bg_fill)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
         .corner_radius(8)
-        .inner_margin(12);
+        .inner_margin(egui::Margin::symmetric(10, 8));
 
     card_frame.show(ui, |ui| {
         // Header Row
@@ -361,18 +364,7 @@ fn render_provider(
         });
 
         match status {
-            ProviderStatus::Disabled => {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Provider not configured. Configure credentials to enable.",
-                    )
-                    .small()
-                    .weak(),
-                );
-            }
+            ProviderStatus::Disabled => {}
             ProviderStatus::Error => {
                 ui.add_space(8.0);
                 ui.separator();
@@ -436,140 +428,135 @@ fn render_provider(
                     ui.separator();
                     ui.add_space(8.0);
 
-                    egui::Grid::new(format!("grid_{provider_name}"))
-                        .num_columns(4)
-                        .spacing([12.0, 8.0])
-                        .min_col_width(45.0)
-                        .show(ui, |ui| {
-                            for window in windows {
-                                // Col 1: Label
-                                ui.label(egui::RichText::new(&window.label).strong().size(11.0));
+                    let available_width = ui.available_width();
+                    let gap = 8.0;
+                    let label_width = 88.0_f32;
+                    let reset_width = 82.0_f32;
+                    let progress_width =
+                        (available_width - label_width - reset_width - gap * 2.0).max(96.0);
 
-                                // Col 2: Fluent-styled Progress Bar & Percentage
-                                ui.horizontal(|ui| {
-                                    let pct = window.used_percent as f32;
-                                    let bar_width = 100.0;
-                                    let bar_height = 8.0;
-                                    let rounding = 4.0;
+                    for window in windows {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
 
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(bar_width, bar_height),
-                                        egui::Sense::hover(),
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(label_width, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add_sized(
+                                        [label_width, 18.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(&window.label).strong().size(11.0),
+                                        )
+                                        .truncate(),
                                     );
+                                },
+                            );
 
-                                    if ui.is_rect_visible(rect) {
-                                        // Track color
-                                        let track_color = if is_dark {
-                                            egui::Color32::from_rgb(32, 32, 32)
-                                        } else {
-                                            egui::Color32::from_rgb(229, 229, 229)
-                                        };
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(progress_width, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    render_usage_progress(ui, window.used_percent as f32, is_dark);
+                                },
+                            );
 
-                                        ui.painter().rect_filled(rect, rounding, track_color);
-
-                                        let fill_width = bar_width * (pct / 100.0).clamp(0.0, 1.0);
-                                        if fill_width > 0.0 {
-                                            let fill_rect = egui::Rect::from_min_size(
-                                                rect.min,
-                                                egui::vec2(fill_width, bar_height),
-                                            );
-
-                                            // Dynamic filling colors for Dark/Light modes
-                                            let fill_color = if is_dark {
-                                                if pct >= 80.0 {
-                                                    egui::Color32::from_rgb(241, 112, 122) // Fluent Red (Dark)
-                                                } else if pct >= 50.0 {
-                                                    egui::Color32::from_rgb(255, 185, 0) // Fluent Gold (Dark)
-                                                } else {
-                                                    egui::Color32::from_rgb(96, 205, 255) // Fluent Accent Blue (Dark)
-                                                }
-                                            } else {
-                                                if pct >= 80.0 {
-                                                    egui::Color32::from_rgb(196, 43, 28) // Fluent Red (Light)
-                                                } else if pct >= 50.0 {
-                                                    egui::Color32::from_rgb(179, 123, 0) // Fluent Gold (Light)
-                                                } else {
-                                                    egui::Color32::from_rgb(0, 120, 212) // Fluent Accent Blue (Light)
-                                                }
-                                            };
-                                            ui.painter()
-                                                .rect_filled(fill_rect, rounding, fill_color);
-                                        }
-                                    }
-
-                                    ui.add_space(4.0);
-
-                                    let pct_color = if is_dark {
-                                        if pct >= 80.0 {
-                                            egui::Color32::from_rgb(241, 112, 122)
-                                        } else if pct >= 50.0 {
-                                            egui::Color32::from_rgb(255, 200, 0)
-                                        } else {
-                                            egui::Color32::from_rgb(96, 205, 255)
-                                        }
-                                    } else {
-                                        if pct >= 80.0 {
-                                            egui::Color32::from_rgb(196, 43, 28)
-                                        } else if pct >= 50.0 {
-                                            egui::Color32::from_rgb(179, 123, 0)
-                                        } else {
-                                            egui::Color32::from_rgb(0, 120, 212)
-                                        }
-                                    };
-
-                                    ui.label(
-                                        egui::RichText::new(format!("{pct:.0}%"))
-                                            .color(pct_color)
-                                            .strong()
-                                            .size(10.0),
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(reset_width, 18.0),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let reset_text = reset_time_text(window.resets_at);
+                                    ui.add_sized(
+                                        [reset_width, 18.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(reset_text).small().weak(),
+                                        )
+                                        .truncate(),
                                     );
-                                });
-
-                                // Col 3: Monospace Metrics
-                                let count_text = if let Some(used) = window.used {
-                                    let unit = window.unit.as_deref().unwrap_or("");
-                                    if let Some(limit) = window.limit {
-                                        format!("{used:.0}/{limit:.0} {unit}")
-                                    } else {
-                                        format!("{used:.0} {unit}")
-                                    }
-                                } else {
-                                    "-".to_string()
-                                };
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new(count_text).monospace().size(10.0),
-                                        );
-                                    },
-                                );
-
-                                // Col 4: Muted Reset Time
-                                let reset_text = if let Some(resets) = window.resets_at {
-                                    let remaining = resets - chrono::Utc::now();
-                                    if remaining.num_seconds() > 0 {
-                                        let h = remaining.num_hours();
-                                        let m = remaining.num_minutes() % 60;
-                                        format!("resets in {h}h{m}m")
-                                    } else {
-                                        "resetting...".to_string()
-                                    }
-                                } else {
-                                    "".to_string()
-                                };
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(egui::RichText::new(reset_text).small().weak());
-                                    },
-                                );
-
-                                ui.end_row();
-                            }
+                                },
+                            );
                         });
+                        ui.add_space(4.0);
+                    }
                 }
             }
         }
     });
+}
+
+fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {
+    let pct = pct.clamp(0.0, 100.0);
+    let pct_width = 34.0;
+    let bar_width = (ui.available_width() - pct_width - 6.0).max(48.0);
+    let bar_height = 8.0;
+    let rounding = 4.0;
+
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let track_color = if is_dark {
+            egui::Color32::from_rgb(32, 32, 32)
+        } else {
+            egui::Color32::from_rgb(229, 229, 229)
+        };
+        ui.painter().rect_filled(rect, rounding, track_color);
+
+        let fill_width = bar_width * (pct / 100.0);
+        if fill_width > 0.0 {
+            let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, bar_height));
+            ui.painter()
+                .rect_filled(fill_rect, rounding, progress_color(pct, is_dark));
+        }
+    }
+
+    ui.add_space(4.0);
+    ui.add_sized(
+        [pct_width, 18.0],
+        egui::Label::new(
+            egui::RichText::new(format!("{pct:.0}%"))
+                .color(progress_color(pct, is_dark))
+                .strong()
+                .size(10.0),
+        ),
+    );
+}
+
+fn progress_color(pct: f32, is_dark: bool) -> egui::Color32 {
+    if is_dark {
+        if pct >= 80.0 {
+            egui::Color32::from_rgb(241, 112, 122)
+        } else if pct >= 50.0 {
+            egui::Color32::from_rgb(255, 200, 0)
+        } else {
+            egui::Color32::from_rgb(96, 205, 255)
+        }
+    } else if pct >= 80.0 {
+        egui::Color32::from_rgb(196, 43, 28)
+    } else if pct >= 50.0 {
+        egui::Color32::from_rgb(179, 123, 0)
+    } else {
+        egui::Color32::from_rgb(0, 120, 212)
+    }
+}
+
+fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    let Some(resets) = resets_at else {
+        return "-".to_string();
+    };
+
+    let remaining = resets - chrono::Utc::now();
+    if remaining.num_seconds() <= 0 {
+        return "resetting".to_string();
+    }
+
+    let days = remaining.num_days();
+    let hours = remaining.num_hours() % 24;
+    let minutes = remaining.num_minutes() % 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
 }
