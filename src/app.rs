@@ -38,7 +38,8 @@ impl eframe::App for QuotifyApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // Redraw every second to update the "Refreshed X seconds ago" counter,
         // but ONLY if the window is active/focused. When the window loses focus,
         // it hides itself. If we request repaint while hidden, winit's swapchain
@@ -52,7 +53,7 @@ impl eframe::App for QuotifyApp {
         let is_dark = match ctx.system_theme() {
             Some(egui::Theme::Dark) => true,
             Some(egui::Theme::Light) => false,
-            None => ctx.style().visuals.dark_mode,
+            None => ctx.global_style().visuals.dark_mode,
         };
 
         let mut visuals = if is_dark {
@@ -109,7 +110,7 @@ impl eframe::App for QuotifyApp {
         visuals.widgets.active.corner_radius = 6.into();
 
         // Set WinUI 3 typography metrics
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         style.text_styles = [
             (
                 egui::TextStyle::Heading,
@@ -138,7 +139,7 @@ impl eframe::App for QuotifyApp {
         ]
         .into();
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        ctx.set_style(style);
+        ctx.set_global_style(style);
 
         ctx.set_visuals(visuals);
 
@@ -159,7 +160,7 @@ impl eframe::App for QuotifyApp {
 
         egui::CentralPanel::default()
             .frame(popup_frame)
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 let last = *self.last_refresh.read();
                 let elapsed = (chrono::Utc::now() - last).num_seconds();
                 let refresh_age = if elapsed < 60 {

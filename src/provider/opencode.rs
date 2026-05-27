@@ -58,7 +58,7 @@ impl OpenCodeProvider {
             .is_some()
     }
 
-    fn find_dashboard_cookie_header(&self) -> Result<String> {
+    async fn find_dashboard_cookie_header(&self) -> Result<String> {
         if let Some(cookie) = &self.auth_cookie {
             return Ok(cookie.clone());
         }
@@ -69,7 +69,7 @@ impl OpenCodeProvider {
             return Ok(cookie);
         }
 
-        let header = cookies::find_cookie_header(OPENCODE_COOKIE_DOMAINS)?;
+        let header = cookies::find_cookie_header(OPENCODE_COOKIE_DOMAINS).await?;
         if header
             .split(';')
             .any(|pair| pair.trim_start().starts_with("auth="))
@@ -77,6 +77,7 @@ impl OpenCodeProvider {
             Ok(header)
         } else {
             let auth = cookies::find_cookie_multiple(OPENCODE_COOKIE_DOMAINS, "auth")
+                .await
                 .context("OpenCode auth cookie not found")?;
             Ok(format!("auth={auth}"))
         }
@@ -94,6 +95,7 @@ impl Provider for OpenCodeProvider {
         // dashboard cookies and parse the same server data that the web app loads.
         let cookie_header = self
             .find_dashboard_cookie_header()
+            .await
             .context("OpenCode requires an auth cookie from config, OPENCODE_AUTH_COOKIE, or opencode.ai browser cookies")?;
         tracing::debug!("Found opencode.ai auth cookie, trying server functions");
 

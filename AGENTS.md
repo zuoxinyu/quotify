@@ -1,27 +1,48 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-`src/main.rs` is the CLI and tray entry point. UI rendering lives in `src/app.rs`, configuration loading in `src/config.rs`, cookie helpers in `src/cookies.rs`, tray icon generation in `src/icon.rs`, and provider integrations under `src/provider/` (`claude.rs`, `codex.rs`, `gemini.rs`, etc.). Keep new provider-specific logic inside `src/provider/<name>.rs` and register it through `src/provider/mod.rs` and `create_provider()` in `src/main.rs`. Use `config.example.toml` as the reference shape for local configuration.
+## Project Overview
+Windows system tray AI provider quota monitor. **Windows-only** — uses Win32 APIs (`windows` crate), DWM Mica backdrop, and `eframe`/`egui` for the popup UI. Building on non-Windows will fail.
 
-## Build, Test, and Development Commands
-Use Cargo for all local workflows:
+## Structure
+- `src/main.rs` — CLI + tray entry point; `create_provider()` wires providers; default subcommand is `Tray`
+- `src/app.rs` — `eframe::App` impl with Fluent/Mica styling
+- `src/config.rs` — TOML config, stored at platform config dir (`AppData/Roaming/quotify/quotify.toml`)
+- `src/tray.rs` — Win32 tray icon, message loop, custom window subclass
+- `src/icon.rs` — Dynamic HICON generation (usage dots)
+- `src/cookies.rs` — Cookie helpers for browser-auth providers
+- `src/provider/` — `Provider` trait + one file per provider (`claude.rs`, `codex.rs`, `gemini.rs`, `deepseek.rs`, `opencode.rs`, `mimo.rs`, `antigravity.rs`)
 
-- `cargo check` validates the project quickly without producing a release binary.
-- `cargo run -- fetch` fetches quota data and prints JSON for enabled providers.
-- `cargo run -- tray` starts the Windows tray app and detail window.
-- `cargo run -- init` writes the default config file under the platform config directory.
-- `cargo fmt` applies standard Rust formatting.
-- `cargo clippy --all-targets --all-features` catches style and correctness issues before review.
-- `cargo build --release` produces the optimized binary in `target/release/`.
+## Adding a Provider
+Two registration points — miss either and the provider is silently ignored:
+1. Add `src/provider/<name>.rs` implementing `Provider` trait, add `pub mod <name>;` to `src/provider/mod.rs`
+2. Add a match arm in `create_provider()` in `src/main.rs` **and** add the name to `PROVIDER_ORDER` (controls tray icon dot order)
 
-## Coding Style & Naming Conventions
-Follow Rust defaults: 4-space indentation, `snake_case` for functions/modules, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for statics and constants. Prefer small modules with clear ownership rather than expanding `main.rs`. Use `anyhow::Result` for fallible app flows and keep provider error messages actionable because they surface in the UI. Always run `cargo fmt` before submitting changes.
+## Commands
+- `cargo check` — quick validation
+- `cargo run -- fetch` — fetch quota JSON for enabled providers
+- `cargo run -- fetch --provider gemini` — fetch one provider
+- `cargo run -- tray` — start tray app (default if no subcommand)
+- `cargo run -- init` — write default config
+- `cargo fmt` — format
+- `cargo clippy --all-targets --all-features` — lint
+- `cargo test` — tests (no `tests/` dir; unit tests inline with `#[cfg(test)]`)
+- `cargo build --release` — optimized binary (`opt-level = "z"`, LTO, strip)
 
-## Testing Guidelines
-There is no `tests/` directory yet, so add focused unit tests alongside the code with `#[cfg(test)]` when you touch parsing, config loading, or provider normalization logic. Run `cargo test` locally before opening a PR. For network-backed providers, prefer deterministic parser tests over live API calls.
+## Key Conventions
+- Rust **edition 2024** — requires Rust ≥ 1.85
+- `anyhow::Result` for all fallible flows; provider errors surface in UI, so keep messages actionable
+- Use `parking_lot` for locks (not `std::sync`)
+- `async_trait` for `Provider` trait; providers are `Send + Sync`
+- Follow existing style in `src/app.rs` for UI: semi-transparent fills, rounded corners (12px window, 8px cards), `Segoe UI Variable` font
 
-## Commit & Pull Request Guidelines
-This repository currently has no commit history, so use short imperative commit subjects such as `Add Gemini quota reset parsing`. Keep each commit scoped to one change. PRs should include a concise summary, manual verification steps, and screenshots for tray/UI changes. Link related issues and note any config or credential assumptions reviewers need to reproduce the change.
+## Architecture Notes
+- Three threads: Win32 message loop (main), background fetch (tokio runtime), eframe UI window
+- Tray icon is the entry point; popup window starts offscreen and animates in via Win32 `SetWindowPos`
+- Config auto-creates with defaults on first load; secrets go in config file or env vars
+- Provider auth varies: API keys (deepseek, gemini), auth files (claude, codex), cookies (opencode, mimo)
 
-## Configuration & Security Tips
-Do not commit real API keys, auth files, or exported usage data. Keep secrets in the generated config file or environment variables such as `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, and `OPENCODE_API_KEY`.
+## Testing
+Add focused unit tests alongside code when touching parsing, config, or provider logic. Prefer deterministic parser tests over live API calls. No integration test infrastructure yet.
+
+## Security
+Never commit API keys, auth files, or usage data. Supported env vars: `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ANTIGRAVITY_API_KEY`, `OPENCODE_WORKSPACE_ID`, `OPENCODE_AUTH_COOKIE`, `MIMO_SERVICE_TOKEN`.

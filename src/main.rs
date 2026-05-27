@@ -192,7 +192,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "mimo" => {
-            if config.mimo.enabled || !config.mimo.api_key.is_empty() {
+            if config.mimo.enabled {
                 Some(Box::new(MimoProvider::new(config.mimo.api_key.clone())))
             } else {
                 None

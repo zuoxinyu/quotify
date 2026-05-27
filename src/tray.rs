@@ -197,7 +197,7 @@ fn register_tray_icon(hwnd: HWND, hicon: HICON) -> windows::core::Result<()> {
         if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
             Ok(())
         } else {
-            Err(windows::core::Error::from_win32())
+            Err(windows::core::Error::from_thread())
         }
     }
 }
@@ -216,7 +216,7 @@ fn update_tray_icon(hwnd: HWND, hicon: HICON) -> windows::core::Result<()> {
         if Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() {
             Ok(())
         } else {
-            Err(windows::core::Error::from_win32())
+            Err(windows::core::Error::from_thread())
         }
     }
 }
@@ -233,7 +233,7 @@ fn remove_tray_icon(hwnd: HWND) -> windows::core::Result<()> {
         if Shell_NotifyIconW(NIM_DELETE, &nid).as_bool() {
             Ok(())
         } else {
-            Err(windows::core::Error::from_win32())
+            Err(windows::core::Error::from_thread())
         }
     }
 }
