@@ -17,31 +17,80 @@ impl MimoProvider {
             client: reqwest::Client::new(),
         }
     }
+
+    async fn find_cookie_header(&self) -> Result<String> {
+        if let Ok(token) = std::env::var("MIMO_SERVICE_TOKEN")
+            && !token.is_empty()
+        {
+            return Ok(format!("serviceToken={token}"));
+        }
+
+        // First try exact domain match (covers most cases)
+        let exact_domains = [
+            "platform.xiaomimimo.com",
+            ".platform.xiaomimimo.com",
+            "xiaomimimo.com",
+            ".xiaomimimo.com",
+        ];
+        match cookies::find_cookie_header(&exact_domains).await {
+            Ok(header) => return Ok(header),
+            Err(e) => {
+                tracing::debug!("MiMo: exact domain search failed: {e}");
+            }
+        }
+
+        // Fallback: search for any cookie with "serviceToken" name across xiaomimimo variants
+        for domain in &[
+            "platform.xiaomimimo.com",
+            "xiaomimimo.com",
+            "www.xiaomimimo.com",
+        ] {
+            if let Ok(token) = cookies::find_cookie(domain, "serviceToken").await {
+                tracing::debug!("MiMo: found serviceToken via find_cookie for {domain}");
+                let full_cookie = cookies::find_cookie_header(&[domain, &format!(".{domain}")]).await;
+                match full_cookie {
+                    Ok(header) => return Ok(header),
+                    Err(_) => return Ok(format!("serviceToken={token}")),
+                }
+            }
+        }
+
+        anyhow::bail!("No MiMo browser session found. Log in at platform.xiaomimimo.com first")
+    }
 }
 
-#[expect(dead_code)]
 #[derive(Debug, serde::Deserialize)]
-struct MimoBalanceResponse {
-    data: Option<MimoBalanceData>,
-    balance: Option<f64>,
-    total_balance: Option<f64>,
-    error: Option<MimoError>,
+struct TokenPlanUsageResponse {
+    data: Option<TokenPlanUsageData>,
 }
 
-#[expect(dead_code)]
 #[derive(Debug, serde::Deserialize)]
-struct MimoBalanceData {
-    balance: Option<f64>,
-    total_balance: Option<f64>,
-    granted: Option<f64>,
-    currency: Option<String>,
+struct TokenPlanUsageData {
+    #[serde(default)]
+    plans: Vec<TokenPlan>,
+    #[serde(default)]
+    total_used_tokens: Option<f64>,
+    #[serde(default)]
+    total_remaining_tokens: Option<f64>,
 }
 
-#[expect(dead_code)]
 #[derive(Debug, serde::Deserialize)]
-struct MimoError {
-    message: Option<String>,
-    code: Option<i32>,
+struct TokenPlan {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    plan_name: Option<String>,
+    #[serde(default)]
+    used_tokens: Option<f64>,
+    #[serde(default)]
+    total_tokens: Option<f64>,
+    #[serde(default)]
+    remaining_tokens: Option<f64>,
+    #[serde(default)]
+    expire_time: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    status: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -51,22 +100,23 @@ impl Provider for MimoProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let cookie_header = cookies::find_cookie_header(&["xiaomimimo.com", ".xiaomimimo.com"])
-            .context(
-                "No Xiaomi MiMo browser session found. Please log in at platform.xiaomimimo.com",
-            )?;
+        let cookie_header = self.find_cookie_header().await?;
 
-        let url = std::env::var("MIMO_API_URL")
-            .unwrap_or_else(|_| "https://platform.xiaomimimo.com/api/v1/balance".to_string());
+        let url = "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage";
 
         let resp = self
             .client
-            .get(&url)
+            .get(url)
             .header("Cookie", cookie_header)
+            .header("Content-Type", "application/json")
+            .header("Accept", "*/*")
+            .header("Accept-Language", "zh")
+            .header("X-Timezone", "Asia/Shanghai")
             .header(
                 "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
             )
+            .header("Referer", "https://platform.xiaomimimo.com/console/plan-manage")
             .send()
             .await
             .context("Failed to connect to MiMo API")?;
@@ -77,51 +127,62 @@ impl Provider for MimoProvider {
             anyhow::bail!("MiMo API error: {status} - {body}");
         }
 
-        let balance: serde_json::Value = resp
+        let body: serde_json::Value = resp
             .json()
             .await
-            .context("Failed to parse MiMo balance response")?;
+            .context("Failed to parse MiMo tokenPlan/usage response")?;
 
-        tracing::debug!("MiMo API response: {balance:#?}");
+        tracing::debug!("MiMo tokenPlan/usage response: {body:#?}");
 
         let mut windows = Vec::new();
         let mut credits = None;
 
-        let balance_val = balance
-            .get("data")
-            .and_then(|d| d.get("balance"))
-            .or_else(|| balance.get("balance"))
-            .or_else(|| balance.get("data").and_then(|d| d.get("total_balance")))
-            .or_else(|| balance.get("total_balance"))
-            .and_then(|v| v.as_f64());
+        if let Ok(usage) = serde_json::from_value::<TokenPlanUsageResponse>(body.clone())
+            && let Some(data) = usage.data
+        {
+            for plan in &data.plans {
+                let label = plan
+                    .plan_name
+                    .as_deref()
+                    .or(plan.name.as_deref())
+                    .unwrap_or("Plan");
 
-        let currency = balance
-            .get("data")
-            .and_then(|d| d.get("currency"))
-            .or_else(|| balance.get("currency"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("CNY");
+                let total = plan.total_tokens.unwrap_or(0.0);
+                let used = plan.used_tokens.unwrap_or(0.0);
+                let _remaining = plan.remaining_tokens.unwrap_or(total - used);
 
-        if let Some(bal) = balance_val {
-            credits = Some(CreditsInfo {
-                balance: bal,
-                currency: currency.to_string(),
-                total_granted: balance
-                    .get("data")
-                    .and_then(|d| d.get("granted"))
-                    .or_else(|| balance.get("granted"))
-                    .and_then(|v| v.as_f64()),
-                topped_up: None,
-            });
+                let used_percent = if total > 0.0 {
+                    (used / total * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
 
-            windows.push(UsageWindow {
-                label: format!("Balance ({currency})"),
-                used_percent: 0.0,
-                limit: None,
-                used: None,
-                unit: Some(currency.to_string()),
-                resets_at: None,
-            });
+                let resets_at = plan
+                    .expire_time
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.to_utc());
+
+                windows.push(UsageWindow {
+                    label: label.to_string(),
+                    used_percent,
+                    limit: Some(total),
+                    used: Some(used),
+                    unit: Some("tokens".to_string()),
+                    resets_at,
+                });
+            }
+
+            let total_used = data.total_used_tokens.unwrap_or(0.0);
+            let total_remaining = data.total_remaining_tokens.unwrap_or(0.0);
+            if total_used > 0.0 || total_remaining > 0.0 {
+                credits = Some(CreditsInfo {
+                    balance: total_remaining,
+                    currency: "tokens".to_string(),
+                    total_granted: Some(total_used + total_remaining),
+                    topped_up: None,
+                });
+            }
         }
 
         if windows.is_empty() {

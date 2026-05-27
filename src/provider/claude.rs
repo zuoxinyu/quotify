@@ -330,8 +330,9 @@ impl ClaudeProvider {
         Some((api_key, base_url))
     }
 
-    fn read_cookie_session_key(&self) -> Option<String> {
+    async fn read_cookie_session_key(&self) -> Option<String> {
         cookies::find_cookie_multiple(&["claude.ai", ".claude.ai"], "sessionKey")
+            .await
             .ok()
             .filter(|k| k.starts_with("sk-ant-"))
     }
@@ -363,7 +364,7 @@ impl Provider for ClaudeProvider {
 
         // Method 2: Try browser cookie (sessionKey from claude.ai)
         if windows.is_empty()
-            && let Some(session_key) = self.read_cookie_session_key()
+            && let Some(session_key) = self.read_cookie_session_key().await
         {
             tracing::debug!("Using Claude sessionKey from browser cookie");
             match self.fetch_via_cookie(&session_key).await {
