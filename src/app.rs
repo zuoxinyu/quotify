@@ -7,8 +7,8 @@ use crate::provider::UsageData;
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
-    #[allow(dead_code)]
     pub config: crate::config::AppConfig,
+    pub active_provider: Arc<RwLock<String>>,
 }
 
 impl QuotifyApp {
@@ -16,11 +16,13 @@ impl QuotifyApp {
         data: Arc<RwLock<Vec<UsageData>>>,
         last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
         config: crate::config::AppConfig,
+        active_provider: Arc<RwLock<String>>,
     ) -> Self {
         Self {
             data,
             last_refresh,
             config,
+            active_provider,
         }
     }
 }
@@ -163,6 +165,9 @@ impl eframe::App for QuotifyApp {
         egui::CentralPanel::default()
             .frame(popup_frame)
             .show_inside(ui, |ui| {
+                let content_width = ui.available_width();
+                let card_width = (content_width - 2.0).clamp(0.0, 352.0);
+                let card_left_indent = ((content_width - card_width) / 2.0).max(0.0);
                 let last = *self.last_refresh.read();
                 let elapsed = (chrono::Utc::now() - last).num_seconds();
                 let refresh_age = if elapsed < 60 {
@@ -176,30 +181,39 @@ impl eframe::App for QuotifyApp {
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.add_space(card_left_indent);
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let settings = ui
-                                .add_sized([28.0, 28.0], egui::Button::new("⚙").frame(false))
-                                .on_hover_text("Open configuration file");
+                            ui.label(
+                                egui::RichText::new("Quotify")
+                                    .strong()
+                                    .size(18.0)
+                                    .line_height(Some(31.0)),
+                            );
+
+                            ui.add_space(1.0);
+
+                            let settings = icon_button(
+                                ui,
+                                egui::include_image!("../assets/icons/settings.svg"),
+                                egui::vec2(28.0, 28.0),
+                                egui::vec2(18.0, 18.0),
+                                "Open configuration file",
+                            );
                             if settings.clicked()
                                 && let Err(err) = open_config_file()
                             {
                                 tracing::error!("Failed to open config file: {err}");
                             }
-
-                            ui.add_space(8.0);
-
-                            ui.add_sized(
-                                [64.0, 24.0],
-                                egui::Label::new(
-                                    egui::RichText::new("Quotify").strong().size(18.0),
-                                ),
-                            );
                         });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let refresh = ui
-                                .add_sized([28.0, 28.0], egui::Button::new("↻").frame(false))
-                                .on_hover_text("Refresh usage now");
+                            let refresh = icon_button(
+                                ui,
+                                egui::include_image!("../assets/icons/refresh.svg"),
+                                egui::vec2(28.0, 28.0),
+                                egui::vec2(18.0, 18.0),
+                                "Refresh usage now",
+                            );
                             if refresh.clicked() {
                                 crate::tray::request_refresh();
                                 ctx.request_repaint();
@@ -224,7 +238,7 @@ impl eframe::App for QuotifyApp {
                     .show(ui, |ui| {
                         let data = self.data.read().clone();
                         let all_providers = [
-                            ("codex", "Codex / OpenAI"),
+                            ("codex", "Codex"),
                             ("opencode", "OpenCode"),
                             ("claude", "Claude"),
                             ("gemini", "Gemini"),
@@ -233,10 +247,18 @@ impl eframe::App for QuotifyApp {
                             ("mimo", "MiMo"),
                         ];
 
-                        let card_width = (ui.available_width() - 2.0).clamp(0.0, 352.0);
                         for &(name, display_name) in &all_providers {
                             let provider_data = data.iter().find(|d| d.provider == name);
-                            render_provider(ui, name, display_name, provider_data, card_width);
+                            render_provider(
+                                ui,
+                                name,
+                                display_name,
+                                provider_data,
+                                card_width,
+                                &self.active_provider,
+                                &self.config,
+                                &self.data,
+                            );
                             ui.add_space(6.0);
                         }
                     });
@@ -257,12 +279,29 @@ fn open_config_file() -> anyhow::Result<()> {
         .map_err(anyhow::Error::from)
 }
 
+fn icon_button(
+    ui: &mut egui::Ui,
+    image: egui::ImageSource<'static>,
+    button_size: egui::Vec2,
+    icon_size: egui::Vec2,
+    tooltip: &str,
+) -> egui::Response {
+    let image = egui::Image::new(image)
+        .fit_to_exact_size(icon_size)
+        .maintain_aspect_ratio(true);
+    ui.add_sized(button_size, egui::Button::image(image).frame(false))
+        .on_hover_text(tooltip)
+}
+
 fn render_provider(
     ui: &mut egui::Ui,
     provider_name: &str,
     provider_display_name: &str,
     data: Option<&UsageData>,
     card_width: f32,
+    active_provider: &Arc<RwLock<String>>,
+    config: &crate::config::AppConfig,
+    all_data: &Arc<RwLock<Vec<UsageData>>>,
 ) {
     let status = match data {
         Some(d) if d.error.is_some() => ProviderStatus::Error,
@@ -304,6 +343,9 @@ fn render_provider(
                     is_dark,
                     card_frame,
                     card_width,
+                    active_provider,
+                    config,
+                    all_data,
                 );
             },
         );
@@ -322,6 +364,9 @@ fn render_provider_card(
     is_dark: bool,
     card_frame: egui::Frame,
     card_width: f32,
+    active_provider: &Arc<RwLock<String>>,
+    config: &crate::config::AppConfig,
+    all_data: &Arc<RwLock<Vec<UsageData>>>,
 ) {
     let response = card_frame.show(ui, |ui| {
         // Enforce uniform width across all cards based on parent width minus horizontal margins (cast i8 margins to f32)
@@ -337,7 +382,14 @@ fn render_provider_card(
             egui::vec2(content_width, 24.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                if render_provider_icon(ui, provider_name, is_dark) {
+                if render_provider_icon(
+                    ui,
+                    provider_name,
+                    is_dark,
+                    active_provider,
+                    config,
+                    all_data,
+                ) {
                     ui.add_space(6.0);
                 }
 
@@ -594,18 +646,38 @@ fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource
     }
 }
 
-fn render_provider_icon(ui: &mut egui::Ui, provider_name: &str, is_dark: bool) -> bool {
+fn render_provider_icon(
+    ui: &mut egui::Ui,
+    provider_name: &str,
+    is_dark: bool,
+    active_provider: &Arc<RwLock<String>>,
+    config: &crate::config::AppConfig,
+    data: &Arc<RwLock<Vec<UsageData>>>,
+) -> bool {
+    let is_active = active_provider.read().eq_ignore_ascii_case(provider_name);
+    let tooltip = if is_active {
+        "Primary provider"
+    } else {
+        "Double-click to set as primary provider"
+    };
+
     if let Some(icon) = provider_icon(provider_name, is_dark) {
-        ui.add(
-            egui::Image::new(icon)
-                .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                .maintain_aspect_ratio(true),
-        );
+        let response = ui
+            .add(
+                egui::Image::new(icon)
+                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                    .maintain_aspect_ratio(true)
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text(tooltip);
+        if response.double_clicked() {
+            set_active_provider(provider_name, active_provider, config, data);
+        }
         return true;
     }
 
     if provider_name == "mimo" {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
         let (bg, fg) = if is_dark {
             (
                 egui::Color32::from_rgb(54, 69, 89),
@@ -625,10 +697,44 @@ fn render_provider_icon(ui: &mut egui::Ui, provider_name: &str, is_dark: bool) -
             egui::FontId::proportional(11.0),
             fg,
         );
+        if response.on_hover_text(tooltip).double_clicked() {
+            set_active_provider(provider_name, active_provider, config, data);
+        }
         return true;
     }
 
     false
+}
+
+fn set_active_provider(
+    provider_name: &str,
+    active_provider: &Arc<RwLock<String>>,
+    config: &crate::config::AppConfig,
+    data: &Arc<RwLock<Vec<UsageData>>>,
+) {
+    *active_provider.write() = provider_name.to_string();
+
+    let mut updated_config = config.clone();
+    updated_config.general.active_provider = provider_name.to_string();
+    if let Err(err) = updated_config.save() {
+        tracing::error!("Failed to save active provider {provider_name}: {err}");
+    }
+
+    update_tray_icon_for_active_provider(provider_name, data);
+    crate::tray::request_refresh();
+}
+
+fn update_tray_icon_for_active_provider(provider_name: &str, data: &Arc<RwLock<Vec<UsageData>>>) {
+    let data = data.read();
+    let active_provider = Some(provider_name);
+    let icon = crate::icon::generate_icon(&data, active_provider);
+    let tooltip = crate::icon::tray_tooltip(&data, active_provider);
+    if let Ok(hicon) = icon.to_hicon()
+        && let Some(&tray_hwnd) = crate::tray::TRAY_HWND.get()
+    {
+        let controller = crate::tray::TrayController::from_hwnd(tray_hwnd.raw());
+        controller.update_icon_with_tooltip(hicon, &tooltip);
+    }
 }
 
 fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {
