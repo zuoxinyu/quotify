@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use cookie_scoop::{
-    BrowserName, CookieHeaderOptions, GetCookiesOptions, to_cookie_header,
-};
+use cookie_scoop::{BrowserName, CookieHeaderOptions, GetCookiesOptions, to_cookie_header};
 
 fn domain_to_url(domain: &str) -> String {
     let d = domain.trim_start_matches('.');
@@ -15,10 +13,7 @@ fn domain_to_url(domain: &str) -> String {
 fn origins_for_domain(domain: &str) -> Vec<String> {
     let bare = domain.trim_start_matches('.');
     let dotted = format!(".{bare}");
-    vec![
-        domain_to_url(bare),
-        domain_to_url(&dotted),
-    ]
+    vec![domain_to_url(bare), domain_to_url(&dotted)]
 }
 
 pub async fn find_cookie(domain: &str, cookie_name: &str) -> Result<String> {
@@ -26,8 +21,13 @@ pub async fn find_cookie(domain: &str, cookie_name: &str) -> Result<String> {
         GetCookiesOptions::new(domain_to_url(domain))
             .origins(origins_for_domain(domain))
             .names(vec![cookie_name.to_string()])
-            .browsers(vec![BrowserName::Chrome, BrowserName::Edge, BrowserName::Firefox])
-    ).await;
+            .browsers(vec![
+                BrowserName::Chrome,
+                BrowserName::Edge,
+                BrowserName::Firefox,
+            ]),
+    )
+    .await;
 
     for w in &result.warnings {
         tracing::debug!("cookie-scoop: {w}");
@@ -46,29 +46,25 @@ pub async fn find_cookie_header(domains: &[&str]) -> Result<String> {
     let url = domain_to_url(domains[0]);
     let origins: Vec<String> = domains.iter().flat_map(|d| origins_for_domain(d)).collect();
 
-    let result = cookie_scoop::get_cookies(
-        GetCookiesOptions::new(&url)
-            .origins(origins)
-            .browsers(vec![BrowserName::Chrome, BrowserName::Edge, BrowserName::Firefox])
-    ).await;
+    let result =
+        cookie_scoop::get_cookies(GetCookiesOptions::new(&url).origins(origins).browsers(vec![
+            BrowserName::Chrome,
+            BrowserName::Edge,
+            BrowserName::Firefox,
+        ]))
+        .await;
 
     for w in &result.warnings {
         tracing::debug!("cookie-scoop: {w}");
     }
 
     if result.cookies.is_empty() {
-        anyhow::bail!(
-            "No cookies found for {}",
-            domains.join(", ")
-        );
+        anyhow::bail!("No cookies found for {}", domains.join(", "));
     }
 
     let header = to_cookie_header(&result.cookies, &CookieHeaderOptions::default());
     if header.is_empty() {
-        anyhow::bail!(
-            "Cookie header empty for {}",
-            domains.join(", ")
-        );
+        anyhow::bail!("Cookie header empty for {}", domains.join(", "));
     }
 
     Ok(header)
