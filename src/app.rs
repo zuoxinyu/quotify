@@ -162,25 +162,53 @@ impl eframe::App for QuotifyApp {
             .show(ctx, |ui| {
                 let last = *self.last_refresh.read();
                 let elapsed = (chrono::Utc::now() - last).num_seconds();
-                let refresh_msg = if elapsed < 60 {
-                    format!("Refreshed {elapsed}s ago")
+                let refresh_age = if elapsed < 60 {
+                    format!("{}s ago", elapsed.max(0))
                 } else {
-                    format!("Refreshed {}m ago", elapsed / 60)
+                    format!("{}m ago", elapsed / 60)
                 };
 
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [130.0, 24.0],
-                        egui::Label::new(egui::RichText::new("Quotify").strong().size(18.0)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_sized(
-                            [150.0, 24.0],
-                            egui::Label::new(egui::RichText::new(refresh_msg).small().weak())
-                                .truncate(),
-                        );
-                    });
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 28.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let settings = ui
+                                .add_sized([28.0, 28.0], egui::Button::new("⚙").frame(false))
+                                .on_hover_text("Open configuration file");
+                            if settings.clicked()
+                                && let Err(err) = open_config_file()
+                            {
+                                tracing::error!("Failed to open config file: {err}");
+                            }
+
+                            ui.add_sized(
+                                [64.0, 24.0],
+                                egui::Label::new(
+                                    egui::RichText::new("Quotify").strong().size(18.0),
+                                ),
+                            );
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let refresh = ui
+                                .add_sized([28.0, 28.0], egui::Button::new("↻").frame(false))
+                                .on_hover_text("Refresh usage now");
+                            if refresh.clicked() {
+                                crate::tray::REFRESH_REQUESTED
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                ctx.request_repaint();
+                            }
+
+                            ui.add_sized(
+                                [60.0, 24.0],
+                                egui::Label::new(egui::RichText::new(refresh_age).small().weak())
+                                    .truncate(),
+                            );
+                        });
+                    },
+                );
 
                 ui.add_space(4.0);
                 ui.separator();
@@ -210,6 +238,19 @@ impl eframe::App for QuotifyApp {
                     });
             });
     }
+}
+
+fn open_config_file() -> anyhow::Result<()> {
+    let path = crate::config::AppConfig::config_path();
+    if !path.exists() {
+        crate::config::AppConfig::default().save_to(&path)?;
+    }
+
+    std::process::Command::new("notepad.exe")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 fn render_provider(
