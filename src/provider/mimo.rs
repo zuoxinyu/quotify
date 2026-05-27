@@ -7,24 +7,51 @@ use crate::cookies;
 pub struct MimoProvider {
     #[allow(dead_code)]
     api_key: String,
+    service_token: Option<String>,
+    cookie_header: Option<String>,
     client: reqwest::Client,
 }
 
 impl MimoProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(
+        api_key: String,
+        service_token: Option<String>,
+        cookie_header: Option<String>,
+    ) -> Self {
         Self {
             api_key,
+            service_token,
+            cookie_header,
             client: reqwest::Client::new(),
         }
     }
 
     async fn find_cookie_header(&self) -> Result<String> {
+        // 1. Config: cookie_header (full header string)
+        if let Some(header) = &self.cookie_header {
+            return Ok(header.clone());
+        }
+
+        // 2. Config: service_token
+        if let Some(token) = &self.service_token {
+            return Ok(format!("serviceToken={token}"));
+        }
+
+        // 3. Env: MIMO_COOKIE_HEADER (full header string)
+        if let Ok(header) = std::env::var("MIMO_COOKIE_HEADER")
+            && !header.is_empty()
+        {
+            return Ok(header);
+        }
+
+        // 4. Env: MIMO_SERVICE_TOKEN
         if let Ok(token) = std::env::var("MIMO_SERVICE_TOKEN")
             && !token.is_empty()
         {
             return Ok(format!("serviceToken={token}"));
         }
 
+        // 5. Browser cookies
         // First try exact domain match (covers most cases)
         let exact_domains = [
             "platform.xiaomimimo.com",
@@ -56,42 +83,43 @@ impl MimoProvider {
             }
         }
 
-        anyhow::bail!("No MiMo browser session found. Log in at platform.xiaomimimo.com first")
+        anyhow::bail!("No MiMo browser session found. Set MIMO_SERVICE_TOKEN, configure service_token in config, or log in at platform.xiaomimimo.com first")
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct TokenPlanUsageResponse {
-    data: Option<TokenPlanUsageData>,
+struct MimoApiResponse {
+    data: Option<MimoApiData>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct TokenPlanUsageData {
+#[serde(rename_all = "camelCase")]
+struct MimoApiData {
     #[serde(default)]
-    plans: Vec<TokenPlan>,
+    usage: Option<MimoUsageGroup>,
     #[serde(default)]
-    total_used_tokens: Option<f64>,
-    #[serde(default)]
-    total_remaining_tokens: Option<f64>,
+    month_usage: Option<MimoUsageGroup>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct TokenPlan {
+struct MimoUsageGroup {
+    #[serde(default)]
+    items: Vec<MimoUsageItem>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    percent: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MimoUsageItem {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
-    plan_name: Option<String>,
+    limit: Option<f64>,
     #[serde(default)]
-    used_tokens: Option<f64>,
+    used: Option<f64>,
     #[serde(default)]
-    total_tokens: Option<f64>,
-    #[serde(default)]
-    remaining_tokens: Option<f64>,
-    #[serde(default)]
-    expire_time: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    status: Option<String>,
+    percent: Option<f64>,
 }
 
 #[async_trait::async_trait]
@@ -138,51 +166,77 @@ impl Provider for MimoProvider {
         let mut windows = Vec::new();
         let mut credits = None;
 
-        if let Ok(usage) = serde_json::from_value::<TokenPlanUsageResponse>(body.clone())
-            && let Some(data) = usage.data
+        if let Ok(resp) = serde_json::from_value::<MimoApiResponse>(body.clone())
+            && let Some(data) = resp.data
         {
-            for plan in &data.plans {
-                let label = plan
-                    .plan_name
-                    .as_deref()
-                    .or(plan.name.as_deref())
-                    .unwrap_or("Plan");
+            // Parse monthly usage
+            if let Some(month) = &data.month_usage {
+                for item in &month.items {
+                    let label = item_display_name(item, "Monthly");
+                    let limit = item.limit.unwrap_or(0.0);
+                    let used = item.used.unwrap_or(0.0);
+                    let pct = item
+                        .percent
+                        .map(|p| (p * 100.0).clamp(0.0, 100.0))
+                        .unwrap_or_else(|| {
+                            if limit > 0.0 {
+                                (used / limit * 100.0).clamp(0.0, 100.0)
+                            } else {
+                                0.0
+                            }
+                        });
 
-                let total = plan.total_tokens.unwrap_or(0.0);
-                let used = plan.used_tokens.unwrap_or(0.0);
-                let _remaining = plan.remaining_tokens.unwrap_or(total - used);
-
-                let used_percent = if total > 0.0 {
-                    (used / total * 100.0).clamp(0.0, 100.0)
-                } else {
-                    0.0
-                };
-
-                let resets_at = plan
-                    .expire_time
-                    .as_deref()
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.to_utc());
-
-                windows.push(UsageWindow {
-                    label: label.to_string(),
-                    used_percent,
-                    limit: Some(total),
-                    used: Some(used),
-                    unit: Some("tokens".to_string()),
-                    resets_at,
-                });
+                    windows.push(UsageWindow {
+                        label,
+                        used_percent: pct,
+                        limit: Some(limit),
+                        used: Some(used),
+                        unit: Some("tokens".to_string()),
+                        resets_at: None,
+                    });
+                }
             }
 
-            let total_used = data.total_used_tokens.unwrap_or(0.0);
-            let total_remaining = data.total_remaining_tokens.unwrap_or(0.0);
-            if total_used > 0.0 || total_remaining > 0.0 {
-                credits = Some(CreditsInfo {
-                    balance: total_remaining,
-                    currency: "tokens".to_string(),
-                    total_granted: Some(total_used + total_remaining),
-                    topped_up: None,
-                });
+            // Parse plan usage
+            if let Some(usage) = &data.usage {
+                for item in &usage.items {
+                    let label = item_display_name(item, "Plan");
+                    let limit = item.limit.unwrap_or(0.0);
+                    let used = item.used.unwrap_or(0.0);
+                    let pct = item
+                        .percent
+                        .map(|p| (p * 100.0).clamp(0.0, 100.0))
+                        .unwrap_or_else(|| {
+                            if limit > 0.0 {
+                                (used / limit * 100.0).clamp(0.0, 100.0)
+                            } else {
+                                0.0
+                            }
+                        });
+
+                    windows.push(UsageWindow {
+                        label,
+                        used_percent: pct,
+                        limit: Some(limit),
+                        used: Some(used),
+                        unit: Some("tokens".to_string()),
+                        resets_at: None,
+                    });
+                }
+            }
+
+            // Compute credits from the main plan usage group
+            if let Some(usage) = &data.usage {
+                let total_limit: f64 = usage.items.iter().filter_map(|i| i.limit).sum();
+                let total_used: f64 = usage.items.iter().filter_map(|i| i.used).sum();
+                if total_limit > 0.0 {
+                    credits = Some(CreditsInfo {
+                        balance: total_limit - total_used,
+                        currency: "tokens".to_string(),
+                        total_granted: Some(total_limit),
+                        topped_up: None,
+                    });
+                }
             }
         }
 
@@ -204,5 +258,15 @@ impl Provider for MimoProvider {
             fetched_at: Utc::now(),
             error: None,
         })
+    }
+}
+
+fn item_display_name(item: &MimoUsageItem, fallback: &str) -> String {
+    match item.name.as_deref() {
+        Some("month_total_token") => "Monthly".to_string(),
+        Some("plan_total_token") => "Plan".to_string(),
+        Some("compensation_total_token") => "Compensation".to_string(),
+        Some(other) => other.replace('_', " "),
+        None => fallback.to_string(),
     }
 }

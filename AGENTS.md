@@ -45,4 +45,4 @@ Two registration points — miss either and the provider is silently ignored:
 Add focused unit tests alongside code when touching parsing, config, or provider logic. Prefer deterministic parser tests over live API calls. No integration test infrastructure yet.
 
 ## Security
-Never commit API keys, auth files, or usage data. Supported env vars: `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ANTIGRAVITY_API_KEY`, `OPENCODE_WORKSPACE_ID`, `OPENCODE_AUTH_COOKIE`, `MIMO_SERVICE_TOKEN`.
+Never commit API keys, auth files, or usage data. Supported env vars: `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ANTIGRAVITY_API_KEY`, `OPENCODE_WORKSPACE_ID`, `OPENCODE_AUTH_COOKIE`, `MIMO_SERVICE_TOKEN`, `MIMO_COOKIE_HEADER`, `CLAUDE_SESSION_KEY`, `CLAUDE_ACCESS_TOKEN`, `ANTHROPIC_ADMIN_KEY`, `ANTHROPIC_API_KEY`.

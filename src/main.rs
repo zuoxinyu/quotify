@@ -78,8 +78,36 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "claude" => {
+            let session_key = if config.claude.session_key.is_empty() {
+                None
+            } else {
+                Some(config.claude.session_key.clone())
+            };
+            let api_key = if config.claude.api_key.is_empty() {
+                None
+            } else {
+                Some(config.claude.api_key.clone())
+            };
+            let access_token = if config.claude.access_token.is_empty() {
+                None
+            } else {
+                Some(config.claude.access_token.clone())
+            };
+            let auth_file = if config.claude.auth_file.is_empty() {
+                None
+            } else {
+                Some(config.claude.auth_file.clone())
+            };
+
             let has_creds = config.claude.enabled
-                || !config.claude.auth_file.is_empty()
+                || auth_file.is_some()
+                || session_key.is_some()
+                || api_key.is_some()
+                || access_token.is_some()
+                || std::env::var("CLAUDE_SESSION_KEY").is_ok()
+                || std::env::var("CLAUDE_ACCESS_TOKEN").is_ok()
+                || std::env::var("ANTHROPIC_ADMIN_KEY").is_ok()
+                || std::env::var("ANTHROPIC_API_KEY").is_ok()
                 || dirs::home_dir()
                     .unwrap_or_default()
                     .join(".claude")
@@ -90,13 +118,14 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     .join(".claude")
                     .join("settings.json")
                     .exists();
+
             if has_creds {
-                let auth_file = if config.claude.auth_file.is_empty() {
-                    None
-                } else {
-                    Some(config.claude.auth_file.clone())
-                };
-                Some(Box::new(ClaudeProvider::new(auth_file)))
+                Some(Box::new(ClaudeProvider::new(
+                    auth_file,
+                    session_key,
+                    api_key,
+                    access_token,
+                )))
             } else {
                 None
             }
@@ -192,8 +221,32 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "mimo" => {
-            if config.mimo.enabled {
-                Some(Box::new(MimoProvider::new(config.mimo.api_key.clone())))
+            let service_token = if config.mimo.service_token.is_empty() {
+                None
+            } else {
+                Some(config.mimo.service_token.clone())
+            };
+            let cookie_header = if config.mimo.cookie_header.is_empty() {
+                None
+            } else {
+                Some(config.mimo.cookie_header.clone())
+            };
+
+            if config.mimo.enabled
+                || service_token.is_some()
+                || cookie_header.is_some()
+                || std::env::var("MIMO_SERVICE_TOKEN")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+                || std::env::var("MIMO_COOKIE_HEADER")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(MimoProvider::new(
+                    config.mimo.api_key.clone(),
+                    service_token,
+                    cookie_header,
+                )))
             } else {
                 None
             }

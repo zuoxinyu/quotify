@@ -34,6 +34,12 @@ pub struct ClaudeConfig {
     pub enabled: bool,
     #[serde(default)]
     pub auth_file: String,
+    #[serde(default)]
+    pub session_key: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub access_token: String,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +76,10 @@ pub struct MimoConfig {
     pub enabled: bool,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub service_token: String,
+    #[serde(default)]
+    pub cookie_header: String,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
