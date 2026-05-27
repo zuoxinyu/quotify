@@ -47,7 +47,8 @@ impl MimoProvider {
         ] {
             if let Ok(token) = cookies::find_cookie(domain, "serviceToken").await {
                 tracing::debug!("MiMo: found serviceToken via find_cookie for {domain}");
-                let full_cookie = cookies::find_cookie_header(&[domain, &format!(".{domain}")]).await;
+                let full_cookie =
+                    cookies::find_cookie_header(&[domain, &format!(".{domain}")]).await;
                 match full_cookie {
                     Ok(header) => return Ok(header),
                     Err(_) => return Ok(format!("serviceToken={token}")),

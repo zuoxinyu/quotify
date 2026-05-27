@@ -37,7 +37,7 @@ regex = "1"
 cookie-scoop = "0.1"
 eframe = { version = "0.34", features = ["glow"] }
 egui = "0.34"
-egui_extras = "0.34"
+egui_extras = { version = "0.34", features = ["svg"] }
 winit = { version = "0.30", default-features = false }
 image = { version = "0.25", features = ["png"] }
 parking_lot = "0.12"

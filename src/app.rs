@@ -40,6 +40,8 @@ impl eframe::App for QuotifyApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        egui_extras::install_image_loaders(&ctx);
+
         // Redraw every second to update the "Refreshed X seconds ago" counter,
         // but ONLY if the window is active/focused. When the window loses focus,
         // it hides itself. If we request repaint while hidden, winit's swapchain
@@ -257,7 +259,7 @@ fn open_config_file() -> anyhow::Result<()> {
 
 fn render_provider(
     ui: &mut egui::Ui,
-    _provider_name: &str,
+    provider_name: &str,
     provider_display_name: &str,
     data: Option<&UsageData>,
     card_width: f32,
@@ -293,6 +295,7 @@ fn render_provider(
                 ui.set_max_width(card_width);
                 render_provider_card(
                     ui,
+                    provider_name,
                     provider_display_name,
                     status,
                     credits,
@@ -310,6 +313,7 @@ fn render_provider(
 #[allow(clippy::too_many_arguments)]
 fn render_provider_card(
     ui: &mut egui::Ui,
+    provider_name: &str,
     provider_display_name: &str,
     status: ProviderStatus,
     credits: Option<&crate::provider::CreditsInfo>,
@@ -333,25 +337,9 @@ fn render_provider_card(
             egui::vec2(content_width, 24.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                // Status Dot
-                let dot_color = if is_dark {
-                    match status {
-                        ProviderStatus::Active => egui::Color32::from_rgb(108, 203, 95), // Fluent Green
-                        ProviderStatus::Error => egui::Color32::from_rgb(255, 108, 108), // Fluent Red
-                        ProviderStatus::Disabled => egui::Color32::from_rgb(161, 161, 161), // Fluent Gray
-                    }
-                } else {
-                    match status {
-                        ProviderStatus::Active => egui::Color32::from_rgb(16, 124, 65), // Fluent Green (Darker)
-                        ProviderStatus::Error => egui::Color32::from_rgb(196, 43, 28), // Fluent Red (Darker)
-                        ProviderStatus::Disabled => egui::Color32::from_rgb(118, 118, 118), // Fluent Gray (Darker)
-                    }
-                };
-                let (dot_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter()
-                    .circle_filled(dot_rect.center(), 4.0, dot_color);
-                ui.add_space(6.0);
+                if render_provider_icon(ui, provider_name, is_dark) {
+                    ui.add_space(6.0);
+                }
 
                 // Title
                 ui.label(
@@ -580,6 +568,67 @@ fn render_provider_card(
     if response.response.rect.width() < card_width {
         ui.allocate_space(egui::vec2(card_width, 0.0));
     }
+}
+
+fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource<'static>> {
+    match (provider_name, is_dark) {
+        ("codex", true) => Some(egui::include_image!(
+            "../assets/provider-icons/codex-dark.svg"
+        )),
+        ("codex", false) => Some(egui::include_image!("../assets/provider-icons/codex.svg")),
+        ("opencode", true) => Some(egui::include_image!(
+            "../assets/provider-icons/opencode-dark.svg"
+        )),
+        ("opencode", false) => Some(egui::include_image!(
+            "../assets/provider-icons/opencode.svg"
+        )),
+        ("claude", _) => Some(egui::include_image!("../assets/provider-icons/claude.svg")),
+        ("gemini", _) => Some(egui::include_image!("../assets/provider-icons/gemini.svg")),
+        ("antigravity", _) => Some(egui::include_image!(
+            "../assets/provider-icons/antigravity.svg"
+        )),
+        ("deepseek", _) => Some(egui::include_image!(
+            "../assets/provider-icons/deepseek.svg"
+        )),
+        _ => None,
+    }
+}
+
+fn render_provider_icon(ui: &mut egui::Ui, provider_name: &str, is_dark: bool) -> bool {
+    if let Some(icon) = provider_icon(provider_name, is_dark) {
+        ui.add(
+            egui::Image::new(icon)
+                .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                .maintain_aspect_ratio(true),
+        );
+        return true;
+    }
+
+    if provider_name == "mimo" {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+        let (bg, fg) = if is_dark {
+            (
+                egui::Color32::from_rgb(54, 69, 89),
+                egui::Color32::from_rgb(210, 225, 255),
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(232, 240, 255),
+                egui::Color32::from_rgb(37, 70, 130),
+            )
+        };
+        ui.painter().circle_filled(rect.center(), 9.0, bg);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "M",
+            egui::FontId::proportional(11.0),
+            fg,
+        );
+        return true;
+    }
+
+    false
 }
 
 fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {
