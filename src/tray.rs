@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use windows::Win32::Foundation::POINT;
@@ -59,6 +59,22 @@ pub static TRAY_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
 static CURRENT_HICON: Mutex<Option<SendHICON>> = Mutex::new(None);
+static REFRESH_SIGNAL: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
+
+fn refresh_signal() -> &'static (Mutex<()>, Condvar) {
+    REFRESH_SIGNAL.get_or_init(|| (Mutex::new(()), Condvar::new()))
+}
+
+pub fn request_refresh() {
+    REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    refresh_signal().1.notify_one();
+}
+
+pub fn wait_for_refresh_or_timeout(timeout: std::time::Duration) {
+    let (lock, cvar) = refresh_signal();
+    let mut guard = lock.lock();
+    cvar.wait_for(&mut guard, timeout);
+}
 
 unsafe extern "system" fn tray_wnd_proc(
     hwnd: HWND,
@@ -137,7 +153,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     IDM_REFRESH => {
-                        REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        request_refresh();
                     }
                     IDM_QUIT => {
                         if let Some(&shwnd) = MAIN_HWND.get() {

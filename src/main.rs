@@ -375,7 +375,8 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
         loop {
             let forced = tray::REFRESH_REQUESTED.swap(false, Ordering::SeqCst);
             let now = std::time::Instant::now();
-            if forced || now.duration_since(last_fetch).as_secs() >= min_refresh_interval {
+            let elapsed = now.duration_since(last_fetch);
+            if forced || elapsed.as_secs() >= min_refresh_interval {
                 bg_rt.block_on(fetch_all_providers(
                     &config_bg,
                     data_bg.clone(),
@@ -394,8 +395,12 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
                     let _ = main_hwnd.post_message(tray::WM_APP_UPDATE_DATA, WPARAM(0), LPARAM(0));
                 }
                 last_fetch = std::time::Instant::now(); // Update last_fetch here after a successful run
+                continue;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            let wait_for =
+                std::time::Duration::from_secs(min_refresh_interval).saturating_sub(elapsed);
+            tray::wait_for_refresh_or_timeout(wait_for);
         }
     });
 
@@ -407,20 +412,21 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     std::thread::spawn(move || {
         let win_w = 400.0_f32;
         let win_h = 520.0_f32;
-        let pos = compute_popup_position(win_w, win_h);
+        let pos = hidden_popup_position();
 
         let app = app::QuotifyApp::new(data_window, last_refresh_window, config_window);
 
         let native_options = eframe::NativeOptions {
+            renderer: eframe::Renderer::Glow,
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_inner_size([win_w, win_h])
-                .with_position(eframe::egui::pos2(pos[0], pos[1]))
+                .with_position(eframe::egui::pos2(pos[0] as f32, pos[1] as f32))
                 .with_title("Quotify - AI Quota Monitor")
                 .with_resizable(true)
                 .with_decorations(false)
                 .with_taskbar(false)
                 .with_transparent(true)
-                .with_visible(false),
+                .with_visible(true),
             event_loop_builder: Some(Box::new(|builder| {
                 #[cfg(target_os = "windows")]
                 {
@@ -471,11 +477,10 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
                     let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
                     apply_mica_backdrop(hwnd);
                     apply_rounded_window_region(hwnd);
+                    move_popup_offscreen(hwnd);
+                    set_dwm_cloak(hwnd, true);
                     unsafe {
                         let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
-                        // Initially hide the window so it only pops up on click
-                        use windows::Win32::UI::WindowsAndMessaging::ShowWindow;
-                        let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
                     }
                 } else {
                     tracing::error!("Could not find Quotify main window HWND");
@@ -663,13 +668,13 @@ unsafe extern "system" fn main_window_subclass(
     unsafe {
         use windows::Win32::UI::Shell::DefSubclassProc;
         use windows::Win32::UI::WindowsAndMessaging::{
-            IsWindowVisible, SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
-            WM_CLOSE, WM_DESTROY, WM_SIZE,
+            SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
+            WM_DESTROY, WM_SIZE,
         };
 
         match msg {
             tray::WM_APP_SHOW => {
-                if IsWindowVisible(hwnd).as_bool() {
+                if tray::WINDOW_VISIBLE.load(Ordering::SeqCst) {
                     hide_popup_window(hwnd);
                     return LRESULT(0);
                 }
@@ -678,6 +683,7 @@ unsafe extern "system" fn main_window_subclass(
                 let pos = compute_popup_position(win_w, win_h);
                 *inactive_guard().lock() = Some(Instant::now() + Duration::from_millis(350));
                 apply_rounded_window_region(hwnd);
+                set_dwm_cloak(hwnd, false);
                 show_popup_window(hwnd, pos);
                 let _ = SetForegroundWindow(hwnd);
 
@@ -707,7 +713,9 @@ unsafe extern "system" fn main_window_subclass(
                 LRESULT(0)
             }
             tray::WM_APP_UPDATE_DATA => {
-                if let Some(ctx) = EGUI_CONTEXT.get() {
+                if tray::WINDOW_VISIBLE.load(Ordering::SeqCst)
+                    && let Some(ctx) = EGUI_CONTEXT.get()
+                {
                     ctx.request_repaint();
                 }
                 LRESULT(0)
@@ -848,6 +856,56 @@ fn show_popup_window(hwnd: HWND, final_pos: [f32; 2]) {
     }
 }
 
+fn hidden_popup_position() -> [i32; 2] {
+    [-32000, -32000]
+}
+
+fn move_popup_offscreen(hwnd: HWND) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos,
+        };
+        let pos = hidden_popup_position();
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            pos[0],
+            pos[1],
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+    }
+}
+
+fn set_dwm_cloak(hwnd: HWND, cloaked: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+
+        let value: i32 = if cloaked { 1 } else { 0 };
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAK,
+                &value as *const _ as *const _,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (hwnd, cloaked);
+    }
+}
+
 fn popup_anchor_y() -> Option<f32> {
     #[cfg(target_os = "windows")]
     {
@@ -929,15 +987,8 @@ fn is_pointer_on_tray_icon() -> bool {
 fn hide_popup_window(hwnd: HWND) {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SW_HIDE, ShowWindow};
         *inactive_guard().lock() = None;
         tray::WINDOW_VISIBLE.store(false, Ordering::SeqCst);
-
-        unsafe {
-            if !IsWindowVisible(hwnd).as_bool() {
-                return;
-            }
-        }
 
         // BEFORE the slide-down animation starts, make it standard (NOTOPMOST) so it slides behind the taskbar
         unsafe {
@@ -999,12 +1050,8 @@ fn hide_popup_window(hwnd: HWND) {
                 return; // Aborted
             }
 
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-            }
-            if let Some(ctx) = EGUI_CONTEXT.get() {
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
-            }
+            move_popup_offscreen(hwnd);
+            set_dwm_cloak(hwnd, true);
         });
     }
 

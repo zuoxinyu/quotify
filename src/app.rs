@@ -183,6 +183,8 @@ impl eframe::App for QuotifyApp {
                                 tracing::error!("Failed to open config file: {err}");
                             }
 
+                            ui.add_space(8.0);
+
                             ui.add_sized(
                                 [64.0, 24.0],
                                 egui::Label::new(
@@ -196,8 +198,7 @@ impl eframe::App for QuotifyApp {
                                 .add_sized([28.0, 28.0], egui::Button::new("↻").frame(false))
                                 .on_hover_text("Refresh usage now");
                             if refresh.clicked() {
-                                crate::tray::REFRESH_REQUESTED
-                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                crate::tray::request_refresh();
                                 ctx.request_repaint();
                             }
 

@@ -260,8 +260,8 @@ impl AntigravityProvider {
             .bearer_auth(access_token)
             .json(&json!({
                 "metadata": {
-                    "ideType": "ANTIGRAVITY_CLI",
-                    "pluginType": "ANTIGRAVITY"
+                    "ideType": "GEMINI_CLI",
+                    "pluginType": "GEMINI"
                 }
             }))
             .send()
