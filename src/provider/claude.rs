@@ -334,7 +334,9 @@ impl ClaudeProvider {
     fn read_settings_env() -> Option<(String, Option<String>)> {
         if let Ok(admin_key) = std::env::var("ANTHROPIC_ADMIN_KEY") {
             if !admin_key.is_empty() {
-                let base_url = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|u| !u.is_empty());
+                let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                    .ok()
+                    .filter(|u| !u.is_empty());
                 return Some((admin_key, base_url));
             }
         }
@@ -367,8 +369,14 @@ impl Provider for ClaudeProvider {
         let mut source = "unknown";
 
         // Method 1: Try OAuth token (manual config / env var / credentials file)
-        let oauth_token = self.access_token.clone()
-            .or_else(|| std::env::var("CLAUDE_ACCESS_TOKEN").ok().filter(|t| !t.is_empty()))
+        let oauth_token = self
+            .access_token
+            .clone()
+            .or_else(|| {
+                std::env::var("CLAUDE_ACCESS_TOKEN")
+                    .ok()
+                    .filter(|t| !t.is_empty())
+            })
             .or_else(|| self.read_oauth_token());
 
         if let Some(access_token) = oauth_token {
@@ -385,8 +393,11 @@ impl Provider for ClaudeProvider {
 
         // Method 2: Try browser cookie / manual cookie (manual config / env var / browser cookie)
         if windows.is_empty() {
-            let mut session_key = self.session_key.clone()
-                .or_else(|| std::env::var("CLAUDE_SESSION_KEY").ok().filter(|k| !k.is_empty()));
+            let mut session_key = self.session_key.clone().or_else(|| {
+                std::env::var("CLAUDE_SESSION_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+            });
 
             if session_key.is_none() {
                 session_key = self.read_cookie_session_key().await;
@@ -409,7 +420,10 @@ impl Provider for ClaudeProvider {
 
         // Method 3: Try API key (manual config / env vars / settings files)
         if windows.is_empty() {
-            let api_key_and_url = self.api_key.clone().map(|k| (k, None))
+            let api_key_and_url = self
+                .api_key
+                .clone()
+                .map(|k| (k, None))
                 .or_else(|| self.read_api_key());
 
             if let Some((api_key, base_url)) = api_key_and_url {
@@ -644,15 +658,14 @@ impl ClaudeProvider {
         Ok(parse_usage_windows(&usage))
     }
 
-    async fn fetch_via_admin_api(
-        &self,
-        api_key: &str,
-        base_url: &str,
-    ) -> Result<Vec<UsageWindow>> {
+    async fn fetch_via_admin_api(&self, api_key: &str, base_url: &str) -> Result<Vec<UsageWindow>> {
         let ending_at = Utc::now();
         let starting_at = ending_at - chrono::Duration::days(30);
 
-        let url = format!("{}/v1/organizations/cost_report", base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/organizations/cost_report",
+            base_url.trim_end_matches('/')
+        );
 
         let resp = self
             .client
@@ -694,7 +707,12 @@ impl ClaudeProvider {
         let mut thirty_day_cost = 0.0;
 
         let now = Utc::now();
-        let start_of_today = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(Utc).unwrap();
+        let start_of_today = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(Utc)
+            .unwrap();
         let start_of_seven_days = now - chrono::Duration::days(7);
 
         if let Some(items) = report.data {

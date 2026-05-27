@@ -6,6 +6,8 @@ use std::path::PathBuf;
 pub struct GeneralConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval: u64,
+    #[serde(default)]
+    pub active_provider: String,
 }
 
 fn default_refresh_interval() -> u64 {
@@ -16,6 +18,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             refresh_interval: default_refresh_interval(),
+            active_provider: String::new(),
         }
     }
 }

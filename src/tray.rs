@@ -59,6 +59,7 @@ pub static TRAY_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
 static CURRENT_HICON: Mutex<Option<SendHICON>> = Mutex::new(None);
+static CURRENT_TOOLTIP: Mutex<String> = Mutex::new(String::new());
 static REFRESH_SIGNAL: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
 
 fn refresh_signal() -> &'static (Mutex<()>, Condvar) {
@@ -90,7 +91,8 @@ unsafe extern "system" fn tray_wnd_proc(
 
         if msg == taskbar_created {
             if let Some(shicon) = *CURRENT_HICON.lock() {
-                let _ = register_tray_icon(hwnd, shicon.0);
+                let tooltip = CURRENT_TOOLTIP.lock().clone();
+                let _ = register_tray_icon(hwnd, shicon.0, &tooltip);
             }
             return LRESULT(1);
         }
@@ -175,12 +177,16 @@ unsafe extern "system" fn tray_wnd_proc(
     }
 }
 
-fn register_tray_icon(hwnd: HWND, hicon: HICON) -> windows::core::Result<()> {
-    let tooltip = "Quotify - AI Quota Monitor";
+fn tooltip_utf16(tooltip: &str) -> [u16; 128] {
     let mut tip_utf16 = [0u16; 128];
     let encoded: Vec<u16> = tooltip.encode_utf16().collect();
     let len = encoded.len().min(127);
     tip_utf16[..len].copy_from_slice(&encoded[..len]);
+    tip_utf16
+}
+
+fn register_tray_icon(hwnd: HWND, hicon: HICON, tooltip: &str) -> windows::core::Result<()> {
+    let tip_utf16 = tooltip_utf16(tooltip);
 
     let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -202,13 +208,16 @@ fn register_tray_icon(hwnd: HWND, hicon: HICON) -> windows::core::Result<()> {
     }
 }
 
-fn update_tray_icon(hwnd: HWND, hicon: HICON) -> windows::core::Result<()> {
+fn update_tray_icon(hwnd: HWND, hicon: HICON, tooltip: &str) -> windows::core::Result<()> {
+    let tip_utf16 = tooltip_utf16(tooltip);
+
     let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
-        uFlags: NIF_ICON,
+        uFlags: NIF_ICON | NIF_TIP,
         hIcon: hicon,
+        szTip: tip_utf16,
         ..Default::default()
     };
 
@@ -292,7 +301,7 @@ impl TrayController {
         self.hwnd
     }
 
-    pub fn update_icon(&self, hicon: HICON) {
+    pub fn update_icon_with_tooltip(&self, hicon: HICON, tooltip: &str) {
         let mut current = CURRENT_HICON.lock();
         if let Some(old_shicon) = *current {
             unsafe {
@@ -300,9 +309,10 @@ impl TrayController {
             }
         }
         *current = Some(SendHICON(hicon));
+        *CURRENT_TOOLTIP.lock() = tooltip.to_string();
 
-        if update_tray_icon(self.hwnd, hicon).is_err() {
-            let _ = register_tray_icon(self.hwnd, hicon);
+        if update_tray_icon(self.hwnd, hicon, tooltip).is_err() {
+            let _ = register_tray_icon(self.hwnd, hicon, tooltip);
         }
     }
 }

@@ -395,10 +395,20 @@ fn provider_error_data(provider: String, error: String) -> UsageData {
     }
 }
 
+fn active_provider_option(active_provider: &str) -> Option<&str> {
+    let active_provider = active_provider.trim();
+    if active_provider.is_empty() {
+        None
+    } else {
+        Some(active_provider)
+    }
+}
+
 fn run_tray(config: config::AppConfig) -> Result<()> {
     let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(Vec::new()));
     let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> =
         Arc::new(RwLock::new(chrono::Utc::now()));
+    let active_provider = config.general.active_provider.trim().to_string();
 
     let tray_controller =
         Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
@@ -406,10 +416,14 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     // Set initial loading icon before data is fetched
     let initial_icon = {
         let d = data.read();
-        icon::generate_icon(&d)
+        icon::generate_icon(&d, active_provider_option(&active_provider))
     };
     if let Ok(hicon) = initial_icon.to_hicon() {
-        tray_controller.update_icon(hicon);
+        let tooltip = {
+            let d = data.read();
+            icon::tray_tooltip(&d, active_provider_option(&active_provider))
+        };
+        tray_controller.update_icon_with_tooltip(hicon, &tooltip);
     }
 
     let refresh_interval = config.general.refresh_interval;
@@ -417,6 +431,7 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     let last_refresh_bg = last_refresh.clone();
     let config_bg = config.clone();
     let tc_bg = tray_controller.clone();
+    let active_provider_bg = active_provider.clone();
 
     // Spawn background refresh thread
     std::thread::spawn(move || {
@@ -438,9 +453,11 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
 
                 // Regenerate HICON
                 let d = data_bg.read();
-                let new_icon = icon::generate_icon(&d);
+                let active_provider = active_provider_option(&active_provider_bg);
+                let new_icon = icon::generate_icon(&d, active_provider);
+                let tooltip = icon::tray_tooltip(&d, active_provider);
                 if let Ok(hicon) = new_icon.to_hicon() {
-                    tc_bg.update_icon(hicon);
+                    tc_bg.update_icon_with_tooltip(hicon, &tooltip);
                 }
 
                 // Notify the main window to redraw with new data
