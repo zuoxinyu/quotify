@@ -212,7 +212,7 @@ fn aggregate_percent(data: &[UsageData]) -> f64 {
 
 fn provider_display_name(provider: &str) -> String {
     match provider.to_ascii_lowercase().as_str() {
-        "codex" => "Codex / OpenAI".to_string(),
+        "codex" => "Codex".to_string(),
         "opencode" => "OpenCode".to_string(),
         "claude" => "Claude".to_string(),
         "gemini" => "Gemini".to_string(),

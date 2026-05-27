@@ -408,7 +408,9 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(Vec::new()));
     let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> =
         Arc::new(RwLock::new(chrono::Utc::now()));
-    let active_provider = config.general.active_provider.trim().to_string();
+    let active_provider = Arc::new(RwLock::new(
+        config.general.active_provider.trim().to_string(),
+    ));
 
     let tray_controller =
         Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
@@ -416,11 +418,13 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     // Set initial loading icon before data is fetched
     let initial_icon = {
         let d = data.read();
+        let active_provider = active_provider.read();
         icon::generate_icon(&d, active_provider_option(&active_provider))
     };
     if let Ok(hicon) = initial_icon.to_hicon() {
         let tooltip = {
             let d = data.read();
+            let active_provider = active_provider.read();
             icon::tray_tooltip(&d, active_provider_option(&active_provider))
         };
         tray_controller.update_icon_with_tooltip(hicon, &tooltip);
@@ -453,6 +457,7 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
 
                 // Regenerate HICON
                 let d = data_bg.read();
+                let active_provider_bg = active_provider_bg.read();
                 let active_provider = active_provider_option(&active_provider_bg);
                 let new_icon = icon::generate_icon(&d, active_provider);
                 let tooltip = icon::tray_tooltip(&d, active_provider);
@@ -478,13 +483,19 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     let data_window = data.clone();
     let last_refresh_window = last_refresh.clone();
     let config_window = config.clone();
+    let active_provider_window = active_provider.clone();
 
     std::thread::spawn(move || {
         let win_w = 400.0_f32;
         let win_h = 520.0_f32;
         let pos = hidden_popup_position();
 
-        let app = app::QuotifyApp::new(data_window, last_refresh_window, config_window);
+        let app = app::QuotifyApp::new(
+            data_window,
+            last_refresh_window,
+            config_window,
+            active_provider_window,
+        );
 
         let native_options = eframe::NativeOptions {
             renderer: eframe::Renderer::Glow,

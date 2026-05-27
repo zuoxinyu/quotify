@@ -296,6 +296,10 @@ impl TrayController {
         Ok(Self { hwnd })
     }
 
+    pub fn from_hwnd(hwnd: HWND) -> Self {
+        Self { hwnd }
+    }
+
     #[allow(dead_code)]
     pub fn hwnd(&self) -> HWND {
         self.hwnd
