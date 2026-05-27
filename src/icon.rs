@@ -70,11 +70,11 @@ fn percent_color(pct: f64) -> [u8; 3] {
     }
 }
 
-pub fn generate_icon(data: &[UsageData]) -> TrayIcon {
+pub fn generate_icon(data: &[UsageData], active_provider: Option<&str>) -> TrayIcon {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
 
-    let pct = aggregate_percent(data);
+    let pct = icon_percent(data, active_provider);
     let color = percent_color(pct);
     let label = format_pct(pct);
 
@@ -132,30 +132,95 @@ pub fn generate_icon(data: &[UsageData]) -> TrayIcon {
     }
 }
 
-fn aggregate_percent(data: &[UsageData]) -> f64 {
-    let valid: Vec<f64> = data
+pub fn tray_tooltip(data: &[UsageData], active_provider: Option<&str>) -> String {
+    let Some(active_provider) = active_provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    else {
+        let pct = aggregate_percent(data);
+        return format!("Quotify - AI Quota Monitor\nAll providers: {pct:.0}%");
+    };
+
+    let display_name = provider_display_name(active_provider);
+    let Some(provider) = data
         .iter()
-        .filter(|d| d.error.is_none() && d.has_data())
-        .filter_map(|d| {
-            let percents: Vec<f64> = d
-                .windows
-                .iter()
-                .filter(|w| w.label != "No data" && w.label != "Error" && w.label != "Connected")
-                .filter(|w| w.used_percent > 0.0)
-                .map(|w| w.used_percent)
-                .collect();
-            if percents.is_empty() {
-                None
-            } else {
-                Some(percents.into_iter().fold(0.0f64, f64::max))
-            }
-        })
-        .collect();
+        .find(|data| data.provider.eq_ignore_ascii_case(active_provider))
+    else {
+        return format!("Quotify - {display_name}\nNo usage data");
+    };
+
+    if let Some(error) = provider.error.as_deref() {
+        return format!("Quotify - {display_name}\nError: {error}");
+    }
+
+    let windows = valid_windows(provider);
+    if windows.is_empty() {
+        return format!("Quotify - {display_name}\nNo usage data");
+    }
+
+    let max_pct = provider_percent(provider).unwrap_or(0.0);
+    let details = windows
+        .into_iter()
+        .take(3)
+        .map(|window| format!("{} {:.0}%", window.label, window.used_percent))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Quotify - {display_name}\nMax {max_pct:.0}%\n{details}")
+}
+
+fn icon_percent(data: &[UsageData], active_provider: Option<&str>) -> f64 {
+    if let Some(active_provider) = active_provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        && let Some(provider) = data
+            .iter()
+            .find(|data| data.provider.eq_ignore_ascii_case(active_provider))
+    {
+        return provider_percent(provider).unwrap_or(0.0);
+    }
+
+    aggregate_percent(data)
+}
+
+fn provider_percent(data: &UsageData) -> Option<f64> {
+    if data.error.is_some() || !data.has_data() {
+        return None;
+    }
+
+    let percents = valid_windows(data)
+        .into_iter()
+        .filter(|window| window.used_percent > 0.0)
+        .map(|window| window.used_percent);
+    percents.reduce(f64::max)
+}
+
+fn valid_windows(data: &UsageData) -> Vec<&crate::provider::UsageWindow> {
+    data.windows
+        .iter()
+        .filter(|w| w.label != "No data" && w.label != "Error" && w.label != "Connected")
+        .collect()
+}
+
+fn aggregate_percent(data: &[UsageData]) -> f64 {
+    let valid: Vec<f64> = data.iter().filter_map(provider_percent).collect();
 
     if valid.is_empty() {
         return 0.0;
     }
     valid.iter().sum::<f64>() / valid.len() as f64
+}
+
+fn provider_display_name(provider: &str) -> String {
+    match provider.to_ascii_lowercase().as_str() {
+        "codex" => "Codex / OpenAI".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        "claude" => "Claude".to_string(),
+        "gemini" => "Gemini".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        "deepseek" => "DeepSeek".to_string(),
+        "mimo" => "MiMo".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn format_pct(pct: f64) -> String {

@@ -83,7 +83,9 @@ impl MimoProvider {
             }
         }
 
-        anyhow::bail!("No MiMo browser session found. Set MIMO_SERVICE_TOKEN, configure service_token in config, or log in at platform.xiaomimimo.com first")
+        anyhow::bail!(
+            "No MiMo browser session found. Set MIMO_SERVICE_TOKEN, configure service_token in config, or log in at platform.xiaomimimo.com first"
+        )
     }
 }
 
