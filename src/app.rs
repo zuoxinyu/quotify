@@ -186,8 +186,8 @@ impl eframe::App for QuotifyApp {
                             ui.label(
                                 egui::RichText::new("Quotify")
                                     .strong()
-                                    .size(18.0)
-                                    .line_height(Some(31.0)),
+                                    .size(16.0)
+                                    .line_height(Some(24.0)),
                             );
 
                             ui.add_space(1.0);
@@ -195,8 +195,8 @@ impl eframe::App for QuotifyApp {
                             let settings = icon_button(
                                 ui,
                                 egui::include_image!("../assets/icons/settings.svg"),
-                                egui::vec2(28.0, 28.0),
-                                egui::vec2(18.0, 18.0),
+                                egui::vec2(24.0, 24.0),
+                                egui::vec2(16.0, 16.0),
                                 "Open configuration file",
                             );
                             if settings.clicked()
@@ -210,8 +210,8 @@ impl eframe::App for QuotifyApp {
                             let refresh = icon_button(
                                 ui,
                                 egui::include_image!("../assets/icons/refresh.svg"),
-                                egui::vec2(28.0, 28.0),
-                                egui::vec2(18.0, 18.0),
+                                egui::vec2(24.0, 24.0),
+                                egui::vec2(16.0, 16.0),
                                 "Refresh usage now",
                             );
                             if refresh.clicked() {
@@ -221,8 +221,12 @@ impl eframe::App for QuotifyApp {
 
                             ui.add_sized(
                                 [60.0, 24.0],
-                                egui::Label::new(egui::RichText::new(refresh_age).small().weak())
-                                    .truncate(),
+                                egui::Label::new(
+                                    egui::RichText::new(refresh_age)
+                                        .small()
+                                        .color(egui::Color32::from_rgb(150, 150, 150)),
+                                )
+                                .truncate(),
                             );
                         });
                     },
@@ -289,8 +293,13 @@ fn icon_button(
     let image = egui::Image::new(image)
         .fit_to_exact_size(icon_size)
         .maintain_aspect_ratio(true);
-    ui.add_sized(button_size, egui::Button::image(image).frame(false))
-        .on_hover_text(tooltip)
+    ui.add_sized(
+        button_size,
+        egui::Button::image(image)
+            .frame(true)
+            .frame_when_inactive(false),
+    )
+    .on_hover_text(tooltip)
 }
 
 fn render_provider(
