@@ -9,7 +9,6 @@ Windows system tray AI provider quota monitor. **Windows-only** — uses Win32 A
 - `src/config.rs` — TOML config, stored at platform config dir (`AppData/Roaming/quotify/quotify.toml`)
 - `src/tray.rs` — Win32 tray icon, message loop, custom window subclass
 - `src/icon.rs` — Dynamic HICON generation (usage dots)
-- `src/cookies.rs` — Cookie helpers for browser-auth providers
 - `src/provider/` — `Provider` trait + one file per provider (`claude.rs`, `codex.rs`, `gemini.rs`, `deepseek.rs`, `opencode.rs`, `mimo.rs`, `antigravity.rs`)
 
 ## Adding a Provider
@@ -39,7 +38,7 @@ Two registration points — miss either and the provider is silently ignored:
 - Three threads: Win32 message loop (main), background fetch (tokio runtime), eframe UI window
 - Tray icon is the entry point; popup window starts offscreen and animates in via Win32 `SetWindowPos`
 - Config auto-creates with defaults on first load; secrets go in config file or env vars
-- Provider auth varies: API keys (deepseek, gemini), auth files (claude, codex), cookies (opencode, mimo)
+- Provider auth varies: API keys (deepseek, gemini), auth files (claude, codex), explicit cookie values from config/env (opencode, mimo)
 
 ## Testing
 Add focused unit tests alongside code when touching parsing, config, or provider logic. Prefer deterministic parser tests over live API calls. No integration test infrastructure yet.

@@ -9,6 +9,7 @@ api_key = ""                        # DeepSeek API Key, or leave empty to auto-d
 [claude]
 enabled = true
 # auth_file = ""                    # Path to .credentials.json, auto-detected by default
+# session_key = ""                  # Optional claude.ai sessionKey; env: CLAUDE_SESSION_KEY
 
 [codex]
 enabled = true
@@ -20,10 +21,12 @@ api_key = ""                        # Gemini API Key, or leave empty to auto-det
 
 [opencode]
 enabled = true
-api_key = ""                        # Reserved; Go usage is read from opencode.ai browser auth cookie
+api_key = ""                        # Reserved; Go usage is read from an explicit opencode.ai auth cookie
 workspace_id = ""                   # Optional wrk_... ID or opencode.ai workspace URL; env: OPENCODE_WORKSPACE_ID / CODEXBAR_OPENCODEGO_WORKSPACE_ID
 auth_cookie = ""                    # Optional auth cookie value or full Cookie header; env: OPENCODE_AUTH_COOKIE
 
 [mimo]
 enabled = false
 api_key = ""                        # Xiaomi MiMo platform API Key
+service_token = ""                  # Optional serviceToken cookie value; env: MIMO_SERVICE_TOKEN
+cookie_header = ""                  # Optional full Cookie header; env: MIMO_COOKIE_HEADER

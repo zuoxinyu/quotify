@@ -3,7 +3,6 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use super::{CreditsInfo, Provider, UsageData, UsageWindow};
-use crate::cookies;
 
 pub struct ClaudeProvider {
     credentials_path: Option<String>,
@@ -348,13 +347,6 @@ impl ClaudeProvider {
             .filter(|u| !u.is_empty());
         Some((api_key, base_url))
     }
-
-    async fn read_cookie_session_key(&self) -> Option<String> {
-        cookies::find_cookie_multiple(&["claude.ai", ".claude.ai"], "sessionKey")
-            .await
-            .ok()
-            .filter(|k| k.starts_with("sk-ant-"))
-    }
 }
 
 #[async_trait::async_trait]
@@ -391,17 +383,13 @@ impl Provider for ClaudeProvider {
             }
         }
 
-        // Method 2: Try browser cookie / manual cookie (manual config / env var / browser cookie)
+        // Method 2: Try manual session cookie (config / env var)
         if windows.is_empty() {
-            let mut session_key = self.session_key.clone().or_else(|| {
+            let session_key = self.session_key.clone().or_else(|| {
                 std::env::var("CLAUDE_SESSION_KEY")
                     .ok()
                     .filter(|k| !k.is_empty())
             });
-
-            if session_key.is_none() {
-                session_key = self.read_cookie_session_key().await;
-            }
 
             if let Some(session_key) = session_key {
                 tracing::debug!("Using Claude sessionKey");
