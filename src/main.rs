@@ -2,7 +2,6 @@
 
 mod app;
 mod config;
-mod cookies;
 mod icon;
 mod provider;
 mod tray;

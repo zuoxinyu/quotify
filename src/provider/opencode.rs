@@ -2,14 +2,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::{CreditsInfo, Provider, UsageData, UsageWindow};
-use crate::cookies;
 
 const OPENCODE_SERVER_URL: &str = "https://opencode.ai/_server";
 const OPENCODE_WORKSPACES_FUNCTION_ID: &str =
     "0c8d84b0a700eb0de440ca4c9105b42d6c9ede971d6bf592fa4f91bbeaaa1e6b";
 const OPENCODE_SUBSCRIPTION_FUNCTION_ID: &str =
     "7abeebee372f304e050aaaf92be863f4a86490e382f8c79db68fd94040d691b4";
-const OPENCODE_COOKIE_DOMAINS: &[&str] = &["opencode.ai", ".opencode.ai", "www.opencode.ai"];
 
 pub struct OpenCodeProvider {
     client: reqwest::Client,
@@ -69,18 +67,9 @@ impl OpenCodeProvider {
             return Ok(cookie);
         }
 
-        let header = cookies::find_cookie_header(OPENCODE_COOKIE_DOMAINS).await?;
-        if header
-            .split(';')
-            .any(|pair| pair.trim_start().starts_with("auth="))
-        {
-            Ok(header)
-        } else {
-            let auth = cookies::find_cookie_multiple(OPENCODE_COOKIE_DOMAINS, "auth")
-                .await
-                .context("OpenCode auth cookie not found")?;
-            Ok(format!("auth={auth}"))
-        }
+        anyhow::bail!(
+            "OpenCode requires auth_cookie in config or OPENCODE_AUTH_COOKIE; automatic browser cookie reading is disabled"
+        )
     }
 }
 
@@ -96,7 +85,7 @@ impl Provider for OpenCodeProvider {
         let cookie_header = self
             .find_dashboard_cookie_header()
             .await
-            .context("OpenCode requires an auth cookie from config, OPENCODE_AUTH_COOKIE, or opencode.ai browser cookies")?;
+            .context("OpenCode requires auth_cookie in config or OPENCODE_AUTH_COOKIE")?;
         tracing::debug!("Found opencode.ai auth cookie, trying server functions");
 
         let (windows, credits) = self

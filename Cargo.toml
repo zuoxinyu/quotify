@@ -17,24 +17,18 @@ dirs = "6"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-aes-gcm = "0.10"
 base64 = "0.22"
 windows = { version = "0.62", features = [
-    "Win32_Security_Cryptography",
     "Win32_Foundation",
-    "Win32_Storage_FileSystem",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
-    "Win32_UI_Controls",
     "Win32_System_LibraryLoader",
 ] }
 sha2 = "0.11"
 regex = "1"
-cookie-scoop = "0.1"
 eframe = { version = "0.34", features = ["glow"] }
 egui = "0.34"
 egui_extras = { version = "0.34", features = ["svg"] }
@@ -45,9 +39,6 @@ raw-window-handle = "0.6"
 
 [build-dependencies]
 embed-resource = "3.0"
-
-[patch.crates-io]
-cookie-scoop = { path = "vendor/cookie-scoop" }
 
 [profile.release]
 opt-level = "z"

@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::{CreditsInfo, Provider, UsageData, UsageWindow};
-use crate::cookies;
 
 pub struct MimoProvider {
     #[allow(dead_code)]
@@ -26,7 +25,7 @@ impl MimoProvider {
         }
     }
 
-    async fn find_cookie_header(&self) -> Result<String> {
+    async fn resolve_cookie_header(&self) -> Result<String> {
         // 1. Config: cookie_header (full header string)
         if let Some(header) = &self.cookie_header {
             return Ok(header.clone());
@@ -51,40 +50,8 @@ impl MimoProvider {
             return Ok(format!("serviceToken={token}"));
         }
 
-        // 5. Browser cookies
-        // First try exact domain match (covers most cases)
-        let exact_domains = [
-            "platform.xiaomimimo.com",
-            ".platform.xiaomimimo.com",
-            "xiaomimimo.com",
-            ".xiaomimimo.com",
-        ];
-        match cookies::find_cookie_header(&exact_domains).await {
-            Ok(header) => return Ok(header),
-            Err(e) => {
-                tracing::debug!("MiMo: exact domain search failed: {e}");
-            }
-        }
-
-        // Fallback: search for any cookie with "serviceToken" name across xiaomimimo variants
-        for domain in &[
-            "platform.xiaomimimo.com",
-            "xiaomimimo.com",
-            "www.xiaomimimo.com",
-        ] {
-            if let Ok(token) = cookies::find_cookie(domain, "serviceToken").await {
-                tracing::debug!("MiMo: found serviceToken via find_cookie for {domain}");
-                let full_cookie =
-                    cookies::find_cookie_header(&[domain, &format!(".{domain}")]).await;
-                match full_cookie {
-                    Ok(header) => return Ok(header),
-                    Err(_) => return Ok(format!("serviceToken={token}")),
-                }
-            }
-        }
-
         anyhow::bail!(
-            "No MiMo browser session found. Set MIMO_SERVICE_TOKEN, configure service_token in config, or log in at platform.xiaomimimo.com first"
+            "No MiMo credentials found. Set MIMO_SERVICE_TOKEN, MIMO_COOKIE_HEADER, service_token, or cookie_header"
         )
     }
 }
@@ -131,7 +98,7 @@ impl Provider for MimoProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let cookie_header = self.find_cookie_header().await?;
+        let cookie_header = self.resolve_cookie_header().await?;
 
         let url = "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage";
 
