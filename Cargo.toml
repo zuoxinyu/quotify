@@ -3,6 +3,7 @@ name = "quotify"
 version = "0.1.0"
 edition = "2024"
 description = "Windows system tray AI provider quota monitor"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
