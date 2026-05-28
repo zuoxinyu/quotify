@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod config;
 mod cookies;
@@ -293,8 +295,8 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let config = if let Some(ref path) = cli.config {
-        let path = std::path::PathBuf::from(path);
+    let config_path = cli.config.as_ref().map(std::path::PathBuf::from);
+    let config = if let Some(ref path) = config_path {
         config::AppConfig::load_from(&path)?
     } else {
         config::AppConfig::load()?
@@ -313,7 +315,7 @@ fn main() -> Result<()> {
             println!("Config written to: {}", path.display());
         }
         Commands::Tray => {
-            run_tray(config)?;
+            run_tray(config, config_path)?;
         }
     }
 
@@ -404,7 +406,23 @@ fn active_provider_option(active_provider: &str) -> Option<&str> {
     }
 }
 
-fn run_tray(config: config::AppConfig) -> Result<()> {
+fn load_runtime_config(
+    config_path: Option<&std::path::PathBuf>,
+    fallback: &config::AppConfig,
+) -> config::AppConfig {
+    let loaded = if let Some(path) = config_path {
+        config::AppConfig::load_from(path)
+    } else {
+        config::AppConfig::load()
+    };
+
+    loaded.unwrap_or_else(|err| {
+        tracing::error!("Failed to reload config, using previous config: {err}");
+        fallback.clone()
+    })
+}
+
+fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) -> Result<()> {
     let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(Vec::new()));
     let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> =
         Arc::new(RwLock::new(chrono::Utc::now()));
@@ -434,6 +452,7 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
     let data_bg = data.clone();
     let last_refresh_bg = last_refresh.clone();
     let config_bg = config.clone();
+    let config_path_bg = config_path.clone();
     let tc_bg = tray_controller.clone();
     let active_provider_bg = active_provider.clone();
 
@@ -449,8 +468,13 @@ fn run_tray(config: config::AppConfig) -> Result<()> {
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(last_fetch);
             if forced || elapsed.as_secs() >= min_refresh_interval {
+                let current_config = load_runtime_config(config_path_bg.as_ref(), &config_bg);
+                let current_active_provider =
+                    current_config.general.active_provider.trim().to_string();
+                *active_provider_bg.write() = current_active_provider;
+
                 bg_rt.block_on(fetch_all_providers(
-                    &config_bg,
+                    &current_config,
                     data_bg.clone(),
                     last_refresh_bg.clone(),
                 ));

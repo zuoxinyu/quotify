@@ -43,6 +43,12 @@ image = { version = "0.25", features = ["png"] }
 parking_lot = "0.12"
 raw-window-handle = "0.6"
 
+[build-dependencies]
+embed-resource = "3.0"
+
+[patch.crates-io]
+cookie-scoop = { path = "vendor/cookie-scoop" }
+
 [profile.release]
 opt-level = "z"
 lto = true
