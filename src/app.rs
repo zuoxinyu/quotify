@@ -183,6 +183,15 @@ impl eframe::App for QuotifyApp {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         ui.add_space(card_left_indent);
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let logo = egui::Image::new(egui::include_image!(
+                                "../assets/icons/quotify.svg"
+                            ))
+                            .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                            .maintain_aspect_ratio(true);
+                            ui.add(logo);
+
+                            ui.add_space(6.0);
+
                             ui.label(
                                 egui::RichText::new("Quotify")
                                     .strong()
@@ -190,7 +199,7 @@ impl eframe::App for QuotifyApp {
                                     .line_height(Some(24.0)),
                             );
 
-                            ui.add_space(1.0);
+                            ui.add_space(4.0);
 
                             let settings = icon_button(
                                 ui,
