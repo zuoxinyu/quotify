@@ -57,16 +57,212 @@ impl TrayIcon {
     }
 }
 
-fn percent_color(pct: f64) -> [u8; 3] {
-    if pct < 50.0 {
-        let t = pct / 50.0;
-        [(80.0 * t) as u8, (180.0 - 80.0 * t) as u8, 30]
-    } else if pct < 80.0 {
-        let t = (pct - 50.0) / 30.0;
-        [220, (180.0 - 140.0 * t) as u8, 30]
+fn in_rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> bool {
+    if x < 0.0 || x >= w || y < 0.0 || y >= h {
+        return false;
+    }
+    if x < r && y < r {
+        let dx = x - r;
+        let dy = y - r;
+        return dx * dx + dy * dy <= r * r;
+    }
+    if x > w - r && y < r {
+        let dx = x - (w - r);
+        let dy = y - r;
+        return dx * dx + dy * dy <= r * r;
+    }
+    if x < r && y > h - r {
+        let dx = x - r;
+        let dy = y - (h - r);
+        return dx * dx + dy * dy <= r * r;
+    }
+    if x > w - r && y > h - r {
+        let dx = x - (w - r);
+        let dy = y - (h - r);
+        return dx * dx + dy * dy <= r * r;
+    }
+    true
+}
+
+fn in_progress_bar(px: f64, py: f64, bar_y: f64, width: f64) -> bool {
+    let bar_x = 6.0;
+    let bar_h = 3.0;
+    let rx = 1.5;
+
+    if px < bar_x || px >= bar_x + width || py < bar_y || py >= bar_y + bar_h {
+        return false;
+    }
+
+    if px < bar_x + rx && py < bar_y + rx {
+        let dx = px - (bar_x + rx);
+        let dy = py - (bar_y + rx);
+        return dx * dx + dy * dy <= rx * rx;
+    }
+    if px > bar_x + width - rx && py < bar_y + rx {
+        let dx = px - (bar_x + width - rx);
+        let dy = py - (bar_y + rx);
+        return dx * dx + dy * dy <= rx * rx;
+    }
+    if px < bar_x + rx && py > bar_y + bar_h - rx {
+        let dx = px - (bar_x + rx);
+        let dy = py - (bar_y + bar_h - rx);
+        return dx * dx + dy * dy <= rx * rx;
+    }
+    if px > bar_x + width - rx && py > bar_y + bar_h - rx {
+        let dx = px - (bar_x + width - rx);
+        let dy = py - (bar_y + bar_h - rx);
+        return dx * dx + dy * dy <= rx * rx;
+    }
+
+    true
+}
+
+fn blend_rgba(bg: [u8; 4], fg: [u8; 4]) -> [u8; 4] {
+    let alpha_fg = fg[3] as f64 / 255.0;
+    let alpha_bg = bg[3] as f64 / 255.0 * (1.0 - alpha_fg);
+    let alpha_out = alpha_fg + alpha_bg;
+
+    if alpha_out == 0.0 {
+        return [0, 0, 0, 0];
+    }
+
+    let r = (fg[0] as f64 * alpha_fg + bg[0] as f64 * alpha_bg) / alpha_out;
+    let g = (fg[1] as f64 * alpha_fg + bg[1] as f64 * alpha_bg) / alpha_out;
+    let b = (fg[2] as f64 * alpha_fg + bg[2] as f64 * alpha_bg) / alpha_out;
+
+    [
+        r.clamp(0.0, 255.0) as u8,
+        g.clamp(0.0, 255.0) as u8,
+        b.clamp(0.0, 255.0) as u8,
+        (alpha_out * 255.0).clamp(0.0, 255.0) as u8,
+    ]
+}
+
+fn get_progress_percentages(data: &[UsageData], active_provider: Option<&str>) -> [f64; 3] {
+    let mut pcts = [0.0; 3];
+
+    if let Some(active_provider) = active_provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    {
+        if let Some(provider_data) = data
+            .iter()
+            .find(|d| d.provider.eq_ignore_ascii_case(active_provider))
+            && provider_data.error.is_none()
+        {
+            let windows = valid_windows(provider_data);
+            for (i, w) in windows.iter().take(3).enumerate() {
+                pcts[i] = w.used_percent;
+            }
+            if windows.len() == 1 {
+                pcts[1] = pcts[0];
+                pcts[2] = pcts[0];
+            } else if windows.len() == 2 {
+                pcts[2] = (pcts[0] + pcts[1]) / 2.0;
+            }
+        }
     } else {
-        let t = ((pct - 80.0) / 20.0).min(1.0);
-        [220, (40.0 - 40.0 * t) as u8, 30]
+        let mut provider_pcts: Vec<f64> = data.iter().filter_map(provider_percent).collect();
+
+        provider_pcts.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+        if provider_pcts.len() == 1 {
+            pcts[0] = provider_pcts[0];
+            pcts[1] = provider_pcts[0];
+            pcts[2] = provider_pcts[0];
+        } else if provider_pcts.len() == 2 {
+            pcts[0] = provider_pcts[0];
+            pcts[1] = provider_pcts[1];
+            pcts[2] = (provider_pcts[0] + provider_pcts[1]) / 2.0;
+        } else {
+            for (i, &pct) in provider_pcts.iter().take(3).enumerate() {
+                pcts[i] = pct;
+            }
+        }
+    }
+
+    pcts
+}
+
+fn draw_provider_watermark(px: f64, py: f64, provider: &str) -> Option<[u8; 4]> {
+    let dx = px - 16.0;
+    let dy = py - 16.0;
+
+    match provider.to_ascii_lowercase().as_str() {
+        "gemini" => {
+            // 4-pointed sparkle
+            if dx.abs().powf(0.65) + dy.abs().powf(0.65) <= 5.5_f64.powf(0.65) {
+                Some([24, 144, 255, 35])
+            } else {
+                None
+            }
+        }
+        "claude" => {
+            // 3-petaled clover/crown
+            let d1 = dx * dx + (dy + 2.5) * (dy + 2.5);
+            let d2 = (dx + 2.5) * (dx + 2.5) + (dy - 1.5) * (dy - 1.5);
+            let d3 = (dx - 2.5) * (dx - 2.5) + (dy - 1.5) * (dy - 1.5);
+            if d1 <= 2.2 * 2.2 || d2 <= 2.2 * 2.2 || d3 <= 2.2 * 2.2 {
+                Some([217, 107, 83, 30])
+            } else {
+                None
+            }
+        }
+        "deepseek" => {
+            // Sleek shield
+            let adx = dx.abs();
+            let inside = if (-6.0..=2.0).contains(&dy) {
+                adx <= 5.0
+            } else if dy > 2.0 && dy <= 7.0 {
+                adx <= 5.0 * (1.0 - (dy - 2.0) / 5.0)
+            } else {
+                false
+            };
+            if inside {
+                Some([0, 106, 255, 30])
+            } else {
+                None
+            }
+        }
+        "opencode" | "codex" => {
+            // Stylized code tag </ >
+            let is_slash = (dx + 2.0 * dy).abs() <= 1.0 && dy.abs() <= 5.0;
+            let is_left = (dx + dy.abs() - 1.5).abs() <= 0.8 && dx <= -0.5 && dy.abs() <= 3.5;
+            let is_right = (dx - dy.abs() + 1.5).abs() <= 0.8 && dx >= 0.5 && dy.abs() <= 3.5;
+
+            if is_slash || is_left || is_right {
+                if provider.eq_ignore_ascii_case("opencode") {
+                    Some([16, 124, 65, 30])
+                } else {
+                    Some([120, 120, 120, 30])
+                }
+            } else {
+                None
+            }
+        }
+        "antigravity" => {
+            // Upward vector arrow
+            let adx = dx.abs();
+            let is_shaft = adx <= 1.2 && (-1.0..=6.0).contains(&dy);
+            let is_head = (-6.0..-1.0).contains(&dy) && adx <= (dy + 6.0) * 0.9;
+            if is_shaft || is_head {
+                Some([128, 0, 255, 35])
+            } else {
+                None
+            }
+        }
+        "mimo" => {
+            // Stylized "M"
+            let adx = dx.abs();
+            let is_shaft = (3.5..=5.5).contains(&adx) && dy.abs() <= 5.0;
+            let is_diag = (-5.0..=5.0).contains(&dy) && (adx - (dy + 5.0) / 2.0).abs() <= 0.8;
+            if is_shaft || is_diag {
+                Some([255, 128, 0, 30])
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -74,57 +270,72 @@ pub fn generate_icon(data: &[UsageData], active_provider: Option<&str>) -> TrayI
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
 
-    let pct = icon_percent(data, active_provider);
-    let color = percent_color(pct);
-    let label = format_pct(pct);
-
-    let cx = size as f64 / 2.0;
-    let cy = size as f64 / 2.0;
-    let outer_r = size as f64 / 2.0 - 2.0;
-    let ring_width = 4.0;
-    let inner_r = outer_r - ring_width;
-
-    let fill_angle = pct / 100.0 * 2.0 * std::f64::consts::PI;
+    let pcts = get_progress_percentages(data, active_provider);
+    let bar_ys = [9.0, 14.0, 19.0];
 
     for y in 0..size {
         for x in 0..size {
-            let dx = x as f64 - cx;
-            let dy = y as f64 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let angle = dy.atan2(dx);
-            let norm_angle = ((angle + std::f64::consts::FRAC_PI_2) % (2.0 * std::f64::consts::PI)
-                + 2.0 * std::f64::consts::PI)
-                % (2.0 * std::f64::consts::PI);
+            let mut sub_color = [0.0; 4];
 
-            let in_ring = dist >= inner_r && dist <= outer_r;
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let px = x as f64 + (sx as f64 + 0.5) / 3.0;
+                    let py = y as f64 + (sy as f64 + 0.5) / 3.0;
+
+                    let c = if in_rounded_rect(px, py, 32.0, 32.0, 7.0) {
+                        let mut base = [234, 218, 215, 255];
+
+                        if let Some(provider_name) = active_provider
+                            && let Some(w_color) = draw_provider_watermark(px, py, provider_name)
+                        {
+                            base = blend_rgba(base, w_color);
+                        }
+
+                        if !in_rounded_rect(px, py, 32.0, 32.0, 6.0) {
+                            base = blend_rgba(base, [109, 109, 109, 25]);
+                        }
+
+                        let spy = py - 0.5;
+                        let mut in_shadow = false;
+                        for &bar_y in &bar_ys {
+                            if in_progress_bar(px, spy, bar_y, 20.0) {
+                                in_shadow = true;
+                                break;
+                            }
+                        }
+                        if in_shadow {
+                            base = blend_rgba(base, [128, 128, 128, 50]);
+                        }
+
+                        for (i, &bar_y) in bar_ys.iter().enumerate() {
+                            let pct = pcts[i];
+                            let fill_w = (pct / 100.0 * 20.0).clamp(0.0, 20.0);
+
+                            if in_progress_bar(px, py, bar_y, fill_w) {
+                                base = blend_rgba(base, [0, 120, 212, 255]);
+                            } else if in_progress_bar(px, py, bar_y, 20.0) {
+                                base = blend_rgba(base, [0, 120, 212, 30]);
+                            }
+                        }
+
+                        base
+                    } else {
+                        [0, 0, 0, 0]
+                    };
+
+                    for i in 0..4 {
+                        sub_color[i] += c[i] as f64;
+                    }
+                }
+            }
+
             let idx = ((y * size + x) * 4) as usize;
-
-            if in_ring {
-                let filled = norm_angle <= fill_angle;
-                let px_color = if filled { color } else { [55, 55, 55] };
-                let d_inner = dist - inner_r;
-                let d_outer = outer_r - dist;
-                let alpha = if d_inner < 1.0 {
-                    d_inner
-                } else if d_outer < 1.0 {
-                    d_outer
-                } else {
-                    1.0
-                };
-                rgba[idx] = px_color[0];
-                rgba[idx + 1] = px_color[1];
-                rgba[idx + 2] = px_color[2];
-                rgba[idx + 3] = (alpha.min(1.0) * 255.0) as u8;
-            } else if dist < inner_r {
-                rgba[idx] = 20;
-                rgba[idx + 1] = 20;
-                rgba[idx + 2] = 25;
-                rgba[idx + 3] = 240;
+            for i in 0..4 {
+                rgba[idx + i] = (sub_color[i] / 9.0).clamp(0.0, 255.0) as u8;
             }
         }
     }
 
-    draw_text_centered(&mut rgba, size, &label);
     TrayIcon {
         rgba,
         width: size,
@@ -168,20 +379,6 @@ pub fn tray_tooltip(data: &[UsageData], active_provider: Option<&str>) -> String
     format!("Quotify - {display_name}\nMax {max_pct:.0}%\n{details}")
 }
 
-fn icon_percent(data: &[UsageData], active_provider: Option<&str>) -> f64 {
-    if let Some(active_provider) = active_provider
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-        && let Some(provider) = data
-            .iter()
-            .find(|data| data.provider.eq_ignore_ascii_case(active_provider))
-    {
-        return provider_percent(provider).unwrap_or(0.0);
-    }
-
-    aggregate_percent(data)
-}
-
 fn provider_percent(data: &UsageData) -> Option<f64> {
     if data.error.is_some() || !data.has_data() {
         return None;
@@ -220,106 +417,5 @@ fn provider_display_name(provider: &str) -> String {
         "deepseek" => "DeepSeek".to_string(),
         "mimo" => "MiMo".to_string(),
         other => other.to_string(),
-    }
-}
-
-fn format_pct(pct: f64) -> String {
-    if pct >= 99.5 {
-        return "M".to_string();
-    }
-    let val = pct as u8;
-    val.to_string()
-}
-
-const FONT_3X5: &[[[u8; 3]; 5]] = &[
-    [[1, 1, 1], [1, 0, 1], [1, 0, 1], [1, 0, 1], [1, 1, 1]], // 0
-    [[0, 1, 0], [1, 1, 0], [0, 1, 0], [0, 1, 0], [1, 1, 1]], // 1
-    [[1, 1, 1], [0, 0, 1], [1, 1, 1], [1, 0, 0], [1, 1, 1]], // 2
-    [[1, 1, 1], [0, 0, 1], [1, 1, 1], [0, 0, 1], [1, 1, 1]], // 3
-    [[1, 0, 1], [1, 0, 1], [1, 1, 1], [0, 0, 1], [0, 0, 1]], // 4
-    [[1, 1, 1], [1, 0, 0], [1, 1, 1], [0, 0, 1], [1, 1, 1]], // 5
-    [[1, 1, 1], [1, 0, 0], [1, 1, 1], [1, 0, 1], [1, 1, 1]], // 6
-    [[1, 1, 1], [0, 0, 1], [0, 1, 0], [0, 1, 0], [0, 1, 0]], // 7
-    [[1, 1, 1], [1, 0, 1], [1, 1, 1], [1, 0, 1], [1, 1, 1]], // 8
-    [[1, 1, 1], [1, 0, 1], [1, 1, 1], [0, 0, 1], [1, 1, 1]], // 9
-];
-
-#[allow(clippy::needless_range_loop)]
-fn draw_text_centered(rgba: &mut [u8], size: u32, text: &str) {
-    let chars: Vec<u8> = text.bytes().filter(|b| b.is_ascii_digit()).collect();
-    let is_max = text.starts_with('M');
-
-    if is_max {
-        let pattern: [[u8; 5]; 5] = [
-            [1, 0, 0, 0, 1],
-            [1, 1, 0, 1, 1],
-            [1, 0, 1, 0, 1],
-            [1, 0, 0, 0, 1],
-            [1, 0, 0, 0, 1],
-        ];
-        let pw = 5;
-        let ph = 5;
-        let ox = (size as i32 - pw) / 2;
-        let oy = (size as i32 - ph) / 2;
-        for row in 0..ph as usize {
-            for col in 0..pw as usize {
-                if pattern[row][col] != 0 {
-                    set_pixel(
-                        rgba,
-                        size,
-                        ox + col as i32,
-                        oy + row as i32,
-                        220,
-                        60,
-                        30,
-                        255,
-                    );
-                }
-            }
-        }
-        return;
-    }
-
-    let num = chars.len();
-    if num == 0 {
-        return;
-    }
-
-    let char_w: i32 = 3;
-    let char_h: usize = 5;
-    let gap: i32 = 1;
-    let total_w = num as i32 * char_w + (num as i32 - 1) * gap;
-    let total_h = char_h as i32;
-    let ox = (size as i32 - total_w) / 2;
-    let oy = (size as i32 - total_h) / 2;
-
-    for (i, &d) in chars.iter().enumerate() {
-        let dx = ox + i as i32 * (char_w + gap);
-        let digit = (d - b'0') as usize;
-        if digit >= 10 {
-            continue;
-        }
-        let glyph = &FONT_3X5[digit];
-
-        for row in 0..char_h {
-            for col in 0..char_w as usize {
-                if glyph[row][col] != 0 {
-                    let px = dx + col as i32;
-                    let py = oy + row as i32;
-                    set_pixel(rgba, size, px, py, 255, 255, 255, 255);
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn set_pixel(rgba: &mut [u8], size: u32, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
-    if x >= 0 && x < size as i32 && y >= 0 && y < size as i32 {
-        let idx = ((y as u32 * size + x as u32) * 4) as usize;
-        rgba[idx] = r;
-        rgba[idx + 1] = g;
-        rgba[idx + 2] = b;
-        rgba[idx + 3] = a;
     }
 }
