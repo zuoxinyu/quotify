@@ -1,0 +1,37 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <!-- 投影滤镜：使组件更具深度，适应浅色背景 -->
+        <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+            <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#808080" flood-opacity="0.3" />
+        </filter>
+    </defs>
+
+    <!-- 图标底板 (Base Squircle) - 使用 #eadad7 作为背景主色调 -->
+    <rect width="512" height="512" rx="112" fill="#eadad7" />
+    
+    <!-- 底板边缘高光，增加质感 -->
+    <rect x="2" y="2" width="508" height="508" rx="110" stroke="#6D6D6D" stroke-opacity="0.1" stroke-width="3" />
+
+    <!-- 进度条组件组 (Progress Indicators) -->
+    <g filter="url(#shadow)">
+        
+        <!-- 进度条 1 (长) -->
+        <!-- Track (轨道) - 使用半透明蓝色提供对比 -->
+        <rect x="96" y="144" width="320" height="48" rx="24" fill="#0078d4" fill-opacity="0.12" />
+        <!-- Fill (填充) - 使用 #0078d4 表示进度占用部分 -->
+        <rect x="96" y="144" width="272" height="48" rx="24" fill="#0078d4" />
+
+        <!-- 进度条 2 (短) -->
+        <!-- Track (轨道) -->
+        <rect x="96" y="232" width="320" height="48" rx="24" fill="#0078d4" fill-opacity="0.12" />
+        <!-- Fill (填充) -->
+        <rect x="96" y="232" width="96" height="48" rx="24" fill="#0078d4" />
+
+        <!-- 进度条 3 (中) -->
+        <!-- Track (轨道) -->
+        <rect x="96" y="320" width="320" height="48" rx="24" fill="#0078d4" fill-opacity="0.12" />
+        <!-- Fill (填充) -->
+        <rect x="96" y="320" width="192" height="48" rx="24" fill="#0078d4" />
+        
+    </g>
+</svg>
