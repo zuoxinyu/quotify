@@ -198,9 +198,9 @@ impl eframe::App for QuotifyApp {
                                     .size(16.0)
                                     .line_height(Some(24.0)),
                             );
+                        });
 
-                            ui.add_space(4.0);
-
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let settings = icon_button(
                                 ui,
                                 egui::include_image!("../assets/icons/settings.svg"),
@@ -213,9 +213,9 @@ impl eframe::App for QuotifyApp {
                             {
                                 tracing::error!("Failed to open config file: {err}");
                             }
-                        });
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(2.0);
+
                             let refresh = icon_button(
                                 ui,
                                 egui::include_image!("../assets/icons/refresh.svg"),
@@ -227,6 +227,8 @@ impl eframe::App for QuotifyApp {
                                 crate::tray::request_refresh();
                                 ctx.request_repaint();
                             }
+
+                            ui.add_space(4.0);
 
                             ui.add_sized(
                                 [60.0, 24.0],
@@ -276,6 +278,31 @@ impl eframe::App for QuotifyApp {
                         }
                     });
             });
+    }
+}
+
+fn format_credits_balance(balance: f64) -> String {
+    if balance.abs() >= 1_000_000_000.0 {
+        let val = balance / 1_000_000_000.0;
+        format!("{:.2}B", val)
+    } else if balance.abs() >= 1_000_000.0 {
+        let val = balance / 1_000_000.0;
+        if (val - val.round()).abs() < 0.01 {
+            format!("{:.0}M", val)
+        } else {
+            format!("{:.2}M", val)
+        }
+    } else if balance.abs() >= 1_000.0 {
+        let val = balance / 1_000.0;
+        if (val - val.round()).abs() < 0.01 {
+            format!("{:.0}K", val)
+        } else {
+            format!("{:.2}K", val)
+        }
+    } else if (balance - balance.round()).abs() < 0.01 {
+        format!("{:.0}", balance)
+    } else {
+        format!("{:.2}", balance)
     }
 }
 
@@ -481,7 +508,8 @@ fn render_provider_card(
                 // Credits Badge (Windows 11 accent tint badge)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(c) = credits {
-                        let credit_text = format!("{:.2} {}", c.balance, c.currency);
+                        let credit_text =
+                            format!("{} {}", format_credits_balance(c.balance), c.currency);
 
                         let (credits_bg, credits_border, credits_fg) = if is_dark {
                             (
