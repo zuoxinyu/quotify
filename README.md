@@ -57,6 +57,8 @@ The default config path is:
 
 See `config.example.toml` for available fields. Common environment variables include `OPENCODE_AUTH_COOKIE`, `OPENCODE_WORKSPACE_ID`, `CLAUDE_ACCESS_TOKEN`, `CLAUDE_SESSION_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `MIMO_SERVICE_TOKEN`, and `MIMO_COOKIE_HEADER`.
 
+For explicit network proxying, set `[network].proxy` to an HTTP or SOCKS5 URL, for example `http://127.0.0.1:7890` or `socks5://127.0.0.1:7890`.
+
 ## License
 
 MIT. See `LICENSE`.

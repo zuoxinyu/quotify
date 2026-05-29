@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::Deserialize;
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow};
+use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
 
 pub struct DeepSeekProvider {
     api_key: String,
@@ -24,10 +24,10 @@ struct BalanceInfo {
 }
 
 impl DeepSeekProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, proxy: Option<&str>) -> Self {
         Self {
             api_key,
-            client: reqwest::Client::new(),
+            client: http_client(proxy),
         }
     }
 

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Deserialize;
 
-use super::{Provider, UsageData, UsageWindow};
+use super::{Provider, UsageData, UsageWindow, http_client};
 
 pub struct CodexProvider {
     auth_file: Option<String>,
@@ -60,10 +60,10 @@ struct CodexRateWindow {
 }
 
 impl CodexProvider {
-    pub fn new(auth_file: Option<String>) -> Self {
+    pub fn new(auth_file: Option<String>, proxy: Option<&str>) -> Self {
         Self {
             auth_file,
-            client: reqwest::Client::new(),
+            client: http_client(proxy),
         }
     }
 

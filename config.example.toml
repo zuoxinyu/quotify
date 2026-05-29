@@ -2,6 +2,9 @@
 refresh_interval = 300
 active_provider = ""                # Optional primary provider for tray icon/tip, e.g. "codex", "opencode", "claude"
 
+[network]
+proxy = ""                          # Optional explicit proxy: http://127.0.0.1:7890 or socks5://127.0.0.1:7890
+
 [deepseek]
 enabled = true
 api_key = ""                        # DeepSeek API Key, or leave empty to auto-detect from env DEEPSEEK_API_KEY
@@ -9,7 +12,7 @@ api_key = ""                        # DeepSeek API Key, or leave empty to auto-d
 [claude]
 enabled = true
 # auth_file = ""                    # Path to .credentials.json, auto-detected by default
-# session_key = ""                  # Optional claude.ai sessionKey; env: CLAUDE_SESSION_KEY
+# session_key = ""                  # Optional claude.ai sessionKey or full Cookie header; env: CLAUDE_SESSION_KEY
 
 [codex]
 enabled = true
@@ -18,6 +21,11 @@ enabled = true
 [gemini]
 enabled = true
 api_key = ""                        # Gemini API Key, or leave empty to auto-detect from env GEMINI_API_KEY / GOOGLE_API_KEY
+
+[antigravity]
+enabled = true
+api_key = ""                        # Reserved; usage requires Antigravity OAuth credentials, not API-key mode
+# OAuth credentials: env ANTIGRAVITY_OAUTH_CREDENTIALS_JSON or ~/.codexbar/antigravity/oauth_creds.json
 
 [opencode]
 enabled = true

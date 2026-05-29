@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Deserialize;
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow};
+use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
 
 pub struct ClaudeProvider {
     credentials_path: Option<String>,
@@ -203,13 +203,14 @@ impl ClaudeProvider {
         session_key: Option<String>,
         api_key: Option<String>,
         access_token: Option<String>,
+        proxy: Option<&str>,
     ) -> Self {
         Self {
             credentials_path,
-            session_key,
+            session_key: session_key.and_then(|key| normalize_session_key(&key)),
             api_key,
             access_token,
-            client: reqwest::Client::new(),
+            client: http_client(proxy),
         }
     }
 
@@ -388,7 +389,7 @@ impl Provider for ClaudeProvider {
             let session_key = self.session_key.clone().or_else(|| {
                 std::env::var("CLAUDE_SESSION_KEY")
                     .ok()
-                    .filter(|k| !k.is_empty())
+                    .and_then(|key| normalize_session_key(&key))
             });
 
             if let Some(session_key) = session_key {
@@ -599,9 +600,9 @@ impl ClaudeProvider {
 
         if let (Some(used), Some(limit)) = (used_credits, monthly_limit) {
             Ok(CreditsInfo {
-                balance: limit - used,
+                balance: (limit - used) / 100.0,
                 currency: currency.to_string(),
-                total_granted: Some(limit),
+                total_granted: Some(limit / 100.0),
                 topped_up: None,
             })
         } else {
@@ -746,6 +747,35 @@ impl ClaudeProvider {
         });
 
         Ok(windows)
+    }
+}
+
+fn normalize_session_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let cookie = trimmed
+        .strip_prefix("Cookie:")
+        .or_else(|| trimmed.strip_prefix("cookie:"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    for pair in cookie.split(';') {
+        let pair = pair.trim();
+        if let Some(value) = pair.strip_prefix("sessionKey=") {
+            let value = value.trim();
+            if value.starts_with("sk-ant-") {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    if cookie.starts_with("sk-ant-") {
+        Some(cookie.to_string())
+    } else {
+        None
     }
 }
 

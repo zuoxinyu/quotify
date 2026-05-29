@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-use super::{Provider, UsageData, UsageWindow};
+use super::{Provider, UsageData, UsageWindow, http_client};
 
 const GEMINI_QUOTA_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
 const GEMINI_LOAD_CODE_ASSIST_URL: &str =
@@ -32,10 +32,10 @@ struct GeminiQuotaEntry {
 }
 
 impl GeminiProvider {
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_key: Option<String>, proxy: Option<&str>) -> Self {
         Self {
             api_key,
-            client: reqwest::Client::new(),
+            client: http_client(proxy),
         }
     }
 
