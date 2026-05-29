@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow};
+use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
 
 pub struct MimoProvider {
     #[allow(dead_code)]
@@ -16,12 +16,13 @@ impl MimoProvider {
         api_key: String,
         service_token: Option<String>,
         cookie_header: Option<String>,
+        proxy: Option<&str>,
     ) -> Self {
         Self {
             api_key,
             service_token,
             cookie_header,
-            client: reqwest::Client::new(),
+            client: http_client(proxy),
         }
     }
 

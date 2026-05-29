@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow};
+use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
 
 const OPENCODE_SERVER_URL: &str = "https://opencode.ai/_server";
 const OPENCODE_WORKSPACES_FUNCTION_ID: &str =
@@ -16,13 +16,13 @@ pub struct OpenCodeProvider {
 }
 
 impl OpenCodeProvider {
-    pub fn new(workspace_id: Option<String>, auth_cookie: Option<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+    pub fn new(
+        workspace_id: Option<String>,
+        auth_cookie: Option<String>,
+        proxy: Option<&str>,
+    ) -> Self {
         Self {
-            client,
+            client: http_client(proxy),
             workspace_id: workspace_id.and_then(|value| normalize_workspace_id(&value)),
             auth_cookie: auth_cookie.and_then(|value| normalize_auth_cookie(&value)),
         }

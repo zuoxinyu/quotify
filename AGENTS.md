@@ -38,10 +38,11 @@ Two registration points — miss either and the provider is silently ignored:
 - Three threads: Win32 message loop (main), background fetch (tokio runtime), eframe UI window
 - Tray icon is the entry point; popup window starts offscreen and animates in via Win32 `SetWindowPos`
 - Config auto-creates with defaults on first load; secrets go in config file or env vars
-- Provider auth varies: API keys (deepseek, gemini), auth files (claude, codex), explicit cookie values from config/env (opencode, mimo)
+- `[network].proxy` is explicit-only and supports `http://`, `https://`, and `socks5://`; clients ignore ambient proxy env/system settings by default
+- Provider auth varies: API keys (deepseek, gemini), auth files (claude, codex), Antigravity OAuth credentials, explicit cookie values from config/env (opencode, mimo)
 
 ## Testing
 Add focused unit tests alongside code when touching parsing, config, or provider logic. Prefer deterministic parser tests over live API calls. No integration test infrastructure yet.
 
 ## Security
-Never commit API keys, auth files, or usage data. Supported env vars: `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ANTIGRAVITY_API_KEY`, `OPENCODE_WORKSPACE_ID`, `OPENCODE_AUTH_COOKIE`, `MIMO_SERVICE_TOKEN`, `MIMO_COOKIE_HEADER`, `CLAUDE_SESSION_KEY`, `CLAUDE_ACCESS_TOKEN`, `ANTHROPIC_ADMIN_KEY`, `ANTHROPIC_API_KEY`.
+Never commit API keys, auth files, or usage data. Supported env vars: `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ANTIGRAVITY_API_KEY`, `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`, `ANTIGRAVITY_OAUTH_CLIENT_ID`, `ANTIGRAVITY_OAUTH_CLIENT_SECRET`, `OPENCODE_WORKSPACE_ID`, `OPENCODE_AUTH_COOKIE`, `MIMO_SERVICE_TOKEN`, `MIMO_COOKIE_HEADER`, `CLAUDE_SESSION_KEY`, `CLAUDE_ACCESS_TOKEN`, `ANTHROPIC_ADMIN_KEY`, `ANTHROPIC_API_KEY`.

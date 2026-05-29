@@ -60,3 +60,23 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     async fn fetch_usage(&self) -> Result<UsageData>;
 }
+
+pub fn http_client(proxy: Option<&str>) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().no_proxy();
+
+    if let Some(proxy) = proxy.map(str::trim).filter(|proxy| !proxy.is_empty()) {
+        match reqwest::Proxy::all(proxy) {
+            Ok(proxy) => {
+                builder = builder.proxy(proxy);
+            }
+            Err(err) => {
+                tracing::warn!("Ignoring invalid network proxy '{proxy}': {err}");
+            }
+        }
+    }
+
+    builder.build().unwrap_or_else(|err| {
+        tracing::warn!("Failed to build HTTP client, using default client: {err}");
+        reqwest::Client::new()
+    })
+}

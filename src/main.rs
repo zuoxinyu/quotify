@@ -25,6 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
+pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 pub const PROVIDER_ORDER: [&str; 7] = [
     "codex",
@@ -65,6 +67,9 @@ enum Commands {
 }
 
 fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Provider>> {
+    let proxy = config.network.proxy.trim();
+    let proxy = (!proxy.is_empty()).then_some(proxy);
+
     match name {
         "deepseek" => {
             let api_key = if !config.deepseek.api_key.is_empty() {
@@ -73,7 +78,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                 std::env::var("DEEPSEEK_API_KEY").unwrap_or_default()
             };
             if config.deepseek.enabled || !api_key.is_empty() {
-                Some(Box::new(DeepSeekProvider::new(api_key)))
+                Some(Box::new(DeepSeekProvider::new(api_key, proxy)))
             } else {
                 None
             }
@@ -126,6 +131,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     session_key,
                     api_key,
                     access_token,
+                    proxy,
                 )))
             } else {
                 None
@@ -145,7 +151,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                 } else {
                     Some(config.codex.auth_file.clone())
                 };
-                Some(Box::new(CodexProvider::new(auth_file)))
+                Some(Box::new(CodexProvider::new(auth_file, proxy)))
             } else {
                 None
             }
@@ -166,7 +172,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     .join("oauth_creds.json")
                     .exists()
             {
-                Some(Box::new(GeminiProvider::new(api_key)))
+                Some(Box::new(GeminiProvider::new(api_key, proxy)))
             } else {
                 None
             }
@@ -180,13 +186,15 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             if config.antigravity.enabled
                 || api_key.is_some()
                 || std::env::var("ANTIGRAVITY_API_KEY").is_ok()
+                || std::env::var("ANTIGRAVITY_OAUTH_CREDENTIALS_JSON").is_ok()
                 || dirs::home_dir()
                     .unwrap_or_default()
-                    .join(".gemini")
+                    .join(".codexbar")
+                    .join("antigravity")
                     .join("oauth_creds.json")
                     .exists()
             {
-                Some(Box::new(AntigravityProvider::new(api_key)))
+                Some(Box::new(AntigravityProvider::new(api_key, proxy)))
             } else {
                 None
             }
@@ -216,7 +224,11 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     .join("auth.json")
                     .exists()
             {
-                Some(Box::new(OpenCodeProvider::new(workspace_id, auth_cookie)))
+                Some(Box::new(OpenCodeProvider::new(
+                    workspace_id,
+                    auth_cookie,
+                    proxy,
+                )))
             } else {
                 None
             }
@@ -247,6 +259,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     config.mimo.api_key.clone(),
                     service_token,
                     cookie_header,
+                    proxy,
                 )))
             } else {
                 None
@@ -724,12 +737,15 @@ fn apply_mica_backdrop(hwnd: HWND) {
         if !hwnd.0.is_null() {
             let backdrop_type = DWMSBT_MAINWINDOW.0;
             unsafe {
-                let _ = DwmSetWindowAttribute(
+                let res = DwmSetWindowAttribute(
                     hwnd,
                     DWMWA_SYSTEMBACKDROP_TYPE,
                     &backdrop_type as *const _ as *const _,
                     std::mem::size_of::<i32>() as u32,
                 );
+                if res.is_ok() {
+                    IS_MICA_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
             }
         }
     }

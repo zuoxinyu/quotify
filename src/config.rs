@@ -24,6 +24,12 @@ impl Default for GeneralConfig {
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    #[serde(default)]
+    pub proxy: String,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct DeepSeekConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -97,6 +103,8 @@ pub struct AntigravityConfig {
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
     #[serde(default)]
     pub deepseek: DeepSeekConfig,
     #[serde(default)]

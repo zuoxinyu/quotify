@@ -60,12 +60,25 @@ impl eframe::App for QuotifyApp {
             None => ctx.global_style().visuals.dark_mode,
         };
 
+        let is_mica = crate::IS_MICA_ACTIVE.load(std::sync::atomic::Ordering::SeqCst);
         let mut visuals = if is_dark {
             let mut v = egui::Visuals::dark();
             // Transparent window fill so DWM Mica backdrop shows through
-            v.window_fill = egui::Color32::TRANSPARENT;
-            v.panel_fill = egui::Color32::TRANSPARENT;
-            v.extreme_bg_color = egui::Color32::from_rgba_premultiplied(26, 26, 26, 180);
+            v.window_fill = if is_mica {
+                egui::Color32::TRANSPARENT
+            } else {
+                egui::Color32::from_rgb(32, 32, 32)
+            };
+            v.panel_fill = if is_mica {
+                egui::Color32::TRANSPARENT
+            } else {
+                egui::Color32::from_rgb(32, 32, 32)
+            };
+            v.extreme_bg_color = if is_mica {
+                egui::Color32::from_rgba_premultiplied(26, 26, 26, 180)
+            } else {
+                egui::Color32::from_rgb(26, 26, 26)
+            };
 
             // Semi-transparent Acrylic Plate card backgrounds (Dark mode)
             v.widgets.noninteractive.bg_fill =
@@ -83,9 +96,21 @@ impl eframe::App for QuotifyApp {
         } else {
             let mut v = egui::Visuals::light();
             // Transparent window fill so DWM Mica backdrop shows through
-            v.window_fill = egui::Color32::TRANSPARENT;
-            v.panel_fill = egui::Color32::TRANSPARENT;
-            v.extreme_bg_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 200);
+            v.window_fill = if is_mica {
+                egui::Color32::TRANSPARENT
+            } else {
+                egui::Color32::from_rgb(243, 243, 243)
+            };
+            v.panel_fill = if is_mica {
+                egui::Color32::TRANSPARENT
+            } else {
+                egui::Color32::from_rgb(243, 243, 243)
+            };
+            v.extreme_bg_color = if is_mica {
+                egui::Color32::from_rgba_premultiplied(255, 255, 255, 200)
+            } else {
+                egui::Color32::from_rgb(255, 255, 255)
+            };
 
             // Semi-transparent Acrylic Plate card backgrounds (Light mode)
             v.widgets.noninteractive.bg_fill =
@@ -151,9 +176,17 @@ impl eframe::App for QuotifyApp {
         // We let Windows DWM handle the window rounded corners and native border/shadow,
         // avoiding drawing a second rounded border in egui to prevent mismatched curvatures.
         let panel_bg = if is_dark {
-            egui::Color32::from_rgba_premultiplied(20, 20, 20, 30)
+            if is_mica {
+                egui::Color32::from_rgba_premultiplied(20, 20, 20, 30)
+            } else {
+                egui::Color32::from_rgb(32, 32, 32)
+            }
         } else {
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)
+            if is_mica {
+                egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)
+            } else {
+                egui::Color32::from_rgb(243, 243, 243)
+            }
         };
 
         let popup_frame = egui::Frame::NONE

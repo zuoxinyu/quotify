@@ -3,13 +3,17 @@ use chrono::Utc;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-use super::{Provider, UsageData, UsageWindow};
+use super::{Provider, UsageData, UsageWindow, http_client};
 
 const ANTIGRAVITY_QUOTA_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
 const ANTIGRAVITY_LOAD_CODE_ASSIST_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const GOOGLE_PROJECTS_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
+const ANTIGRAVITY_LS_LOG: &str = "Antigravity\\logs\\language_server.log";
+const ANTIGRAVITY_MAIN_LOG: &str = "Antigravity\\logs\\main.log";
+const ANTIGRAVITY_GET_AVAILABLE_MODELS_PATH: &str =
+    "/exa.language_server_pb.LanguageServerService/GetAvailableModels";
 
 pub struct AntigravityProvider {
     api_key: Option<String>,
@@ -18,7 +22,7 @@ pub struct AntigravityProvider {
 
 #[derive(Clone)]
 struct AntigravityCredentials {
-    path: PathBuf,
+    path: Option<PathBuf>,
     json: serde_json::Value,
     access_token: String,
     refresh_token: Option<String>,
@@ -33,39 +37,63 @@ struct AntigravityQuotaEntry {
 }
 
 impl AntigravityProvider {
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_key: Option<String>, proxy: Option<&str>) -> Self {
         Self {
             api_key,
-            client: reqwest::Client::new(),
+            client: http_client(proxy),
         }
     }
 
-    fn oauth_credentials_path() -> Option<PathBuf> {
-        Some(dirs::home_dir()?.join(".gemini").join("oauth_creds.json"))
+    fn oauth_credentials_paths() -> Vec<PathBuf> {
+        let Some(home) = dirs::home_dir() else {
+            return Vec::new();
+        };
+        vec![
+            home.join(".codexbar")
+                .join("antigravity")
+                .join("oauth_creds.json"),
+            home.join(".antigravity").join("oauth_creds.json"),
+        ]
     }
 
     fn read_oauth_credentials() -> Option<AntigravityCredentials> {
-        let path = Self::oauth_credentials_path()?;
-        if !path.exists() {
-            return None;
+        if let Ok(content) = std::env::var("ANTIGRAVITY_OAUTH_CREDENTIALS_JSON")
+            && let Some(credentials) = Self::parse_oauth_credentials(None, &content)
+        {
+            return Some(credentials);
         }
 
-        let content = std::fs::read_to_string(&path).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-        let access_token = string_field(&json, &["access_token", "accessToken"])?;
-        let refresh_token = string_field(&json, &["refresh_token", "refreshToken"]);
-        let expiry_millis = json
-            .get("expiry_date")
-            .or_else(|| json.get("expiryDate"))
-            .and_then(expiry_millis);
+        if let Some(credentials) = read_windows_keyring_credentials() {
+            return Some(credentials);
+        }
 
-        Some(AntigravityCredentials {
-            path,
-            json,
-            access_token,
-            refresh_token,
-            expiry_millis,
-        })
+        for path in Self::oauth_credentials_paths() {
+            if !path.exists() {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(&path).ok()?;
+            if let Some(credentials) = Self::parse_oauth_credentials(Some(path), &content) {
+                return Some(credentials);
+            }
+        }
+
+        None
+    }
+
+    fn parse_oauth_credentials(
+        path: Option<PathBuf>,
+        content: &str,
+    ) -> Option<AntigravityCredentials> {
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        parse_antigravity_credentials_json(path, json)
+    }
+
+    fn credentials_from_json(
+        path: Option<PathBuf>,
+        json: serde_json::Value,
+    ) -> Option<AntigravityCredentials> {
+        parse_antigravity_credentials_json(path, json)
     }
 
     fn read_cli_auth_type() -> Option<String> {
@@ -93,6 +121,40 @@ impl AntigravityProvider {
     }
 }
 
+fn parse_antigravity_credentials_json(
+    path: Option<PathBuf>,
+    json: serde_json::Value,
+) -> Option<AntigravityCredentials> {
+    let token = json.get("token").unwrap_or(&json);
+    let access_token = string_field(token, &["access_token", "accessToken"])?;
+    let refresh_token = string_field(token, &["refresh_token", "refreshToken"]);
+    let expiry_millis = token.get("expiry").and_then(expiry_millis).or_else(|| {
+        token
+            .get("expiry_date")
+            .or_else(|| token.get("expiryDate"))
+            .and_then(expiry_millis)
+    });
+
+    Some(AntigravityCredentials {
+        path,
+        json,
+        access_token,
+        refresh_token,
+        expiry_millis,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_keyring_credentials() -> Option<AntigravityCredentials> {
+    let json = read_windows_credential_json("gemini:antigravity")?;
+    AntigravityProvider::credentials_from_json(None, json)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_windows_keyring_credentials() -> Option<AntigravityCredentials> {
+    None
+}
+
 #[async_trait::async_trait]
 impl Provider for AntigravityProvider {
     fn name(&self) -> &str {
@@ -100,6 +162,24 @@ impl Provider for AntigravityProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
+        match self.fetch_local_language_server_usage().await {
+            Ok(windows) if !windows.is_empty() => {
+                return Ok(UsageData {
+                    provider: self.name().to_string(),
+                    windows,
+                    credits: None,
+                    fetched_at: Utc::now(),
+                    error: None,
+                });
+            }
+            Ok(_) => {
+                tracing::debug!("Antigravity local language server returned no model quota data");
+            }
+            Err(e) => {
+                tracing::debug!("Antigravity local language server quota fetch failed: {e}");
+            }
+        }
+
         let auth_type = Self::read_cli_auth_type();
         if auth_type
             .as_deref()
@@ -113,9 +193,9 @@ impl Provider for AntigravityProvider {
 
         let credentials = Self::read_oauth_credentials().with_context(|| {
             if self.has_configured_api_key() {
-                "Antigravity API key is configured, but usage quota requires Antigravity CLI OAuth credentials at ~/.gemini/oauth_creds.json"
+                "Antigravity API key is configured, but usage quota requires Antigravity OAuth credentials from ANTIGRAVITY_OAUTH_CREDENTIALS_JSON or ~/.codexbar/antigravity/oauth_creds.json"
             } else {
-                "Antigravity OAuth credentials not found. Run Antigravity CLI OAuth login first"
+                "Antigravity OAuth credentials not found. Configure ANTIGRAVITY_OAUTH_CREDENTIALS_JSON or ~/.codexbar/antigravity/oauth_creds.json"
             }
         })?;
 
@@ -169,6 +249,47 @@ impl AntigravityProvider {
 
         self.retrieve_user_quota(access_token, project.as_deref())
             .await
+    }
+
+    async fn fetch_local_language_server_usage(&self) -> Result<Vec<UsageWindow>> {
+        let base_url = local_language_server_http_url()
+            .context("Antigravity local language server HTTP port not found")?;
+        let local_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .context("Failed to build Antigravity local language server HTTP client")?;
+        let html = local_client
+            .get(&base_url)
+            .send()
+            .await
+            .context("Failed to read Antigravity local language server page")?
+            .text()
+            .await
+            .context("Failed to read Antigravity local language server HTML")?;
+        let csrf = extract_antigravity_csrf_token(&html)
+            .or_else(local_language_server_csrf_token)
+            .context("Antigravity local language server CSRF token not found")?;
+
+        let url = format!("{base_url}{ANTIGRAVITY_GET_AVAILABLE_MODELS_PATH}");
+        let resp = local_client
+            .post(url)
+            .header("x-codeium-csrf-token", csrf)
+            .json(&json!({}))
+            .send()
+            .await
+            .context("Failed to call Antigravity local GetAvailableModels")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Antigravity local GetAvailableModels error: {status} - {body}");
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse Antigravity local GetAvailableModels response")?;
+        Ok(parse_antigravity_available_models(&json))
     }
 
     async fn resolve_access_token(&self, credentials: AntigravityCredentials) -> Result<String> {
@@ -239,16 +360,11 @@ impl AntigravityProvider {
             credentials.json["id_token"] = json!(id_token);
         }
 
-        std::fs::write(
-            &credentials.path,
-            serde_json::to_string_pretty(&credentials.json)?,
-        )
-        .with_context(|| {
-            format!(
-                "Failed to write refreshed Antigravity credentials to {:?}",
-                credentials.path
-            )
-        })?;
+        if let Some(path) = &credentials.path {
+            std::fs::write(path, serde_json::to_string_pretty(&credentials.json)?).with_context(
+                || format!("Failed to write refreshed Antigravity credentials to {path:?}"),
+            )?;
+        }
 
         Ok(access_token)
     }
@@ -260,13 +376,14 @@ impl AntigravityProvider {
             .bearer_auth(access_token)
             .json(&json!({
                 "metadata": {
-                    "ideType": "GEMINI_CLI",
+                    "ideType": "ANTIGRAVITY",
+                    "platform": "PLATFORM_UNSPECIFIED",
                     "pluginType": "GEMINI"
                 }
             }))
             .send()
             .await
-            .context("Failed to call Antigravity loadCodeAssist")?;
+            .map_err(|e| anyhow::anyhow!("Failed to call Antigravity loadCodeAssist: {e:?}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -278,6 +395,7 @@ impl AntigravityProvider {
             .json()
             .await
             .context("Failed to parse Antigravity loadCodeAssist response")?;
+        tracing::debug!("Antigravity loadCodeAssist raw response: {json:?}");
         Ok(find_string_by_key(
             &json,
             &["cloudaicompanionProject", "project"],
@@ -324,7 +442,7 @@ impl AntigravityProvider {
             .json(&body)
             .send()
             .await
-            .context("Failed to call Antigravity quota API")?;
+            .map_err(|e| anyhow::anyhow!("Failed to call Antigravity quota API: {e:?}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -360,13 +478,21 @@ fn expiry_millis(value: &serde_json::Value) -> Option<i64> {
                 raw
             }
         }),
-        serde_json::Value::String(s) => s.parse::<i64>().ok().map(|raw| {
-            if raw < 10_000_000_000 {
-                raw.saturating_mul(1000)
-            } else {
-                raw
-            }
-        }),
+        serde_json::Value::String(s) => s
+            .parse::<i64>()
+            .ok()
+            .map(|raw| {
+                if raw < 10_000_000_000 {
+                    raw.saturating_mul(1000)
+                } else {
+                    raw
+                }
+            })
+            .or_else(|| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.timestamp_millis())
+            }),
         _ => None,
     }
 }
@@ -392,6 +518,196 @@ fn find_string_by_key(value: &serde_json::Value, keys: &[&str]) -> Option<String
             .find_map(|child| find_string_by_key(child, keys)),
         _ => None,
     }
+}
+
+fn local_language_server_http_url() -> Option<String> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    let log = std::fs::read_to_string(PathBuf::from(appdata).join(ANTIGRAVITY_LS_LOG)).ok()?;
+    let regex = regex::Regex::new(r"listening on random port at (\d+) for HTTP").ok()?;
+    let port = regex
+        .captures_iter(&log)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .last()?;
+    Some(format!("http://127.0.0.1:{port}"))
+}
+
+fn local_language_server_csrf_token() -> Option<String> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    let log = std::fs::read_to_string(PathBuf::from(appdata).join(ANTIGRAVITY_MAIN_LOG)).ok()?;
+    let regex = regex::Regex::new(r"--csrf_token\s+([0-9a-fA-F-]+)").ok()?;
+    regex
+        .captures_iter(&log)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .last()
+}
+
+fn extract_antigravity_csrf_token(html: &str) -> Option<String> {
+    let regex = regex::Regex::new(r#""csrfToken"\s*:\s*"([^"]+)""#).ok()?;
+    regex
+        .captures(html)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn parse_antigravity_available_models(value: &serde_json::Value) -> Vec<UsageWindow> {
+    let response = value.get("response").unwrap_or(value);
+    let Some(models) = response.get("models").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut model_ids = available_model_sort_order(response);
+    if model_ids.is_empty() {
+        model_ids.extend(models.keys().cloned());
+        model_ids.sort();
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut windows = Vec::new();
+    for model_id in model_ids {
+        if !seen.insert(model_id.clone()) {
+            continue;
+        }
+
+        let Some(model) = models.get(&model_id) else {
+            continue;
+        };
+        let Some(quota) = model.get("quotaInfo").or_else(|| model.get("quota_info")) else {
+            continue;
+        };
+        let Some(remaining) = quota
+            .get("remainingFraction")
+            .or_else(|| quota.get("remaining_fraction"))
+            .and_then(number_value)
+        else {
+            continue;
+        };
+
+        let label =
+            string_field(model, &["displayName", "display_name", "label"]).unwrap_or(model_id);
+        let label = label.strip_prefix("Gemini ").unwrap_or(&label).to_string();
+        let remaining_percent = if remaining <= 1.0 {
+            remaining * 100.0
+        } else {
+            remaining
+        }
+        .clamp(0.0, 100.0);
+        let used_percent = (100.0 - remaining_percent).clamp(0.0, 100.0);
+        let resets_at = if remaining_percent >= 100.0 {
+            None
+        } else {
+            string_field(quota, &["resetTime", "reset_time", "resetsAt"])
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.to_utc())
+        };
+
+        windows.push(UsageWindow {
+            label,
+            used_percent,
+            limit: Some(100.0),
+            used: Some(used_percent),
+            unit: Some("%".to_string()),
+            resets_at,
+        });
+    }
+
+    windows
+}
+
+fn available_model_sort_order(response: &serde_json::Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Some(sorts) = response
+        .get("agentModelSorts")
+        .or_else(|| response.get("agent_model_sorts"))
+        .and_then(|v| v.as_array())
+    else {
+        return ids;
+    };
+
+    for sort in sorts {
+        if let Some(groups) = sort.get("groups").and_then(|v| v.as_array()) {
+            for group in groups {
+                if let Some(model_ids) = group
+                    .get("modelIds")
+                    .or_else(|| group.get("model_ids"))
+                    .and_then(|v| v.as_array())
+                {
+                    ids.extend(
+                        model_ids
+                            .iter()
+                            .filter_map(|id| id.as_str().map(ToString::to_string)),
+                    );
+                }
+            }
+        }
+    }
+
+    ids
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_credential_json(target: &str) -> Option<serde_json::Value> {
+    #[repr(C)]
+    struct FileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[repr(C)]
+    struct CredentialW {
+        flags: u32,
+        type_: u32,
+        target_name: *mut u16,
+        comment: *mut u16,
+        last_written: FileTime,
+        credential_blob_size: u32,
+        credential_blob: *mut u8,
+        persist: u32,
+        attribute_count: u32,
+        attributes: *mut std::ffi::c_void,
+        target_alias: *mut u16,
+        user_name: *mut u16,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn CredReadW(
+            target_name: *const u16,
+            type_: u32,
+            flags: u32,
+            credential: *mut *mut CredentialW,
+        ) -> i32;
+        fn CredFree(buffer: *mut std::ffi::c_void);
+    }
+
+    const CRED_TYPE_GENERIC: u32 = 1;
+
+    let mut target_wide: Vec<u16> = target.encode_utf16().collect();
+    target_wide.push(0);
+
+    let mut credential: *mut CredentialW = std::ptr::null_mut();
+    let ok = unsafe { CredReadW(target_wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+
+    if ok == 0 || credential.is_null() {
+        return None;
+    }
+
+    let result = unsafe {
+        let credential_ref = &*credential;
+        let blob = std::slice::from_raw_parts(
+            credential_ref.credential_blob,
+            credential_ref.credential_blob_size as usize,
+        );
+        std::str::from_utf8(blob)
+            .ok()
+            .map(|text| text.trim_end_matches('\0'))
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+    };
+
+    unsafe {
+        CredFree(credential.cast());
+    }
+
+    result
 }
 
 fn select_antigravity_project(value: &serde_json::Value) -> Option<String> {
@@ -553,18 +869,18 @@ fn parse_antigravity_quota(value: &serde_json::Value) -> Vec<UsageWindow> {
     }
 
     let groups = [
-        ("Pro", "pro"),
-        ("Flash Lite", "flash-lite"),
-        ("Flash", "flash"),
+        ("Claude", ModelMatcher::Claude),
+        ("Gemini Pro", ModelMatcher::Needles(&["gemini", "pro"])),
+        ("Gemini Flash", ModelMatcher::Needles(&["gemini", "flash"])),
     ];
 
     let mut windows = Vec::new();
-    for (label, needle) in groups {
+    for (label, matcher) in groups {
         if let Some(window) = best_antigravity_window(
             label,
             entries
                 .iter()
-                .filter(|entry| entry.model_id.to_ascii_lowercase().contains(needle)),
+                .filter(|entry| matcher.matches(&entry.model_id)),
         ) {
             windows.push(window);
         }
@@ -602,7 +918,9 @@ fn collect_quota_entries(
                 model_hint
                     .filter(|hint| {
                         let lower = hint.to_ascii_lowercase();
-                        lower.contains("antigravity") || lower.contains("gemini")
+                        lower.contains("antigravity")
+                            || lower.contains("gemini")
+                            || lower.contains("claude")
                     })
                     .map(ToString::to_string)
             });
@@ -650,6 +968,22 @@ fn number_value(value: &serde_json::Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
+#[derive(Clone, Copy)]
+enum ModelMatcher {
+    Claude,
+    Needles(&'static [&'static str]),
+}
+
+impl ModelMatcher {
+    fn matches(self, model_id: &str) -> bool {
+        let lower = model_id.to_ascii_lowercase();
+        match self {
+            Self::Claude => lower.contains("claude"),
+            Self::Needles(needles) => needles.iter().all(|needle| lower.contains(needle)),
+        }
+    }
 }
 
 fn best_antigravity_window<'a>(
