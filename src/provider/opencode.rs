@@ -10,6 +10,7 @@ const OPENCODE_SUBSCRIPTION_FUNCTION_ID: &str =
     "7abeebee372f304e050aaaf92be863f4a86490e382f8c79db68fd94040d691b4";
 
 pub struct OpenCodeProvider {
+    provider_name: &'static str,
     client: reqwest::Client,
     workspace_id: Option<String>,
     auth_cookie: Option<String>,
@@ -21,7 +22,17 @@ impl OpenCodeProvider {
         auth_cookie: Option<String>,
         proxy: Option<&str>,
     ) -> Self {
+        Self::new_with_name("opencode", workspace_id, auth_cookie, proxy)
+    }
+
+    pub fn new_with_name(
+        provider_name: &'static str,
+        workspace_id: Option<String>,
+        auth_cookie: Option<String>,
+        proxy: Option<&str>,
+    ) -> Self {
         Self {
+            provider_name,
             client: http_client(proxy),
             workspace_id: workspace_id.and_then(|value| normalize_workspace_id(&value)),
             auth_cookie: auth_cookie.and_then(|value| normalize_auth_cookie(&value)),
@@ -76,7 +87,7 @@ impl OpenCodeProvider {
 #[async_trait::async_trait]
 impl Provider for OpenCodeProvider {
     fn name(&self) -> &str {
-        "opencode"
+        self.provider_name
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {

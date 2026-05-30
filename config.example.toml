@@ -1,13 +1,54 @@
 [general]
 refresh_interval = 300
 active_provider = ""                # Optional primary provider for tray icon/tip, e.g. "codex", "opencode", "claude"
+provider_order = [
+  "claude",
+  "codex",
+  "gemini",
+  "antigravity",
+  "opencode",
+  "opencodego",
+  "deepseek",
+  "mimo",
+  "openai",
+  "openrouter",
+  "moonshot",
+  "elevenlabs",
+  "doubao",
+  "zai",
+  "venice",
+  "crof",
+  "synthetic",
+  "warp",
+  "groqcloud",
+  "deepgram",
+  "llmproxy",
+  "codebuff",
+  "kiro",
+  "copilot",
+  "azureopenai",
+  "ollama",
+  "minimax",
+  "jetbrains",
+  "kimi",
+  "kilo",
+  "augment",
+  "bedrock",
+  "vertexai",
+  "stepfun",
+  "abacus",
+  "alibabatoken",
+  "t3chat",
+  "amp",
+  "mistral",
+  "grok",
+  "cursor",
+  "droid",
+  "windsurf",
+]
 
 [network]
 proxy = ""                          # Optional explicit proxy: http://127.0.0.1:7890 or socks5://127.0.0.1:7890
-
-[deepseek]
-enabled = true
-api_key = ""                        # DeepSeek API Key, or leave empty to auto-detect from env DEEPSEEK_API_KEY
 
 [claude]
 enabled = true
@@ -29,12 +70,192 @@ api_key = ""                        # Reserved; usage requires Antigravity OAuth
 
 [opencode]
 enabled = true
-api_key = ""                        # Reserved; Go usage is read from an explicit opencode.ai auth cookie
+api_key = ""                        # Reserved; OpenCode/OpenCode Go usage is read from an explicit opencode.ai auth cookie
 workspace_id = ""                   # Optional wrk_... ID or opencode.ai workspace URL; env: OPENCODE_WORKSPACE_ID / CODEXBAR_OPENCODEGO_WORKSPACE_ID
 auth_cookie = ""                    # Optional auth cookie value or full Cookie header; env: OPENCODE_AUTH_COOKIE
+
+[deepseek]
+enabled = true
+api_key = ""                        # DeepSeek API Key, or leave empty to auto-detect from env DEEPSEEK_API_KEY
 
 [mimo]
 enabled = false
 api_key = ""                        # Xiaomi MiMo platform API Key
 service_token = ""                  # Optional serviceToken cookie value; env: MIMO_SERVICE_TOKEN
 cookie_header = ""                  # Optional full Cookie header; env: MIMO_COOKIE_HEADER
+
+[openrouter]
+enabled = false
+api_key = ""                        # OpenRouter API Key; env: OPENROUTER_API_KEY
+base_url = ""                       # Optional override, default: https://openrouter.ai/api/v1
+
+[openai]
+enabled = false
+api_key = ""                        # OpenAI Admin/API Key; env: OPENAI_ADMIN_KEY / OPENAI_API_KEY
+base_url = ""                       # Optional override, default: https://api.openai.com
+
+[moonshot]
+enabled = false
+api_key = ""                        # Moonshot/Kimi API Key; env: MOONSHOT_API_KEY / KIMI_API_KEY
+base_url = ""                       # Optional override, default: https://api.moonshot.cn/v1
+
+[elevenlabs]
+enabled = false
+api_key = ""                        # ElevenLabs API Key; env: ELEVENLABS_API_KEY / XI_API_KEY
+base_url = ""                       # Optional override, default: https://api.elevenlabs.io/v1
+
+[doubao]
+enabled = false
+api_key = ""                        # Volcengine Ark API Key; env: ARK_API_KEY / VOLCENGINE_API_KEY / DOUBAO_API_KEY
+base_url = ""                       # Optional override, default: https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
+
+[zai]
+enabled = false
+api_key = ""                        # z.ai API Key; env: Z_AI_API_KEY / ZAI_API_KEY
+base_url = ""                       # Optional full quota URL; env: Z_AI_QUOTA_URL or Z_AI_API_HOST
+
+[venice]
+enabled = false
+api_key = ""                        # Venice API Key; env: VENICE_API_KEY / VENICE_KEY
+base_url = ""                       # Optional override, default: https://api.venice.ai/api/v1
+
+[crof]
+enabled = false
+api_key = ""                        # Crof API Key; env: CROF_API_KEY / CROFAI_API_KEY
+base_url = ""                       # Optional usage URL override, default: https://crof.ai/usage_api/
+
+[synthetic]
+enabled = false
+api_key = ""                        # Synthetic API Key; env: SYNTHETIC_API_KEY
+base_url = ""                       # Optional override, default: https://api.synthetic.new/v2
+
+[warp]
+enabled = false
+api_key = ""                        # Warp API Key; env: WARP_API_KEY / WARP_TOKEN
+base_url = ""                       # Optional GraphQL URL, default: https://app.warp.dev/graphql/v2?op=GetRequestLimitInfo
+
+[groqcloud]
+enabled = false
+api_key = ""                        # GroqCloud API Key; env: GROQ_API_KEY / GROQCLOUD_API_KEY
+base_url = ""                       # Optional metrics base, default: https://api.groq.com/v1/metrics/prometheus
+
+[deepgram]
+enabled = false
+api_key = ""                        # Deepgram API Key; env: DEEPGRAM_API_KEY
+base_url = ""                       # Optional override, default: https://api.deepgram.com/v1
+
+[llmproxy]
+enabled = false
+api_key = ""                        # LLM Proxy API Key; env: LLM_PROXY_API_KEY / LLMPROXY_API_KEY
+base_url = ""                       # Proxy base URL; env: LLM_PROXY_BASE_URL / LLMPROXY_BASE_URL
+
+[codebuff]
+enabled = false
+api_key = ""                        # Codebuff API Key; env: CODEBUFF_API_KEY or ~/.config/manicode/credentials.json
+base_url = ""                       # Optional override, default: https://www.codebuff.com
+
+[kiro]
+enabled = false
+api_key = ""                        # Kiro API Key; env: KIRO_API_KEY; requires kiro-cli for /usage
+base_url = ""                       # Reserved
+
+[copilot]
+enabled = false
+api_key = ""                        # GitHub Copilot OAuth token; env: GITHUB_COPILOT_TOKEN / COPILOT_TOKEN
+base_url = ""                       # Optional override, default: https://api.github.com/copilot_internal/user
+
+[azureopenai]
+enabled = false
+api_key = ""                        # Azure OpenAI API Key; env: AZURE_OPENAI_API_KEY / AZURE_OPENAI_KEY
+base_url = ""                       # Azure OpenAI endpoint; env: AZURE_OPENAI_ENDPOINT
+deployment = ""                     # Deployment name; env: AZURE_OPENAI_DEPLOYMENT_NAME
+
+[ollama]
+enabled = false
+api_key = ""                        # Ollama Cloud API Key; env: OLLAMA_API_KEY
+base_url = ""                       # Optional override, default: https://ollama.com
+
+[minimax]
+enabled = false
+api_key = ""                        # MiniMax Coding Plan API Key; env: MINIMAX_API_KEY
+base_url = ""                       # Optional remains URL, default: https://api.minimax.io/v1/coding_plan/remains
+
+[jetbrains]
+enabled = false
+api_key = ""                        # Reserved
+base_url = ""                       # Optional AIAssistantQuotaManager2.xml path; auto-detects AppData/Roaming/JetBrains by default
+
+[kimi]
+enabled = false
+api_key = ""                        # Kimi auth token; env: KIMI_AUTH_TOKEN
+base_url = ""                       # Optional usage URL, default: https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages
+
+[kilo]
+enabled = false
+api_key = ""                        # Optional Kilo API Key; env: KILO_API_KEY; fetch uses `kilo stats`
+base_url = ""                       # Reserved
+
+[augment]
+enabled = false
+api_key = ""                        # Optional Augment session token; env: AUGMENT_SESSION_TOKEN; fetch uses `auggie usage`
+base_url = ""                       # Reserved
+
+[bedrock]
+enabled = false
+api_key = ""                        # Optional monthly budget in USD; env: CODEXBAR_BEDROCK_BUDGET
+base_url = ""                       # Reserved; uses AWS CLI Cost Explorer and AWS_* env/profile credentials
+
+[vertexai]
+enabled = false
+api_key = ""                        # Google Cloud project ID; env: GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GOOGLE_PROJECT_ID
+base_url = ""                       # Reserved; uses gcloud Cloud Monitoring quota metrics
+
+[stepfun]
+enabled = false
+api_key = ""                        # Oasis-Token value; env: STEPFUN_TOKEN / OASIS_TOKEN
+base_url = ""                       # Optional override, default: https://platform.stepfun.com
+
+[abacus]
+enabled = false
+api_key = ""                        # Abacus Cookie header; env: ABACUS_COOKIE / ABACUS_COOKIE_HEADER
+base_url = ""                       # Optional override, default: https://apps.abacus.ai
+
+[alibabatoken]
+enabled = false
+api_key = ""                        # Alibaba Bailian Cookie header; env: ALIBABA_TOKEN_PLAN_COOKIE
+base_url = ""                       # Optional quota URL override
+
+[t3chat]
+enabled = false
+api_key = ""                        # T3 Chat Cookie header; env: T3_CHAT_COOKIE / T3CHAT_COOKIE
+base_url = ""                       # Optional override, default: https://t3.chat/api/trpc/getCustomerData
+
+[amp]
+enabled = false
+api_key = ""                        # Amp Cookie header; env: AMP_COOKIE / AMPCODE_COOKIE
+base_url = ""                       # Optional override, default: https://ampcode.com/settings
+
+[mistral]
+enabled = false
+api_key = ""                        # Mistral API Key; env: MISTRAL_API_KEY
+base_url = ""                       # Optional override, default: https://api.mistral.ai
+
+[grok]
+enabled = false
+api_key = ""                        # xAI/Grok API Key; env: XAI_API_KEY / GROK_API_KEY
+base_url = ""                       # Optional override, default: https://api.x.ai
+
+[cursor]
+enabled = false
+api_key = ""                        # Cursor Cookie header; env: CURSOR_COOKIE / CURSOR_SESSION_COOKIE
+base_url = ""                       # Optional settings URL, default: https://www.cursor.com/settings
+
+[droid]
+enabled = false
+api_key = ""                        # Optional Factory API Key; env: FACTORY_API_KEY; fetch uses `droid --no-interactive /limits`
+base_url = ""                       # Reserved
+
+[windsurf]
+enabled = false
+api_key = ""                        # Windsurf/Codeium service key; env: WINDSURF_SERVICE_KEY / CODEIUM_SERVICE_KEY
+base_url = ""                       # Optional override, default: https://server.codeium.com/api/v1

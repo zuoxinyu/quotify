@@ -1,6 +1,10 @@
 use eframe::egui;
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::provider::UsageData;
 
@@ -8,7 +12,10 @@ pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
     pub config: crate::config::AppConfig,
+    pub config_path: Option<PathBuf>,
     pub active_provider: Arc<RwLock<String>>,
+    drag: ProviderDragState,
+    last_config_reload: Instant,
 }
 
 impl QuotifyApp {
@@ -16,15 +23,27 @@ impl QuotifyApp {
         data: Arc<RwLock<Vec<UsageData>>>,
         last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
         config: crate::config::AppConfig,
+        config_path: Option<PathBuf>,
         active_provider: Arc<RwLock<String>>,
     ) -> Self {
         Self {
             data,
             last_refresh,
             config,
+            config_path,
             active_provider,
+            drag: ProviderDragState::default(),
+            last_config_reload: Instant::now(),
         }
     }
+}
+
+#[derive(Default)]
+struct ProviderDragState {
+    held_provider: Option<String>,
+    hold_started: Option<Instant>,
+    dragging_provider: Option<String>,
+    order_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +62,7 @@ impl eframe::App for QuotifyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         egui_extras::install_image_loaders(&ctx);
+        self.reload_config_if_due();
 
         // Redraw every second to update the "Refreshed X seconds ago" counter,
         // but ONLY if the window is active/focused. When the window loses focus,
@@ -285,32 +305,137 @@ impl eframe::App for QuotifyApp {
                     .hscroll(false)
                     .show(ui, |ui| {
                         let data = self.data.read().clone();
-                        let all_providers = [
-                            ("codex", "Codex"),
-                            ("opencode", "OpenCode"),
-                            ("claude", "Claude"),
-                            ("gemini", "Gemini"),
-                            ("antigravity", "Antigravity"),
-                            ("deepseek", "DeepSeek"),
-                            ("mimo", "MiMo"),
-                        ];
+                        let all_providers = provider_display_order(&self.config);
 
-                        for &(name, display_name) in &all_providers {
-                            let provider_data = data.iter().find(|d| d.provider == name);
-                            render_provider(
+                        let mut shown = 0usize;
+                        for (name, display_name) in all_providers {
+                            let Some(provider_data) = data.iter().find(|d| d.provider == name) else {
+                                continue;
+                            };
+                            let response = render_provider(
                                 ui,
-                                name,
+                                &name,
                                 display_name,
-                                provider_data,
+                                Some(provider_data),
                                 card_width,
                                 &self.active_provider,
                                 &self.config,
+                                self.config_path.as_ref(),
                                 &self.data,
                             );
+                            self.handle_provider_drag(&ctx, &response, &name);
+                            shown += 1;
                             ui.add_space(6.0);
+                        }
+
+                        self.finish_provider_drag_if_released(&ctx);
+
+                        if shown == 0 {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(48.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "No enabled providers. Configure credentials to enable cards.",
+                                    )
+                                    .color(egui::Color32::from_rgb(150, 150, 150)),
+                                );
+                            });
                         }
                     });
             });
+    }
+}
+
+impl QuotifyApp {
+    fn reload_config_if_due(&mut self) {
+        if self.drag.dragging_provider.is_some()
+            || self.last_config_reload.elapsed() < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.last_config_reload = Instant::now();
+
+        let loaded = if let Some(path) = &self.config_path {
+            crate::config::AppConfig::load_from(path)
+        } else {
+            crate::config::AppConfig::load()
+        };
+
+        match loaded {
+            Ok(config) => {
+                self.config = config;
+                *self.active_provider.write() =
+                    self.config.general.active_provider.trim().to_string();
+            }
+            Err(err) => tracing::debug!("Failed to reload UI config: {err}"),
+        }
+    }
+
+    fn save_config(&self) {
+        let result = if let Some(path) = &self.config_path {
+            self.config.save_to(path)
+        } else {
+            self.config.save()
+        };
+        if let Err(err) = result {
+            tracing::error!("Failed to save provider order: {err}");
+        }
+    }
+
+    fn handle_provider_drag(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        provider_name: &str,
+    ) {
+        let pointer_down = ctx.input(|i| i.pointer.primary_down());
+        if !pointer_down {
+            return;
+        }
+
+        let now = Instant::now();
+        if response.hovered() && self.drag.held_provider.is_none() {
+            self.drag.held_provider = Some(provider_name.to_string());
+            self.drag.hold_started = Some(now);
+        }
+
+        if self.drag.held_provider.as_deref() == Some(provider_name)
+            && self.drag.dragging_provider.is_none()
+            && self
+                .drag
+                .hold_started
+                .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(350))
+            && response.dragged()
+        {
+            self.drag.dragging_provider = Some(provider_name.to_string());
+        }
+
+        let Some(dragging_provider) = self.drag.dragging_provider.clone() else {
+            return;
+        };
+        if dragging_provider == provider_name || !response.hovered() {
+            return;
+        }
+
+        if reorder_provider(
+            &mut self.config.general.provider_order,
+            &dragging_provider,
+            provider_name,
+        ) {
+            self.drag.order_dirty = true;
+            ctx.request_repaint();
+        }
+    }
+
+    fn finish_provider_drag_if_released(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.pointer.primary_down()) {
+            return;
+        }
+
+        if self.drag.order_dirty {
+            self.save_config();
+        }
+        self.drag = ProviderDragState::default();
     }
 }
 
@@ -371,6 +496,115 @@ fn icon_button(
     .on_hover_text(tooltip)
 }
 
+fn provider_catalog() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("codex", "Codex"),
+        ("openai", "OpenAI"),
+        ("opencode", "OpenCode"),
+        ("opencodego", "OpenCode Go"),
+        ("claude", "Claude"),
+        ("gemini", "Gemini"),
+        ("antigravity", "Antigravity"),
+        ("deepseek", "DeepSeek"),
+        ("openrouter", "OpenRouter"),
+        ("moonshot", "Moonshot"),
+        ("elevenlabs", "ElevenLabs"),
+        ("doubao", "Doubao"),
+        ("zai", "z.ai"),
+        ("venice", "Venice"),
+        ("crof", "Crof"),
+        ("synthetic", "Synthetic"),
+        ("warp", "Warp"),
+        ("groqcloud", "GroqCloud"),
+        ("deepgram", "Deepgram"),
+        ("llmproxy", "LLM Proxy"),
+        ("codebuff", "Codebuff"),
+        ("kiro", "Kiro"),
+        ("copilot", "Copilot"),
+        ("azureopenai", "Azure OpenAI"),
+        ("ollama", "Ollama"),
+        ("minimax", "MiniMax"),
+        ("jetbrains", "JetBrains AI"),
+        ("kimi", "Kimi"),
+        ("kilo", "Kilo Code"),
+        ("augment", "Augment"),
+        ("bedrock", "AWS Bedrock"),
+        ("vertexai", "Vertex AI"),
+        ("stepfun", "StepFun"),
+        ("abacus", "Abacus AI"),
+        ("alibabatoken", "Alibaba Token"),
+        ("t3chat", "T3 Chat"),
+        ("amp", "Amp"),
+        ("mistral", "Mistral"),
+        ("grok", "Grok"),
+        ("cursor", "Cursor"),
+        ("droid", "Factory Droid"),
+        ("windsurf", "Windsurf"),
+        ("mimo", "MiMo"),
+    ]
+}
+
+fn provider_display_order(config: &crate::config::AppConfig) -> Vec<(String, &'static str)> {
+    let mut ordered = Vec::new();
+    for configured in &config.general.provider_order {
+        if let Some((id, display_name)) = provider_catalog()
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(configured))
+            && !ordered.iter().any(|(existing, _)| existing == id)
+        {
+            ordered.push(((*id).to_string(), *display_name));
+        }
+    }
+
+    for (id, display_name) in provider_catalog() {
+        if !ordered.iter().any(|(existing, _)| existing == id) {
+            ordered.push(((*id).to_string(), *display_name));
+        }
+    }
+
+    ordered
+}
+
+fn ensure_provider_order(order: &mut Vec<String>) {
+    let mut normalized = Vec::new();
+    for configured in order.iter() {
+        if let Some((id, _)) = provider_catalog()
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(configured))
+            && !normalized.iter().any(|existing| existing == id)
+        {
+            normalized.push((*id).to_string());
+        }
+    }
+
+    for (id, _) in provider_catalog() {
+        if !normalized.iter().any(|existing| existing == id) {
+            normalized.push((*id).to_string());
+        }
+    }
+
+    *order = normalized;
+}
+
+fn reorder_provider(order: &mut Vec<String>, dragged: &str, target: &str) -> bool {
+    ensure_provider_order(order);
+    let Some(from) = order.iter().position(|id| id == dragged) else {
+        return false;
+    };
+    let Some(to) = order.iter().position(|id| id == target) else {
+        return false;
+    };
+    if from == to {
+        return false;
+    }
+
+    let item = order.remove(from);
+    let target_index = order.iter().position(|id| id == target).unwrap_or(to);
+    order.insert(target_index, item);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_provider(
     ui: &mut egui::Ui,
     provider_name: &str,
@@ -379,8 +613,9 @@ fn render_provider(
     card_width: f32,
     active_provider: &Arc<RwLock<String>>,
     config: &crate::config::AppConfig,
+    config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
-) {
+) -> egui::Response {
     let status = match data {
         Some(d) if d.error.is_some() => ProviderStatus::Error,
         Some(_) => ProviderStatus::Active,
@@ -404,7 +639,7 @@ fn render_provider(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_space(left_indent);
-        ui.allocate_ui_with_layout(
+        let inner = ui.allocate_ui_with_layout(
             egui::vec2(card_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
@@ -423,11 +658,14 @@ fn render_provider(
                     card_width,
                     active_provider,
                     config,
+                    config_path,
                     all_data,
                 );
             },
         );
-    });
+        inner.response.interact(egui::Sense::click_and_drag())
+    })
+    .inner
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,6 +682,7 @@ fn render_provider_card(
     card_width: f32,
     active_provider: &Arc<RwLock<String>>,
     config: &crate::config::AppConfig,
+    config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
 ) {
     let response = card_frame.show(ui, |ui| {
@@ -466,6 +705,7 @@ fn render_provider_card(
                     is_dark,
                     active_provider,
                     config,
+                    config_path,
                     all_data,
                 ) {
                     ui.add_space(6.0);
@@ -703,15 +943,54 @@ fn render_provider_card(
 
 fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource<'static>> {
     match (provider_name, is_dark) {
+        ("abacus", true) => Some(egui::include_image!(
+            "../assets/provider-icons/abacus-ai-dark.svg"
+        )),
+        ("abacus", false) => Some(egui::include_image!(
+            "../assets/provider-icons/abacus-ai.png"
+        )),
+        ("alibabatoken", _) => Some(egui::include_image!("../assets/provider-icons/alibaba.svg")),
+        ("amp", _) => Some(egui::include_image!("../assets/provider-icons/amp.svg")),
+        ("augment", _) => Some(egui::include_image!("../assets/provider-icons/augment.svg")),
         ("codex", true) => Some(egui::include_image!(
             "../assets/provider-icons/codex-dark.svg"
         )),
         ("codex", false) => Some(egui::include_image!("../assets/provider-icons/codex.svg")),
-        ("opencode", true) => Some(egui::include_image!(
+        ("codebuff", true) => Some(egui::include_image!(
+            "../assets/provider-icons/codebuff-dark.svg"
+        )),
+        ("codebuff", false) => Some(egui::include_image!(
+            "../assets/provider-icons/codebuff.svg"
+        )),
+        ("copilot", _) => Some(egui::include_image!("../assets/provider-icons/copilot.svg")),
+        ("cursor", _) => Some(egui::include_image!("../assets/provider-icons/cursor.svg")),
+        ("droid", true) => Some(egui::include_image!(
+            "../assets/provider-icons/droid-dark.svg"
+        )),
+        ("droid", false) => Some(egui::include_image!("../assets/provider-icons/droid.svg")),
+        ("elevenlabs", _) => Some(egui::include_image!(
+            "../assets/provider-icons/elevenlabs.svg"
+        )),
+        ("jetbrains", _) => Some(egui::include_image!(
+            "../assets/provider-icons/jetbrains-ai.svg"
+        )),
+        ("kilo", _) => Some(egui::include_image!("../assets/provider-icons/kilo.svg")),
+        ("kimi", _) => Some(egui::include_image!("../assets/provider-icons/kimi.svg")),
+        ("kiro", true) => Some(egui::include_image!(
+            "../assets/provider-icons/kiro-dark.svg"
+        )),
+        ("kiro", false) => Some(egui::include_image!("../assets/provider-icons/kiro.svg")),
+        ("minimax", _) => Some(egui::include_image!("../assets/provider-icons/minimax.svg")),
+        ("mistral", _) => Some(egui::include_image!("../assets/provider-icons/mistral.svg")),
+        ("ollama", _) => Some(egui::include_image!("../assets/provider-icons/ollama.svg")),
+        ("opencode" | "opencodego", true) => Some(egui::include_image!(
             "../assets/provider-icons/opencode-dark.svg"
         )),
-        ("opencode", false) => Some(egui::include_image!(
+        ("opencode" | "opencodego", false) => Some(egui::include_image!(
             "../assets/provider-icons/opencode.svg"
+        )),
+        ("openrouter", _) => Some(egui::include_image!(
+            "../assets/provider-icons/openrouter.svg"
         )),
         ("claude", _) => Some(egui::include_image!("../assets/provider-icons/claude.svg")),
         ("gemini", _) => Some(egui::include_image!("../assets/provider-icons/gemini.svg")),
@@ -721,6 +1000,20 @@ fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource
         ("deepseek", _) => Some(egui::include_image!(
             "../assets/provider-icons/deepseek.svg"
         )),
+        ("synthetic", true) => Some(egui::include_image!(
+            "../assets/provider-icons/synthetic-dark.svg"
+        )),
+        ("synthetic", false) => Some(egui::include_image!(
+            "../assets/provider-icons/synthetic.svg"
+        )),
+        ("vertexai", _) => Some(egui::include_image!(
+            "../assets/provider-icons/vertex-ai.svg"
+        )),
+        ("warp", _) => Some(egui::include_image!("../assets/provider-icons/warp.svg")),
+        ("zai", true) => Some(egui::include_image!(
+            "../assets/provider-icons/zai-dark.svg"
+        )),
+        ("zai", false) => Some(egui::include_image!("../assets/provider-icons/zai.svg")),
         _ => None,
     }
 }
@@ -731,6 +1024,7 @@ fn render_provider_icon(
     is_dark: bool,
     active_provider: &Arc<RwLock<String>>,
     config: &crate::config::AppConfig,
+    config_path: Option<&PathBuf>,
     data: &Arc<RwLock<Vec<UsageData>>>,
 ) -> bool {
     let is_active = active_provider.read().eq_ignore_ascii_case(provider_name);
@@ -750,7 +1044,7 @@ fn render_provider_icon(
             )
             .on_hover_text(tooltip);
         if response.double_clicked() {
-            set_active_provider(provider_name, active_provider, config, data);
+            set_active_provider(provider_name, active_provider, config, config_path, data);
         }
         return true;
     }
@@ -777,7 +1071,7 @@ fn render_provider_icon(
             fg,
         );
         if response.on_hover_text(tooltip).double_clicked() {
-            set_active_provider(provider_name, active_provider, config, data);
+            set_active_provider(provider_name, active_provider, config, config_path, data);
         }
         return true;
     }
@@ -789,13 +1083,19 @@ fn set_active_provider(
     provider_name: &str,
     active_provider: &Arc<RwLock<String>>,
     config: &crate::config::AppConfig,
+    config_path: Option<&PathBuf>,
     data: &Arc<RwLock<Vec<UsageData>>>,
 ) {
     *active_provider.write() = provider_name.to_string();
 
     let mut updated_config = config.clone();
     updated_config.general.active_provider = provider_name.to_string();
-    if let Err(err) = updated_config.save() {
+    let result = if let Some(path) = config_path {
+        updated_config.save_to(path)
+    } else {
+        updated_config.save()
+    };
+    if let Err(err) = result {
         tracing::error!("Failed to save active provider {provider_name}: {err}");
     }
 
