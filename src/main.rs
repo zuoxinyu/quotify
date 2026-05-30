@@ -10,9 +10,20 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use parking_lot::{Mutex, RwLock};
 use provider::{
-    Provider, UsageData, antigravity::AntigravityProvider, claude::ClaudeProvider,
-    codex::CodexProvider, deepseek::DeepSeekProvider, gemini::GeminiProvider, mimo::MimoProvider,
-    opencode::OpenCodeProvider,
+    Provider, UsageData, abacus::AbacusProvider, alibabatoken::AlibabaTokenProvider,
+    amp::AmpProvider, antigravity::AntigravityProvider, augment::AugmentProvider,
+    azureopenai::AzureOpenAiProvider, bedrock::BedrockProvider, claude::ClaudeProvider,
+    codebuff::CodebuffProvider, codex::CodexProvider, copilot::CopilotProvider, crof::CrofProvider,
+    cursor::CursorProvider, deepgram::DeepgramProvider, deepseek::DeepSeekProvider,
+    doubao::DoubaoProvider, droid::DroidProvider, elevenlabs::ElevenLabsProvider,
+    gemini::GeminiProvider, grok::GrokProvider, groqcloud::GroqCloudProvider,
+    jetbrains::JetBrainsProvider, kilo::KiloProvider, kimi::KimiProvider, kiro::KiroProvider,
+    llmproxy::LlmProxyProvider, mimo::MimoProvider, minimax::MiniMaxProvider,
+    mistral::MistralProvider, moonshot::MoonshotProvider, ollama::OllamaProvider,
+    openai::OpenAiProvider, opencode::OpenCodeProvider, openrouter::OpenRouterProvider,
+    stepfun::StepFunProvider, synthetic::SyntheticProvider, t3chat::T3ChatProvider,
+    venice::VeniceProvider, vertexai::VertexAiProvider, warp::WarpProvider,
+    windsurf::WindsurfProvider, zai::ZaiProvider,
 };
 use std::{
     sync::{Arc, OnceLock, atomic::Ordering},
@@ -28,13 +39,49 @@ pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
 pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-pub const PROVIDER_ORDER: [&str; 7] = [
+pub const PROVIDER_ORDER: [&str; 43] = [
     "codex",
+    "openai",
     "opencode",
+    "opencodego",
     "claude",
     "gemini",
     "antigravity",
     "deepseek",
+    "openrouter",
+    "moonshot",
+    "elevenlabs",
+    "doubao",
+    "zai",
+    "venice",
+    "crof",
+    "synthetic",
+    "warp",
+    "groqcloud",
+    "deepgram",
+    "llmproxy",
+    "codebuff",
+    "kiro",
+    "copilot",
+    "azureopenai",
+    "ollama",
+    "minimax",
+    "jetbrains",
+    "kimi",
+    "kilo",
+    "augment",
+    "bedrock",
+    "vertexai",
+    "stepfun",
+    "abacus",
+    "alibabatoken",
+    "t3chat",
+    "amp",
+    "mistral",
+    "grok",
+    "cursor",
+    "droid",
+    "windsurf",
     "mimo",
 ];
 
@@ -79,6 +126,557 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             };
             if config.deepseek.enabled || !api_key.is_empty() {
                 Some(Box::new(DeepSeekProvider::new(api_key, proxy)))
+            } else {
+                None
+            }
+        }
+        "openrouter" => {
+            if config.openrouter.enabled
+                || !config.openrouter.api_key.is_empty()
+                || std::env::var("OPENROUTER_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(OpenRouterProvider::new(
+                    config.openrouter.api_key.clone(),
+                    config.openrouter.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "openai" => {
+            if config.openai.enabled
+                || !config.openai.api_key.is_empty()
+                || std::env::var("OPENAI_ADMIN_KEY")
+                    .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(OpenAiProvider::new(
+                    config.openai.api_key.clone(),
+                    config.openai.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "moonshot" => {
+            if config.moonshot.enabled
+                || !config.moonshot.api_key.is_empty()
+                || std::env::var("MOONSHOT_API_KEY")
+                    .or_else(|_| std::env::var("KIMI_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(MoonshotProvider::new(
+                    config.moonshot.api_key.clone(),
+                    config.moonshot.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "elevenlabs" => {
+            if config.elevenlabs.enabled
+                || !config.elevenlabs.api_key.is_empty()
+                || std::env::var("ELEVENLABS_API_KEY")
+                    .or_else(|_| std::env::var("XI_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(ElevenLabsProvider::new(
+                    config.elevenlabs.api_key.clone(),
+                    config.elevenlabs.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "doubao" => {
+            if config.doubao.enabled
+                || !config.doubao.api_key.is_empty()
+                || std::env::var("ARK_API_KEY")
+                    .or_else(|_| std::env::var("VOLCENGINE_API_KEY"))
+                    .or_else(|_| std::env::var("DOUBAO_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(DoubaoProvider::new(
+                    config.doubao.api_key.clone(),
+                    config.doubao.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "zai" => {
+            if config.zai.enabled
+                || !config.zai.api_key.is_empty()
+                || std::env::var("Z_AI_API_KEY")
+                    .or_else(|_| std::env::var("ZAI_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(ZaiProvider::new(
+                    config.zai.api_key.clone(),
+                    config.zai.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "venice" => {
+            if config.venice.enabled
+                || !config.venice.api_key.is_empty()
+                || std::env::var("VENICE_API_KEY")
+                    .or_else(|_| std::env::var("VENICE_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(VeniceProvider::new(
+                    config.venice.api_key.clone(),
+                    config.venice.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "crof" => {
+            if config.crof.enabled
+                || !config.crof.api_key.is_empty()
+                || std::env::var("CROF_API_KEY")
+                    .or_else(|_| std::env::var("CROFAI_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(CrofProvider::new(
+                    config.crof.api_key.clone(),
+                    config.crof.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "synthetic" => {
+            if config.synthetic.enabled
+                || !config.synthetic.api_key.is_empty()
+                || std::env::var("SYNTHETIC_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(SyntheticProvider::new(
+                    config.synthetic.api_key.clone(),
+                    config.synthetic.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "warp" => {
+            if config.warp.enabled
+                || !config.warp.api_key.is_empty()
+                || std::env::var("WARP_API_KEY")
+                    .or_else(|_| std::env::var("WARP_TOKEN"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(WarpProvider::new(
+                    config.warp.api_key.clone(),
+                    config.warp.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "groqcloud" => {
+            if config.groqcloud.enabled
+                || !config.groqcloud.api_key.is_empty()
+                || std::env::var("GROQ_API_KEY")
+                    .or_else(|_| std::env::var("GROQCLOUD_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(GroqCloudProvider::new(
+                    config.groqcloud.api_key.clone(),
+                    config.groqcloud.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "deepgram" => {
+            if config.deepgram.enabled
+                || !config.deepgram.api_key.is_empty()
+                || std::env::var("DEEPGRAM_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(DeepgramProvider::new(
+                    config.deepgram.api_key.clone(),
+                    config.deepgram.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "llmproxy" => {
+            if config.llmproxy.enabled
+                || !config.llmproxy.api_key.is_empty()
+                || std::env::var("LLM_PROXY_API_KEY")
+                    .or_else(|_| std::env::var("LLMPROXY_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(LlmProxyProvider::new(
+                    config.llmproxy.api_key.clone(),
+                    config.llmproxy.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "codebuff" => {
+            if config.codebuff.enabled
+                || !config.codebuff.api_key.is_empty()
+                || CodebuffProvider::credentials_file_exists()
+                || std::env::var("CODEBUFF_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(CodebuffProvider::new(
+                    config.codebuff.api_key.clone(),
+                    config.codebuff.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "kiro" => {
+            if config.kiro.enabled
+                || !config.kiro.api_key.is_empty()
+                || std::env::var("KIRO_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(KiroProvider::new(config.kiro.api_key.clone())))
+            } else {
+                None
+            }
+        }
+        "copilot" => {
+            if config.copilot.enabled
+                || !config.copilot.api_key.is_empty()
+                || std::env::var("GITHUB_COPILOT_TOKEN")
+                    .or_else(|_| std::env::var("COPILOT_TOKEN"))
+                    .or_else(|_| std::env::var("GITHUB_TOKEN"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(CopilotProvider::new(
+                    config.copilot.api_key.clone(),
+                    config.copilot.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "azureopenai" => {
+            if config.azureopenai.enabled
+                || !config.azureopenai.api_key.is_empty()
+                || std::env::var("AZURE_OPENAI_API_KEY")
+                    .or_else(|_| std::env::var("AZURE_OPENAI_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(AzureOpenAiProvider::new(
+                    config.azureopenai.api_key.clone(),
+                    config.azureopenai.base_url.clone(),
+                    config.azureopenai.deployment.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "ollama" => {
+            if config.ollama.enabled
+                || !config.ollama.api_key.is_empty()
+                || std::env::var("OLLAMA_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(OllamaProvider::new(
+                    config.ollama.api_key.clone(),
+                    config.ollama.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "minimax" => {
+            if config.minimax.enabled
+                || !config.minimax.api_key.is_empty()
+                || std::env::var("MINIMAX_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(MiniMaxProvider::new(
+                    config.minimax.api_key.clone(),
+                    config.minimax.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "jetbrains" => {
+            if config.jetbrains.enabled
+                || !config.jetbrains.api_key.is_empty()
+                || JetBrainsProvider::quota_file_exists(&config.jetbrains.base_url)
+            {
+                Some(Box::new(JetBrainsProvider::new(
+                    config.jetbrains.base_url.clone(),
+                )))
+            } else {
+                None
+            }
+        }
+        "kimi" => {
+            if config.kimi.enabled
+                || !config.kimi.api_key.is_empty()
+                || std::env::var("KIMI_AUTH_TOKEN")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(KimiProvider::new(
+                    config.kimi.api_key.clone(),
+                    config.kimi.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "kilo" => {
+            if config.kilo.enabled
+                || !config.kilo.api_key.is_empty()
+                || KiloProvider::has_cli_or_token(&config.kilo.api_key)
+            {
+                Some(Box::new(KiloProvider::new(config.kilo.api_key.clone())))
+            } else {
+                None
+            }
+        }
+        "augment" => {
+            if config.augment.enabled
+                || !config.augment.api_key.is_empty()
+                || AugmentProvider::has_cli_or_token(&config.augment.api_key)
+            {
+                Some(Box::new(AugmentProvider::new(
+                    config.augment.api_key.clone(),
+                )))
+            } else {
+                None
+            }
+        }
+        "bedrock" => {
+            if config.bedrock.enabled
+                || std::env::var("AWS_ACCESS_KEY_ID").is_ok()
+                || std::env::var("AWS_PROFILE").is_ok()
+                || std::env::var("CODEXBAR_BEDROCK_BUDGET").is_ok()
+            {
+                Some(Box::new(BedrockProvider::new(
+                    config.bedrock.api_key.clone(),
+                )))
+            } else {
+                None
+            }
+        }
+        "vertexai" => {
+            if config.vertexai.enabled || VertexAiProvider::has_project(&config.vertexai.api_key) {
+                Some(Box::new(VertexAiProvider::new(
+                    config.vertexai.api_key.clone(),
+                )))
+            } else {
+                None
+            }
+        }
+        "stepfun" => {
+            if config.stepfun.enabled
+                || !config.stepfun.api_key.is_empty()
+                || std::env::var("STEPFUN_TOKEN")
+                    .or_else(|_| std::env::var("OASIS_TOKEN"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(StepFunProvider::new(
+                    config.stepfun.api_key.clone(),
+                    config.stepfun.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "abacus" => {
+            if config.abacus.enabled
+                || !config.abacus.api_key.is_empty()
+                || std::env::var("ABACUS_COOKIE")
+                    .or_else(|_| std::env::var("ABACUS_COOKIE_HEADER"))
+                    .or_else(|_| std::env::var("ABACUS_AI_COOKIE"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(AbacusProvider::new(
+                    config.abacus.api_key.clone(),
+                    config.abacus.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "alibabatoken" => {
+            if config.alibabatoken.enabled
+                || !config.alibabatoken.api_key.is_empty()
+                || std::env::var("ALIBABA_TOKEN_PLAN_COOKIE")
+                    .or_else(|_| std::env::var("ALIBABA_TOKEN_COOKIE"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(AlibabaTokenProvider::new(
+                    config.alibabatoken.api_key.clone(),
+                    config.alibabatoken.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "t3chat" => {
+            if config.t3chat.enabled
+                || !config.t3chat.api_key.is_empty()
+                || std::env::var("T3_CHAT_COOKIE")
+                    .or_else(|_| std::env::var("T3CHAT_COOKIE"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(T3ChatProvider::new(
+                    config.t3chat.api_key.clone(),
+                    config.t3chat.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "amp" => {
+            if config.amp.enabled
+                || !config.amp.api_key.is_empty()
+                || std::env::var("AMP_COOKIE")
+                    .or_else(|_| std::env::var("AMPCODE_COOKIE"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(AmpProvider::new(
+                    config.amp.api_key.clone(),
+                    config.amp.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "mistral" => {
+            if config.mistral.enabled
+                || !config.mistral.api_key.is_empty()
+                || std::env::var("MISTRAL_API_KEY")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(MistralProvider::new(
+                    config.mistral.api_key.clone(),
+                    config.mistral.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "grok" => {
+            if config.grok.enabled
+                || !config.grok.api_key.is_empty()
+                || std::env::var("XAI_API_KEY")
+                    .or_else(|_| std::env::var("GROK_API_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(GrokProvider::new(
+                    config.grok.api_key.clone(),
+                    config.grok.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "cursor" => {
+            if config.cursor.enabled
+                || !config.cursor.api_key.is_empty()
+                || std::env::var("CURSOR_COOKIE")
+                    .or_else(|_| std::env::var("CURSOR_SESSION_COOKIE"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(CursorProvider::new(
+                    config.cursor.api_key.clone(),
+                    config.cursor.base_url.clone(),
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "droid" => {
+            if config.droid.enabled
+                || !config.droid.api_key.is_empty()
+                || DroidProvider::has_cli_or_token(&config.droid.api_key)
+            {
+                Some(Box::new(DroidProvider::new(config.droid.api_key.clone())))
+            } else {
+                None
+            }
+        }
+        "windsurf" => {
+            if config.windsurf.enabled
+                || !config.windsurf.api_key.is_empty()
+                || std::env::var("WINDSURF_SERVICE_KEY")
+                    .or_else(|_| std::env::var("CODEIUM_SERVICE_KEY"))
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+            {
+                Some(Box::new(WindsurfProvider::new(
+                    config.windsurf.api_key.clone(),
+                    config.windsurf.base_url.clone(),
+                    proxy,
+                )))
             } else {
                 None
             }
@@ -225,6 +823,29 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                     .exists()
             {
                 Some(Box::new(OpenCodeProvider::new(
+                    workspace_id,
+                    auth_cookie,
+                    proxy,
+                )))
+            } else {
+                None
+            }
+        }
+        "opencodego" => {
+            let workspace_id = if config.opencode.workspace_id.is_empty() {
+                None
+            } else {
+                Some(config.opencode.workspace_id.clone())
+            };
+            let auth_cookie = if config.opencode.auth_cookie.is_empty() {
+                None
+            } else {
+                Some(config.opencode.auth_cookie.clone())
+            };
+
+            if false {
+                Some(Box::new(OpenCodeProvider::new_with_name(
+                    "opencodego",
                     workspace_id,
                     auth_cookie,
                     proxy,
@@ -519,6 +1140,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let data_window = data.clone();
     let last_refresh_window = last_refresh.clone();
     let config_window = config.clone();
+    let config_path_window = config_path.clone();
     let active_provider_window = active_provider.clone();
 
     std::thread::spawn(move || {
@@ -530,6 +1152,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             data_window,
             last_refresh_window,
             config_window,
+            config_path_window,
             active_provider_window,
         );
 
