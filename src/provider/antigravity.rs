@@ -562,7 +562,7 @@ fn parse_antigravity_available_models(value: &serde_json::Value) -> Vec<UsageWin
     }
 
     let mut seen = std::collections::HashSet::new();
-    let mut windows = Vec::new();
+    let mut entries = Vec::new();
     for model_id in model_ids {
         if !seen.insert(model_id.clone()) {
             continue;
@@ -582,16 +582,14 @@ fn parse_antigravity_available_models(value: &serde_json::Value) -> Vec<UsageWin
             continue;
         };
 
-        let label =
-            string_field(model, &["displayName", "display_name", "label"]).unwrap_or(model_id);
-        let label = label.strip_prefix("Gemini ").unwrap_or(&label).to_string();
+        let label = string_field(model, &["displayName", "display_name", "label"])
+            .unwrap_or_else(|| model_id.clone());
         let remaining_percent = if remaining <= 1.0 {
             remaining * 100.0
         } else {
             remaining
         }
         .clamp(0.0, 100.0);
-        let used_percent = (100.0 - remaining_percent).clamp(0.0, 100.0);
         let resets_at = if remaining_percent >= 100.0 {
             None
         } else {
@@ -600,14 +598,62 @@ fn parse_antigravity_available_models(value: &serde_json::Value) -> Vec<UsageWin
                 .map(|dt| dt.to_utc())
         };
 
-        windows.push(UsageWindow {
+        entries.push((
             label,
-            used_percent,
-            limit: Some(100.0),
-            used: Some(used_percent),
-            unit: Some("%".to_string()),
-            resets_at,
-        });
+            AntigravityQuotaEntry {
+                model_id,
+                remaining_percent,
+                reset_time: resets_at,
+            },
+        ));
+    }
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let groups = [
+        ("Claude", ModelMatcher::Claude),
+        ("Gemini Pro", ModelMatcher::Needles(&["pro"])),
+        ("Gemini Flash", ModelMatcher::Needles(&["flash"])),
+    ];
+
+    let mut windows = Vec::new();
+    let mut matched_indices = std::collections::HashSet::new();
+
+    for (label, matcher) in groups {
+        let mut group_entries = Vec::new();
+        for (idx, (display_name, entry)) in entries.iter().enumerate() {
+            if !matched_indices.contains(&idx)
+                && (matcher.matches(&entry.model_id) || matcher.matches(display_name))
+            {
+                matched_indices.insert(idx);
+                group_entries.push(entry);
+            }
+        }
+
+        if let Some(window) = best_antigravity_window(label, group_entries.into_iter()) {
+            windows.push(window);
+        }
+    }
+
+    // Add any unmatched entries as individual windows
+    for (idx, (display_name, entry)) in entries.iter().enumerate() {
+        if !matched_indices.contains(&idx) {
+            let label = display_name
+                .strip_prefix("Gemini ")
+                .unwrap_or(display_name)
+                .to_string();
+            let used_percent = (100.0 - entry.remaining_percent).clamp(0.0, 100.0);
+            windows.push(UsageWindow {
+                label,
+                used_percent,
+                limit: Some(100.0),
+                used: Some(used_percent),
+                unit: Some("%".to_string()),
+                resets_at: entry.reset_time,
+            });
+        }
     }
 
     windows
@@ -870,27 +916,33 @@ fn parse_antigravity_quota(value: &serde_json::Value) -> Vec<UsageWindow> {
 
     let groups = [
         ("Claude", ModelMatcher::Claude),
-        ("Gemini Pro", ModelMatcher::Needles(&["gemini", "pro"])),
-        ("Gemini Flash", ModelMatcher::Needles(&["gemini", "flash"])),
+        ("Gemini Pro", ModelMatcher::Needles(&["pro"])),
+        ("Gemini Flash", ModelMatcher::Needles(&["flash"])),
     ];
 
     let mut windows = Vec::new();
+    let mut matched_indices = std::collections::HashSet::new();
+
     for (label, matcher) in groups {
-        if let Some(window) = best_antigravity_window(
-            label,
-            entries
-                .iter()
-                .filter(|entry| matcher.matches(&entry.model_id)),
-        ) {
+        let mut group_entries = Vec::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            if !matched_indices.contains(&idx) && matcher.matches(&entry.model_id) {
+                matched_indices.insert(idx);
+                group_entries.push(entry);
+            }
+        }
+
+        if let Some(window) = best_antigravity_window(label, group_entries.into_iter()) {
             windows.push(window);
         }
     }
 
-    if windows.is_empty() {
-        for entry in entries {
+    // Add any unmatched entries as individual windows
+    for (idx, entry) in entries.iter().enumerate() {
+        if !matched_indices.contains(&idx) {
             let used_percent = (100.0 - entry.remaining_percent).clamp(0.0, 100.0);
             windows.push(UsageWindow {
-                label: entry.model_id,
+                label: entry.model_id.clone(),
                 used_percent,
                 limit: Some(100.0),
                 used: Some(used_percent),

@@ -307,11 +307,14 @@ impl eframe::App for QuotifyApp {
                         let data = self.data.read().clone();
                         let all_providers = provider_display_order(&self.config);
 
+                        let dragging_any = self.drag.dragging_provider.is_some();
                         let mut shown = 0usize;
                         for (name, display_name) in all_providers {
                             let Some(provider_data) = data.iter().find(|d| d.provider == name) else {
                                 continue;
                             };
+                            let collapse = dragging_any && self.drag.dragging_provider.as_deref() != Some(&name);
+                            let is_dragged = self.drag.dragging_provider.as_deref() == Some(&name);
                             let response = render_provider(
                                 ui,
                                 &name,
@@ -322,10 +325,41 @@ impl eframe::App for QuotifyApp {
                                 &self.config,
                                 self.config_path.as_ref(),
                                 &self.data,
+                                collapse,
+                                is_dragged,
                             );
                             self.handle_provider_drag(&ctx, &response, &name);
                             shown += 1;
                             ui.add_space(6.0);
+                        }
+
+                        // Autoscroll during drag-and-drop reordering
+                        if self.drag.dragging_provider.is_some() {
+                            if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                                let viewport = ui.clip_rect(); // Get visible viewport rect in screen coordinates
+                                let scroll_margin = 40.0;      // Distance from boundary to trigger scroll
+                                let scroll_step = 15.0;        // Scroll step size
+
+                                if pointer_pos.y < viewport.min.y + scroll_margin {
+                                    // Near top: scroll UP by targeting a rect just above the viewport
+                                    let target_y = viewport.min.y - scroll_step;
+                                    let target_rect = egui::Rect::from_center_size(
+                                        egui::pos2(viewport.center().x, target_y),
+                                        egui::vec2(card_width, 10.0),
+                                    );
+                                    ui.scroll_to_rect(target_rect, Some(egui::Align::TOP));
+                                    ctx.request_repaint(); // Keep repainting to animate continuous scroll
+                                } else if pointer_pos.y > viewport.max.y - scroll_margin {
+                                    // Near bottom: scroll DOWN by targeting a rect just below the viewport
+                                    let target_y = viewport.max.y + scroll_step;
+                                    let target_rect = egui::Rect::from_center_size(
+                                        egui::pos2(viewport.center().x, target_y),
+                                        egui::vec2(card_width, 10.0),
+                                    );
+                                    ui.scroll_to_rect(target_rect, Some(egui::Align::BOTTOM));
+                                    ctx.request_repaint(); // Keep repainting to animate continuous scroll
+                                }
+                            }
                         }
 
                         self.finish_provider_drag_if_released(&ctx);
@@ -342,6 +376,74 @@ impl eframe::App for QuotifyApp {
                             });
                         }
                     });
+
+                // If a card is being dragged, render a floating preview of the card that follows the mouse cursor
+                if let Some(dragging_name) = &self.drag.dragging_provider {
+                    if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                        let preview_pos = pointer_pos - egui::vec2(card_width / 2.0, 12.0);
+
+                        egui::Area::new(egui::Id::new("provider_drag_preview"))
+                            .fixed_pos(preview_pos)
+                            .order(egui::Order::Tooltip)
+                            .interactable(false)
+                            .show(&ctx, |ui| {
+                                ui.style_mut().visuals.widgets.noninteractive.bg_fill = ui
+                                    .style_mut()
+                                    .visuals
+                                    .widgets
+                                    .noninteractive
+                                    .bg_fill
+                                    .linear_multiply(0.85);
+
+                                let data = self.data.read().clone();
+                                if let Some(provider_data) = data.iter().find(|d| d.provider == *dragging_name) {
+                                    let display_name = provider_catalog()
+                                        .iter()
+                                        .find(|(id, _)| id.eq_ignore_ascii_case(dragging_name))
+                                        .map(|(_, d)| *d)
+                                        .unwrap_or(dragging_name)
+                                        .to_string();
+
+                                    let status = match provider_data.error.is_some() {
+                                        true => ProviderStatus::Error,
+                                        false => ProviderStatus::Active,
+                                    };
+                                    let credits = provider_data.credits.as_ref();
+                                    let error_msg = provider_data.error.as_deref();
+                                    let windows = &provider_data.windows;
+                                    let is_dark = ui.visuals().dark_mode;
+
+                                    let card_frame = egui::Frame::NONE
+                                        .fill(ui.visuals().widgets.noninteractive.bg_fill)
+                                        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                                        .corner_radius(8)
+                                        .inner_margin(egui::Margin::symmetric(10, 8));
+
+                                    ui.allocate_ui(egui::vec2(card_width, 0.0), |ui| {
+                                        ui.set_min_width(card_width);
+                                        ui.set_max_width(card_width);
+                                        render_provider_card(
+                                            ui,
+                                            dragging_name,
+                                            &display_name,
+                                            status,
+                                            credits,
+                                            error_msg,
+                                            windows,
+                                            is_dark,
+                                            card_frame,
+                                            card_width,
+                                            &self.active_provider,
+                                            &self.config,
+                                            self.config_path.as_ref(),
+                                            &self.data,
+                                            false,
+                                        );
+                                    });
+                                }
+                            });
+                    }
+                }
             });
     }
 }
@@ -413,7 +515,16 @@ impl QuotifyApp {
         let Some(dragging_provider) = self.drag.dragging_provider.clone() else {
             return;
         };
-        if dragging_provider == provider_name || !response.hovered() {
+
+        // During dragging, egui locks pointer focus to the dragged card, so response.hovered()
+        // returns false for all other cards. We bypass this by manually checking if the pointer is within the rect.
+        let hovered = if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+            response.rect.contains(pointer_pos)
+        } else {
+            false
+        };
+
+        if dragging_provider == provider_name || !hovered {
             return;
         }
 
@@ -615,6 +726,8 @@ fn render_provider(
     config: &crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
+    collapse: bool,
+    is_dragged: bool,
 ) -> egui::Response {
     let status = match data {
         Some(d) if d.error.is_some() => ProviderStatus::Error,
@@ -645,6 +758,9 @@ fn render_provider(
             |ui| {
                 ui.set_min_width(card_width);
                 ui.set_max_width(card_width);
+                if is_dragged {
+                    ui.set_opacity(0.45);
+                }
                 render_provider_card(
                     ui,
                     provider_name,
@@ -660,10 +776,11 @@ fn render_provider(
                     config,
                     config_path,
                     all_data,
-                );
+                    collapse,
+                )
             },
         );
-        inner.response.interact(egui::Sense::click_and_drag())
+        inner.inner.interact(egui::Sense::click_and_drag())
     })
     .inner
 }
@@ -684,7 +801,8 @@ fn render_provider_card(
     config: &crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
-) {
+    collapse: bool,
+) -> egui::Response {
     let response = card_frame.show(ui, |ui| {
         // Enforce uniform width across all cards based on parent width minus horizontal margins (cast i8 margins to f32)
         let margin_x = (card_frame.inner_margin.left
@@ -816,120 +934,129 @@ fn render_provider_card(
             },
         );
 
-        match status {
-            ProviderStatus::Disabled => {}
-            ProviderStatus::Error => {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                // Fluent Callout Infolink / Infobar styling
-                let (err_bg, err_border, err_fg, warning_symbol_color) = if is_dark {
-                    (
-                        egui::Color32::from_rgb(61, 38, 38),
-                        egui::Color32::from_rgb(196, 43, 28),
-                        egui::Color32::from_rgb(255, 153, 153),
-                        egui::Color32::from_rgb(255, 108, 108),
-                    )
-                } else {
-                    (
-                        egui::Color32::from_rgb(253, 232, 232),
-                        egui::Color32::from_rgb(196, 43, 28),
-                        egui::Color32::from_rgb(153, 27, 27),
-                        egui::Color32::from_rgb(196, 43, 28),
-                    )
-                };
-
-                let error_frame = egui::Frame::NONE
-                    .fill(err_bg)
-                    .stroke(egui::Stroke::new(1.0, err_border))
-                    .corner_radius(6)
-                    .inner_margin(8);
-                error_frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(warning_symbol_color, "⚠");
-                        ui.add_space(4.0);
-                        ui.with_layout(
-                            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(
-                                        error_msg.unwrap_or("Unknown error occurred"),
-                                    )
-                                    .small()
-                                    .color(err_fg),
-                                );
-                            },
-                        );
-                    });
-                });
-            }
-            ProviderStatus::Active => {
-                if windows.is_empty() {
-                    if credits.is_none() {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new("No active usage windows.")
-                                .small()
-                                .weak(),
-                        );
-                    }
-                } else {
+        if !collapse {
+            match status {
+                ProviderStatus::Disabled => {}
+                ProviderStatus::Error => {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(8.0);
 
-                    let available_width = ui.available_width();
-                    let gap = 8.0;
-                    let label_width = 88.0_f32;
-                    let reset_width = 82.0_f32;
-                    let progress_width =
-                        (available_width - label_width - reset_width - gap * 2.0).max(96.0);
+                    // Fluent Callout Infolink / Infobar styling
+                    let (err_bg, err_border, err_fg, warning_symbol_color) = if is_dark {
+                        (
+                            egui::Color32::from_rgb(61, 38, 38),
+                            egui::Color32::from_rgb(196, 43, 28),
+                            egui::Color32::from_rgb(255, 153, 153),
+                            egui::Color32::from_rgb(255, 108, 108),
+                        )
+                    } else {
+                        (
+                            egui::Color32::from_rgb(253, 232, 232),
+                            egui::Color32::from_rgb(196, 43, 28),
+                            egui::Color32::from_rgb(153, 27, 27),
+                            egui::Color32::from_rgb(196, 43, 28),
+                        )
+                    };
 
-                    for window in windows {
+                    let error_frame = egui::Frame::NONE
+                        .fill(err_bg)
+                        .stroke(egui::Stroke::new(1.0, err_border))
+                        .corner_radius(6)
+                        .inner_margin(8);
+                    error_frame.show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = gap;
-
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(label_width, 18.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
+                            ui.colored_label(warning_symbol_color, "⚠");
+                            ui.add_space(4.0);
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center)
+                                    .with_main_wrap(true),
                                 |ui| {
-                                    ui.add_sized(
-                                        [label_width, 18.0],
-                                        egui::Label::new(
-                                            egui::RichText::new(&window.label).strong().size(11.0),
+                                    ui.label(
+                                        egui::RichText::new(
+                                            error_msg.unwrap_or("Unknown error occurred"),
                                         )
-                                        .truncate(),
-                                    );
-                                },
-                            );
-
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(progress_width, 18.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    render_usage_progress(ui, window.used_percent as f32, is_dark);
-                                },
-                            );
-
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(reset_width, 18.0),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let reset_text = reset_time_text(window.resets_at);
-                                    ui.add_sized(
-                                        [reset_width, 18.0],
-                                        egui::Label::new(
-                                            egui::RichText::new(reset_text).small().weak(),
-                                        )
-                                        .truncate(),
+                                        .small()
+                                        .color(err_fg),
                                     );
                                 },
                             );
                         });
-                        ui.add_space(4.0);
+                    });
+                }
+                ProviderStatus::Active => {
+                    if windows.is_empty() {
+                        if credits.is_none() {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("No active usage windows.")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    } else {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        let available_width = ui.available_width();
+                        let gap = 8.0;
+                        let label_width = 88.0_f32;
+                        let reset_width = 82.0_f32;
+                        let progress_width =
+                            (available_width - label_width - reset_width - gap * 2.0).max(96.0);
+
+                        for window in windows {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(label_width, 18.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add_sized(
+                                            [label_width, 18.0],
+                                            egui::Label::new(
+                                                egui::RichText::new(&window.label)
+                                                    .strong()
+                                                    .size(11.0),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(progress_width, 18.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        render_usage_progress(
+                                            ui,
+                                            window.used_percent as f32,
+                                            is_dark,
+                                        );
+                                    },
+                                );
+
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(reset_width, 18.0),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let reset_text = reset_time_text(window.resets_at);
+                                        ui.add_sized(
+                                            [reset_width, 18.0],
+                                            egui::Label::new(
+                                                egui::RichText::new(reset_text).small().weak(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                            });
+                            ui.add_space(4.0);
+                        }
                     }
                 }
             }
@@ -939,6 +1066,8 @@ fn render_provider_card(
     if response.response.rect.width() < card_width {
         ui.allocate_space(egui::vec2(card_width, 0.0));
     }
+
+    response.response
 }
 
 fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource<'static>> {
