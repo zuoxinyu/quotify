@@ -1092,15 +1092,14 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     // Spawn background refresh thread
     std::thread::spawn(move || {
         let bg_rt = tokio::runtime::Runtime::new().expect("Failed to create background runtime");
-        // Set last_fetch such that the first loop iteration triggers an immediate fetch
-        let mut last_fetch =
-            std::time::Instant::now() - std::time::Duration::from_secs(refresh_interval + 1);
         let min_refresh_interval = refresh_interval.max(10);
+        let refresh_interval_duration = std::time::Duration::from_secs(min_refresh_interval);
+        let mut last_fetch: Option<std::time::Instant> = None;
         loop {
             let forced = tray::REFRESH_REQUESTED.swap(false, Ordering::SeqCst);
             let now = std::time::Instant::now();
-            let elapsed = now.duration_since(last_fetch);
-            if forced || elapsed.as_secs() >= min_refresh_interval {
+            let elapsed = last_fetch.map(|last| now.saturating_duration_since(last));
+            if forced || elapsed.is_none_or(|elapsed| elapsed >= refresh_interval_duration) {
                 let current_config = load_runtime_config(config_path_bg.as_ref(), &config_bg);
                 let current_active_provider =
                     current_config.general.active_provider.trim().to_string();
@@ -1126,12 +1125,11 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                 if let Some(&main_hwnd) = tray::MAIN_HWND.get() {
                     let _ = main_hwnd.post_message(tray::WM_APP_UPDATE_DATA, WPARAM(0), LPARAM(0));
                 }
-                last_fetch = std::time::Instant::now(); // Update last_fetch here after a successful run
+                last_fetch = Some(std::time::Instant::now());
                 continue;
             }
 
-            let wait_for =
-                std::time::Duration::from_secs(min_refresh_interval).saturating_sub(elapsed);
+            let wait_for = refresh_interval_duration.saturating_sub(elapsed.unwrap_or_default());
             tray::wait_for_refresh_or_timeout(wait_for);
         }
     });
