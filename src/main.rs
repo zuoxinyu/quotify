@@ -1180,10 +1180,12 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             Box::new(move |cc| {
                 let _ = EGUI_CONTEXT.set(cc.egui_ctx.clone());
 
+                let mut fonts = eframe::egui::FontDefinitions::default();
+                let mut loaded_any = false;
+
                 // Try to load Segoe UI Variable for true Windows 11 Fluent typography
                 let font_path = std::path::Path::new("C:\\Windows\\Fonts\\SegUIVar.ttf");
                 if let Ok(font_data) = std::fs::read(font_path) {
-                    let mut fonts = eframe::egui::FontDefinitions::default();
                     fonts.font_data.insert(
                         "SegoeUIVariable".to_owned(),
                         std::sync::Arc::new(eframe::egui::FontData::from_owned(font_data).tweak(
@@ -1198,6 +1200,25 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                         .get_mut(&eframe::egui::FontFamily::Proportional)
                         .unwrap()
                         .insert(0, "SegoeUIVariable".to_owned());
+                    loaded_any = true;
+                }
+
+                // Try to load Segoe MDL2 Assets for native WinUI system icon glyphs
+                let icon_font_path = std::path::Path::new("C:\\Windows\\Fonts\\segmdl2.ttf");
+                if let Ok(icon_font_data) = std::fs::read(icon_font_path) {
+                    fonts.font_data.insert(
+                        "SegoeMDL2".to_owned(),
+                        std::sync::Arc::new(eframe::egui::FontData::from_owned(icon_font_data)),
+                    );
+                    fonts
+                        .families
+                        .get_mut(&eframe::egui::FontFamily::Proportional)
+                        .unwrap()
+                        .push("SegoeMDL2".to_owned());
+                    loaded_any = true;
+                }
+
+                if loaded_any {
                     cc.egui_ctx.set_fonts(fonts);
                 }
 
@@ -1415,10 +1436,26 @@ unsafe extern "system" fn main_window_subclass(
 
         match msg {
             tray::WM_APP_SHOW => {
+                let target_page = wparam.0 as u32;
+                let current_page = tray::ACTIVE_PAGE.load(Ordering::SeqCst);
+
                 if tray::WINDOW_VISIBLE.load(Ordering::SeqCst) {
-                    hide_popup_window(hwnd);
-                    return LRESULT(0);
+                    if target_page == current_page {
+                        hide_popup_window(hwnd);
+                        return LRESULT(0);
+                    } else {
+                        tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
+                        if let Some(ctx) = EGUI_CONTEXT.get() {
+                            ctx.request_repaint();
+                        }
+                        let _ = SetForegroundWindow(hwnd);
+                        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+                        let _ = SetFocus(Some(hwnd));
+                        return LRESULT(0);
+                    }
                 }
+
+                tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
 
                 let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
                 let pos = compute_popup_position(win_w, win_h);
@@ -1433,6 +1470,7 @@ unsafe extern "system" fn main_window_subclass(
 
                 if let Some(ctx) = EGUI_CONTEXT.get() {
                     ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                    ctx.request_repaint();
                 }
 
                 LRESULT(0)

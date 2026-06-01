@@ -8,6 +8,20 @@ use std::{
 
 use crate::provider::UsageData;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate {
+        latest_version: String,
+    },
+    NewVersionAvailable {
+        latest_version: String,
+        release_url: String,
+    },
+    Error(String),
+}
+
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
@@ -16,6 +30,7 @@ pub struct QuotifyApp {
     pub active_provider: Arc<RwLock<String>>,
     drag: ProviderDragState,
     last_config_reload: Instant,
+    update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
 }
 
 impl QuotifyApp {
@@ -34,6 +49,7 @@ impl QuotifyApp {
             active_provider,
             drag: ProviderDragState::default(),
             last_config_reload: Instant::now(),
+            update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
         }
     }
 }
@@ -229,70 +245,122 @@ impl eframe::App for QuotifyApp {
                     format!("{}m ago", elapsed / 60)
                 };
 
+                let active_page = crate::tray::ACTIVE_PAGE.load(std::sync::atomic::Ordering::SeqCst);
+
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), 28.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         ui.add_space(card_left_indent);
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let logo = egui::Image::new(egui::include_image!(
-                                "../assets/icons/quotify.svg"
-                            ))
-                            .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                            .maintain_aspect_ratio(true);
-                            ui.add(logo);
 
-                            ui.add_space(6.0);
+                        if active_page == 1 {
+                            ui.horizontal_centered(|ui| {
+                                let back_btn = ui.add_sized(
+                                    egui::vec2(24.0, 24.0),
+                                    egui::Button::new(
+                                        egui::RichText::new("\u{E72B}")
+                                            .size(12.0)
+                                    )
+                                    .frame(true)
+                                    .corner_radius(12)
+                                );
+                                if back_btn.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if back_btn.clicked() {
+                                    crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
+                                    ctx.request_repaint();
+                                }
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("About")
+                                        .strong()
+                                        .size(16.0)
+                                        .line_height(Some(24.0)),
+                                );
+                            });
+                        } else {
+                            let header_response = ui.horizontal_centered(|ui| {
+                                let logo = egui::Image::new(egui::include_image!(
+                                    "../assets/icons/quotify.svg"
+                                ))
+                                .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                                .maintain_aspect_ratio(true);
+                                ui.add(logo);
 
-                            ui.label(
-                                egui::RichText::new("Quotify")
-                                    .strong()
-                                    .size(16.0)
-                                    .line_height(Some(24.0)),
+                                ui.add_space(6.0);
+
+                                ui.label(
+                                    egui::RichText::new("Quotify")
+                                        .strong()
+                                        .size(16.0)
+                                        .line_height(Some(24.0)),
+                                );
+                            });
+
+                            let header_interact = ui.interact(
+                                header_response.response.rect,
+                                header_response.response.id,
+                                egui::Sense::click(),
                             );
-                        });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let settings = icon_button(
-                                ui,
-                                egui::include_image!("../assets/icons/settings.svg"),
-                                egui::vec2(24.0, 24.0),
-                                egui::vec2(16.0, 16.0),
-                                "Open configuration file",
-                            );
-                            if settings.clicked()
-                                && let Err(err) = open_config_file()
-                            {
-                                tracing::error!("Failed to open config file: {err}");
+                            if header_interact.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
-
-                            ui.add_space(2.0);
-
-                            let refresh = icon_button(
-                                ui,
-                                egui::include_image!("../assets/icons/refresh.svg"),
-                                egui::vec2(24.0, 24.0),
-                                egui::vec2(16.0, 16.0),
-                                "Refresh usage now",
-                            );
-                            if refresh.clicked() {
-                                crate::tray::request_refresh();
+                            if header_interact.clicked() {
+                                crate::tray::ACTIVE_PAGE.store(1, std::sync::atomic::Ordering::SeqCst);
                                 ctx.request_repaint();
                             }
 
-                            ui.add_space(4.0);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let settings = ui.add_sized(
+                                    egui::vec2(24.0, 24.0),
+                                    egui::Button::new(
+                                        egui::RichText::new("\u{E713}")
+                                            .strong()
+                                            .size(12.0)
+                                    )
+                                    .frame(false)
+                                    .corner_radius(4)
+                                ).on_hover_text("Open configuration file");
 
-                            ui.add_sized(
-                                [60.0, 24.0],
-                                egui::Label::new(
-                                    egui::RichText::new(refresh_age)
-                                        .small()
-                                        .color(egui::Color32::from_rgb(150, 150, 150)),
-                                )
-                                .truncate(),
-                            );
-                        });
+                                if settings.clicked()
+                                    && let Err(err) = open_config_file()
+                                {
+                                    tracing::error!("Failed to open config file: {err}");
+                                }
+
+                                ui.add_space(2.0);
+
+                                let refresh = ui.add_sized(
+                                    egui::vec2(24.0, 24.0),
+                                    egui::Button::new(
+                                        egui::RichText::new("\u{E72C}")
+                                            .strong()
+                                            .size(12.0)
+                                    )
+                                    .frame(false)
+                                    .corner_radius(4)
+                                ).on_hover_text("Refresh usage now");
+
+                                if refresh.clicked() {
+                                    crate::tray::request_refresh();
+                                    ctx.request_repaint();
+                                }
+
+                                ui.add_space(4.0);
+
+                                ui.add_sized(
+                                    [60.0, 24.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(refresh_age)
+                                            .small()
+                                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        }
                     },
                 );
 
@@ -300,82 +368,86 @@ impl eframe::App for QuotifyApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .hscroll(false)
-                    .show(ui, |ui| {
-                        let data = self.data.read().clone();
-                        let all_providers = provider_display_order(&self.config);
+                if active_page == 1 {
+                    self.render_about_page(ui, &ctx, card_width, card_left_indent);
+                } else {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .hscroll(false)
+                        .show(ui, |ui| {
+                            let data = self.data.read().clone();
+                            let all_providers = provider_display_order(&self.config);
 
-                        let dragging_any = self.drag.dragging_provider.is_some();
-                        let mut shown = 0usize;
-                        for (name, display_name) in all_providers {
-                            let Some(provider_data) = data.iter().find(|d| d.provider == name) else {
-                                continue;
-                            };
-                            let collapse = dragging_any && self.drag.dragging_provider.as_deref() != Some(&name);
-                            let is_dragged = self.drag.dragging_provider.as_deref() == Some(&name);
-                            let response = render_provider(
-                                ui,
-                                &name,
-                                display_name,
-                                Some(provider_data),
-                                card_width,
-                                &self.active_provider,
-                                &self.config,
-                                self.config_path.as_ref(),
-                                &self.data,
-                                collapse,
-                                is_dragged,
-                            );
-                            self.handle_provider_drag(&ctx, &response, &name);
-                            shown += 1;
-                            ui.add_space(6.0);
-                        }
+                            let dragging_any = self.drag.dragging_provider.is_some();
+                            let mut shown = 0usize;
+                            for (name, display_name) in all_providers {
+                                let Some(provider_data) = data.iter().find(|d| d.provider == name) else {
+                                    continue;
+                                };
+                                let collapse = dragging_any && self.drag.dragging_provider.as_deref() != Some(&name);
+                                let is_dragged = self.drag.dragging_provider.as_deref() == Some(&name);
+                                let response = render_provider(
+                                    ui,
+                                    &name,
+                                    display_name,
+                                    Some(provider_data),
+                                    card_width,
+                                    &self.active_provider,
+                                    &self.config,
+                                    self.config_path.as_ref(),
+                                    &self.data,
+                                    collapse,
+                                    is_dragged,
+                                );
+                                self.handle_provider_drag(&ctx, &response, &name);
+                                shown += 1;
+                                ui.add_space(6.0);
+                            }
 
-                        // Autoscroll during drag-and-drop reordering
-                        if self.drag.dragging_provider.is_some() {
-                            if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                                let viewport = ui.clip_rect(); // Get visible viewport rect in screen coordinates
-                                let scroll_margin = 40.0;      // Distance from boundary to trigger scroll
-                                let scroll_step = 15.0;        // Scroll step size
+                            // Autoscroll during drag-and-drop reordering
+                            if self.drag.dragging_provider.is_some() {
+                                if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                                    let viewport = ui.clip_rect(); // Get visible viewport rect in screen coordinates
+                                    let scroll_margin = 40.0;      // Distance from boundary to trigger scroll
+                                    let scroll_step = 15.0;        // Scroll step size
 
-                                if pointer_pos.y < viewport.min.y + scroll_margin {
-                                    // Near top: scroll UP by targeting a rect just above the viewport
-                                    let target_y = viewport.min.y - scroll_step;
-                                    let target_rect = egui::Rect::from_center_size(
-                                        egui::pos2(viewport.center().x, target_y),
-                                        egui::vec2(card_width, 10.0),
-                                    );
-                                    ui.scroll_to_rect(target_rect, Some(egui::Align::TOP));
-                                    ctx.request_repaint(); // Keep repainting to animate continuous scroll
-                                } else if pointer_pos.y > viewport.max.y - scroll_margin {
-                                    // Near bottom: scroll DOWN by targeting a rect just below the viewport
-                                    let target_y = viewport.max.y + scroll_step;
-                                    let target_rect = egui::Rect::from_center_size(
-                                        egui::pos2(viewport.center().x, target_y),
-                                        egui::vec2(card_width, 10.0),
-                                    );
-                                    ui.scroll_to_rect(target_rect, Some(egui::Align::BOTTOM));
-                                    ctx.request_repaint(); // Keep repainting to animate continuous scroll
+                                    if pointer_pos.y < viewport.min.y + scroll_margin {
+                                        // Near top: scroll UP by targeting a rect just above the viewport
+                                        let target_y = viewport.min.y - scroll_step;
+                                        let target_rect = egui::Rect::from_center_size(
+                                            egui::pos2(viewport.center().x, target_y),
+                                            egui::vec2(card_width, 10.0),
+                                        );
+                                        ui.scroll_to_rect(target_rect, Some(egui::Align::TOP));
+                                        ctx.request_repaint(); // Keep repainting to animate continuous scroll
+                                    } else if pointer_pos.y > viewport.max.y - scroll_margin {
+                                        // Near bottom: scroll DOWN by targeting a rect just below the viewport
+                                        let target_y = viewport.max.y + scroll_step;
+                                        let target_rect = egui::Rect::from_center_size(
+                                            egui::pos2(viewport.center().x, target_y),
+                                            egui::vec2(card_width, 10.0),
+                                        );
+                                        ui.scroll_to_rect(target_rect, Some(egui::Align::BOTTOM));
+                                        ctx.request_repaint(); // Keep repainting to animate continuous scroll
+                                    }
                                 }
                             }
-                        }
 
-                        self.finish_provider_drag_if_released(&ctx);
+                            self.finish_provider_drag_if_released(&ctx);
 
-                        if shown == 0 {
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(48.0);
-                                ui.label(
-                                    egui::RichText::new(
-                                        "No enabled providers. Configure credentials to enable cards.",
-                                    )
-                                    .color(egui::Color32::from_rgb(150, 150, 150)),
-                                );
-                            });
-                        }
-                    });
+                            if shown == 0 {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(48.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "No enabled providers. Configure credentials to enable cards.",
+                                        )
+                                        .color(egui::Color32::from_rgb(150, 150, 150)),
+                                    );
+                                });
+                            }
+                        });
+                }
 
                 // If a card is being dragged, render a floating preview of the card that follows the mouse cursor
                 if let Some(dragging_name) = &self.drag.dragging_provider {
@@ -586,25 +658,6 @@ fn open_config_file() -> anyhow::Result<()> {
         .spawn()
         .map(|_| ())
         .map_err(anyhow::Error::from)
-}
-
-fn icon_button(
-    ui: &mut egui::Ui,
-    image: egui::ImageSource<'static>,
-    button_size: egui::Vec2,
-    icon_size: egui::Vec2,
-    tooltip: &str,
-) -> egui::Response {
-    let image = egui::Image::new(image)
-        .fit_to_exact_size(icon_size)
-        .maintain_aspect_ratio(true);
-    ui.add_sized(
-        button_size,
-        egui::Button::image(image)
-            .frame(true)
-            .frame_when_inactive(false),
-    )
-    .on_hover_text(tooltip)
 }
 
 fn provider_catalog() -> &'static [(&'static str, &'static str)] {
@@ -1319,5 +1372,347 @@ fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
         format!("{hours}h {minutes}m")
     } else {
         format!("{minutes}m")
+    }
+}
+
+impl QuotifyApp {
+    fn render_about_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        card_width: f32,
+        card_left_indent: f32,
+    ) {
+        let about_frame = egui::Frame::NONE
+            .fill(ui.visuals().widgets.noninteractive.bg_fill)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(16, 16));
+
+        ui.horizontal(|ui| {
+            ui.add_space(card_left_indent);
+            ui.allocate_ui(egui::vec2(card_width, 0.0), |ui| {
+                about_frame.show(ui, |ui| {
+                    ui.set_min_width(card_width - 32.0);
+                    ui.vertical(|ui| {
+                        let logo =
+                            egui::Image::new(egui::include_image!("../assets/icons/quotify.svg"))
+                                .fit_to_exact_size(egui::vec2(48.0, 48.0))
+                                .maintain_aspect_ratio(true);
+                        ui.add(logo);
+
+                        ui.add_space(12.0);
+
+                        ui.label(egui::RichText::new("Quotify").heading().size(24.0).strong());
+
+                        ui.add_space(8.0);
+
+                        let version_str = env!("GIT_TAG");
+                        ui.label(
+                            egui::RichText::new(format!("Version: {version_str}"))
+                                .size(14.0)
+                                .color(ui.visuals().widgets.noninteractive.text_color()),
+                        );
+
+                        ui.add_space(4.0);
+
+                        ui.label(
+                            egui::RichText::new("Author: zuoxinyu")
+                                .size(14.0)
+                                .color(ui.visuals().widgets.noninteractive.text_color()),
+                        );
+
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("GitHub: ")
+                                    .size(14.0)
+                                    .color(ui.visuals().widgets.noninteractive.text_color()),
+                            );
+                            ui.hyperlink_to(
+                                egui::RichText::new("zuoxinyu/quotify")
+                                    .size(14.0)
+                                    .underline(),
+                                "https://github.com/zuoxinyu/quotify",
+                            );
+                        });
+
+                        ui.add_space(16.0);
+                        ui.separator();
+                        ui.add_space(16.0);
+
+                        ui.label(egui::RichText::new("Check for Updates").strong().size(16.0));
+
+                        ui.add_space(8.0);
+
+                        let status = self.update_status.lock().clone();
+                        match status {
+                            UpdateStatus::Idle => {
+                                let check_btn = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Check for Updates")
+                                            .size(10.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(0, 95, 184)) // WinUI Accent Blue
+                                    .corner_radius(4)
+                                    .min_size(egui::vec2(96.0, 24.0)),
+                                );
+                                if check_btn.clicked() {
+                                    self.trigger_check_update(ctx.clone());
+                                }
+                            }
+                            UpdateStatus::Checking => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new("Checking latest release...")
+                                            .size(14.0)
+                                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                                    );
+                                });
+                            }
+                            UpdateStatus::UpToDate { latest_version } => {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "You are up to date! (Latest: {latest_version})"
+                                    ))
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(46, 125, 50)),
+                                );
+                                ui.add_space(6.0);
+
+                                let check_again = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Check Again").size(10.0),
+                                    )
+                                    .corner_radius(4)
+                                    .min_size(egui::vec2(64.0, 24.0)),
+                                );
+                                if check_again.clicked() {
+                                    self.trigger_check_update(ctx.clone());
+                                }
+                            }
+                            UpdateStatus::NewVersionAvailable {
+                                latest_version,
+                                release_url,
+                            } => {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "A new version is available: {latest_version}"
+                                    ))
+                                    .size(14.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(22, 101, 216)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Please download manually from GitHub releases.",
+                                    )
+                                    .size(12.0)
+                                    .color(ui.visuals().widgets.noninteractive.text_color()),
+                                );
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    let dl_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("Download Now")
+                                                .size(13.0)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(0, 95, 184))
+                                        .corner_radius(4)
+                                        .min_size(egui::vec2(100.0, 26.0)),
+                                    );
+                                    if dl_btn.clicked() {
+                                        open_browser(&release_url);
+                                    }
+
+                                    let check_again = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("Check Again").size(12.0),
+                                        )
+                                        .corner_radius(4)
+                                        .min_size(egui::vec2(80.0, 26.0)),
+                                    );
+                                    if check_again.clicked() {
+                                        self.trigger_check_update(ctx.clone());
+                                    }
+                                });
+                            }
+                            UpdateStatus::Error(err) => {
+                                ui.label(
+                                    egui::RichText::new(format!("Error: {err}"))
+                                        .size(14.0)
+                                        .color(egui::Color32::from_rgb(198, 40, 40)),
+                                );
+                                ui.add_space(6.0);
+
+                                let retry_btn = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Retry")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(0, 95, 184))
+                                    .corner_radius(4)
+                                    .min_size(egui::vec2(80.0, 26.0)),
+                                );
+                                if retry_btn.clicked() {
+                                    self.trigger_check_update(ctx.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+        });
+    }
+
+    fn trigger_check_update(&self, ctx: egui::Context) {
+        *self.update_status.lock() = UpdateStatus::Checking;
+
+        let status = self.update_status.clone();
+        let proxy = self.config.network.proxy.clone();
+        let current_version = env!("GIT_TAG").to_string();
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(err) => {
+                    *status.lock() = UpdateStatus::Error(format!("Runtime error: {}", err));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            rt.block_on(async {
+                let client = crate::provider::http_client(Some(&proxy));
+
+                let res = client
+                    .get("https://api.github.com/repos/zuoxinyu/quotify/releases/latest")
+                    .header("User-Agent", "Quotify-Update-Checker")
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
+
+                match res {
+                    Ok(response) => {
+                        if response.status() == reqwest::StatusCode::NOT_FOUND {
+                            *status.lock() = UpdateStatus::UpToDate {
+                                latest_version: "None (No releases found)".to_string(),
+                            };
+                            ctx.request_repaint();
+                            return;
+                        }
+
+                        if !response.status().is_success() {
+                            let err_msg = format!("GitHub API returned HTTP {}", response.status());
+                            *status.lock() = UpdateStatus::Error(err_msg);
+                            ctx.request_repaint();
+                            return;
+                        }
+
+                        #[derive(serde::Deserialize)]
+                        struct GithubRelease {
+                            tag_name: String,
+                            html_url: String,
+                        }
+
+                        match response.json::<GithubRelease>().await {
+                            Ok(release) => {
+                                if is_newer(&current_version, &release.tag_name) {
+                                    *status.lock() = UpdateStatus::NewVersionAvailable {
+                                        latest_version: release.tag_name,
+                                        release_url: release.html_url,
+                                    };
+                                } else {
+                                    *status.lock() = UpdateStatus::UpToDate {
+                                        latest_version: release.tag_name,
+                                    };
+                                }
+                            }
+                            Err(err) => {
+                                let err_msg = format!("Failed to parse release: {err}");
+                                *status.lock() = UpdateStatus::Error(err_msg);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let err_msg = format!("Network error: {err}");
+                        *status.lock() = UpdateStatus::Error(err_msg);
+                    }
+                }
+                ctx.request_repaint();
+            });
+        });
+    }
+}
+
+fn normalize_version(v: &str) -> String {
+    let v = v.trim().trim_start_matches('v').trim_start_matches('V');
+    if let Some((main, _)) = v.split_once('-') {
+        main.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+fn is_newer(current: &str, latest: &str) -> bool {
+    let current_norm = normalize_version(current);
+    let latest_norm = normalize_version(latest);
+
+    let current_parts: Vec<u32> = current_norm
+        .split('.')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let latest_parts: Vec<u32> = latest_norm
+        .split('.')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    for i in 0..std::cmp::max(current_parts.len(), latest_parts.len()) {
+        let curr = current_parts.get(i).cloned().unwrap_or(0);
+        let lat = latest_parts.get(i).cloned().unwrap_or(0);
+        if lat > curr {
+            return true;
+        } else if curr > lat {
+            return false;
+        }
+    }
+    false
+}
+
+fn open_browser(url: &str) {
+    let _ = std::process::Command::new("cmd")
+        .args(&["/C", "start", "", url])
+        .spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_version() {
+        assert_eq!(normalize_version("v0.1.0-1-gae62f96"), "0.1.0");
+        assert_eq!(normalize_version("V1.2.3"), "1.2.3");
+        assert_eq!(normalize_version("2.0.0"), "2.0.0");
+    }
+
+    #[test]
+    fn test_is_newer() {
+        assert!(is_newer("v0.1.0-1-gae62f96", "v0.2.0"));
+        assert!(is_newer("0.1.0", "v0.1.1"));
+        assert!(!is_newer("v0.2.0", "v0.1.0"));
+        assert!(!is_newer("v0.1.0", "v0.1.0"));
+        assert!(is_newer("v0.1.0", "1.0.0"));
     }
 }
