@@ -24,6 +24,7 @@ pub const WM_APP_QUIT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 4
 pub const IDM_SHOW: usize = 1;
 pub const IDM_REFRESH: usize = 2;
 pub const IDM_QUIT: usize = 3;
+pub const IDM_ABOUT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SendHWND(HWND);
@@ -58,6 +59,7 @@ pub static MAIN_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static TRAY_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
+pub static ACTIVE_PAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CURRENT_HICON: Mutex<Option<SendHICON>> = Mutex::new(None);
 static CURRENT_TOOLTIP: Mutex<String> = Mutex::new(String::new());
 static REFRESH_SIGNAL: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
@@ -127,6 +129,7 @@ unsafe extern "system" fn tray_wnd_proc(
                                 w!("立即刷新 (Refresh Now)"),
                             );
                             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_ABOUT, w!("关于 (About)"));
                             let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("退出 (Quit)"));
 
                             let _ = TrackPopupMenu(
@@ -156,6 +159,11 @@ unsafe extern "system" fn tray_wnd_proc(
                     }
                     IDM_REFRESH => {
                         request_refresh();
+                    }
+                    IDM_ABOUT => {
+                        if let Some(&shwnd) = MAIN_HWND.get() {
+                            let _ = shwnd.post_message(WM_APP_SHOW, WPARAM(1), LPARAM(0));
+                        }
                     }
                     IDM_QUIT => {
                         if let Some(&shwnd) = MAIN_HWND.get() {
