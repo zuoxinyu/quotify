@@ -9,8 +9,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, HICON, HWND_MESSAGE, MF_SEPARATOR,
-    MF_STRING, PostMessageW, RegisterClassW, SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON,
+    DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, HICON, MF_SEPARATOR, MF_STRING,
+    PostMessageW, RegisterClassW, SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON,
     TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONUP,
     WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
@@ -94,7 +94,11 @@ unsafe extern "system" fn tray_wnd_proc(
         if msg == taskbar_created {
             if let Some(shicon) = *CURRENT_HICON.lock() {
                 let tooltip = CURRENT_TOOLTIP.lock().clone();
-                let _ = register_tray_icon(hwnd, shicon.0, &tooltip);
+                if let Err(err) = register_tray_icon(hwnd, shicon.0, &tooltip) {
+                    tracing::error!(
+                        "Failed to re-register tray icon after Explorer restart: {err}"
+                    );
+                }
             }
             return LRESULT(1);
         }
@@ -280,7 +284,7 @@ pub fn create_tray_window() -> windows::core::Result<HWND> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            Some(HWND_MESSAGE),
+            None,
             None,
             Some(hinstance),
             None,
@@ -323,8 +327,12 @@ impl TrayController {
         *current = Some(SendHICON(hicon));
         *CURRENT_TOOLTIP.lock() = tooltip.to_string();
 
-        if update_tray_icon(self.hwnd, hicon, tooltip).is_err() {
-            let _ = register_tray_icon(self.hwnd, hicon, tooltip);
+        if let Err(update_err) = update_tray_icon(self.hwnd, hicon, tooltip)
+            && let Err(register_err) = register_tray_icon(self.hwnd, hicon, tooltip)
+        {
+            tracing::error!(
+                "Failed to update tray icon ({update_err}); re-register failed: {register_err}"
+            );
         }
     }
 }

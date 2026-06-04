@@ -393,7 +393,7 @@ impl eframe::App for QuotifyApp {
                                     Some(provider_data),
                                     card_width,
                                     &self.active_provider,
-                                    &self.config,
+                                    &mut self.config,
                                     self.config_path.as_ref(),
                                     &self.data,
                                     collapse,
@@ -506,7 +506,7 @@ impl eframe::App for QuotifyApp {
                                             card_frame,
                                             card_width,
                                             &self.active_provider,
-                                            &self.config,
+                                            &mut self.config,
                                             self.config_path.as_ref(),
                                             &self.data,
                                             false,
@@ -552,7 +552,7 @@ impl QuotifyApp {
             self.config.save()
         };
         if let Err(err) = result {
-            tracing::error!("Failed to save provider order: {err}");
+            tracing::error!("Failed to save config: {err}");
         }
     }
 
@@ -567,33 +567,29 @@ impl QuotifyApp {
             return;
         }
 
+        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+        let hovered = pointer_pos.is_some_and(|pos| response.rect.contains(pos));
+
         let now = Instant::now();
-        if response.hovered() && self.drag.held_provider.is_none() {
+        if hovered && self.drag.held_provider.is_none() {
             self.drag.held_provider = Some(provider_name.to_string());
             self.drag.hold_started = Some(now);
         }
 
+        let pointer_moved = ctx.input(|i| i.pointer.delta().length_sq() > 0.25);
         if self.drag.held_provider.as_deref() == Some(provider_name)
             && self.drag.dragging_provider.is_none()
             && self
                 .drag
                 .hold_started
                 .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(350))
-            && response.dragged()
+            && pointer_moved
         {
             self.drag.dragging_provider = Some(provider_name.to_string());
         }
 
         let Some(dragging_provider) = self.drag.dragging_provider.clone() else {
             return;
-        };
-
-        // During dragging, egui locks pointer focus to the dragged card, so response.hovered()
-        // returns false for all other cards. We bypass this by manually checking if the pointer is within the rect.
-        let hovered = if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-            response.rect.contains(pointer_pos)
-        } else {
-            false
         };
 
         if dragging_provider == provider_name || !hovered {
@@ -776,7 +772,7 @@ fn render_provider(
     data: Option<&UsageData>,
     card_width: f32,
     active_provider: &Arc<RwLock<String>>,
-    config: &crate::config::AppConfig,
+    config: &mut crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
     collapse: bool,
@@ -833,7 +829,7 @@ fn render_provider(
                 )
             },
         );
-        inner.inner.interact(egui::Sense::click_and_drag())
+        inner.inner
     })
     .inner
 }
@@ -851,7 +847,7 @@ fn render_provider_card(
     card_frame: egui::Frame,
     card_width: f32,
     active_provider: &Arc<RwLock<String>>,
-    config: &crate::config::AppConfig,
+    config: &mut crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
     collapse: bool,
@@ -1205,7 +1201,7 @@ fn render_provider_icon(
     provider_name: &str,
     is_dark: bool,
     active_provider: &Arc<RwLock<String>>,
-    config: &crate::config::AppConfig,
+    config: &mut crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     data: &Arc<RwLock<Vec<UsageData>>>,
 ) -> bool {
@@ -1264,18 +1260,17 @@ fn render_provider_icon(
 fn set_active_provider(
     provider_name: &str,
     active_provider: &Arc<RwLock<String>>,
-    config: &crate::config::AppConfig,
+    config: &mut crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     data: &Arc<RwLock<Vec<UsageData>>>,
 ) {
     *active_provider.write() = provider_name.to_string();
 
-    let mut updated_config = config.clone();
-    updated_config.general.active_provider = provider_name.to_string();
+    config.general.active_provider = provider_name.to_string();
     let result = if let Some(path) = config_path {
-        updated_config.save_to(path)
+        config.save_to(path)
     } else {
-        updated_config.save()
+        config.save()
     };
     if let Err(err) = result {
         tracing::error!("Failed to save active provider {provider_name}: {err}");
