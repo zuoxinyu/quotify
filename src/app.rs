@@ -59,6 +59,8 @@ struct ProviderDragState {
     held_provider: Option<String>,
     hold_started: Option<Instant>,
     dragging_provider: Option<String>,
+    pointer_offset: Option<egui::Vec2>,
+    card_size: Option<egui::Vec2>,
     order_dirty: bool,
 }
 
@@ -371,9 +373,16 @@ impl eframe::App for QuotifyApp {
                 if active_page == 1 {
                     self.render_about_page(ui, &ctx, card_width, card_left_indent);
                 } else {
+                    let provider_drag_active =
+                        self.drag.held_provider.is_some() || self.drag.dragging_provider.is_some();
+                    let scroll_source = egui::containers::scroll_area::ScrollSource {
+                        drag: !provider_drag_active,
+                        ..egui::containers::scroll_area::ScrollSource::ALL
+                    };
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .hscroll(false)
+                        .scroll_source(scroll_source)
                         .show(ui, |ui| {
                             let data = self.data.read().clone();
                             let all_providers = provider_display_order(&self.config);
@@ -404,34 +413,7 @@ impl eframe::App for QuotifyApp {
                                 ui.add_space(6.0);
                             }
 
-                            // Autoscroll during drag-and-drop reordering
-                            if self.drag.dragging_provider.is_some() {
-                                if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                                    let viewport = ui.clip_rect(); // Get visible viewport rect in screen coordinates
-                                    let scroll_margin = 40.0;      // Distance from boundary to trigger scroll
-                                    let scroll_step = 15.0;        // Scroll step size
-
-                                    if pointer_pos.y < viewport.min.y + scroll_margin {
-                                        // Near top: scroll UP by targeting a rect just above the viewport
-                                        let target_y = viewport.min.y - scroll_step;
-                                        let target_rect = egui::Rect::from_center_size(
-                                            egui::pos2(viewport.center().x, target_y),
-                                            egui::vec2(card_width, 10.0),
-                                        );
-                                        ui.scroll_to_rect(target_rect, Some(egui::Align::TOP));
-                                        ctx.request_repaint(); // Keep repainting to animate continuous scroll
-                                    } else if pointer_pos.y > viewport.max.y - scroll_margin {
-                                        // Near bottom: scroll DOWN by targeting a rect just below the viewport
-                                        let target_y = viewport.max.y + scroll_step;
-                                        let target_rect = egui::Rect::from_center_size(
-                                            egui::pos2(viewport.center().x, target_y),
-                                            egui::vec2(card_width, 10.0),
-                                        );
-                                        ui.scroll_to_rect(target_rect, Some(egui::Align::BOTTOM));
-                                        ctx.request_repaint(); // Keep repainting to animate continuous scroll
-                                    }
-                                }
-                            }
+                            self.autoscroll_provider_drag(ui, &ctx, card_width);
 
                             self.finish_provider_drag_if_released(&ctx);
 
@@ -452,10 +434,10 @@ impl eframe::App for QuotifyApp {
                 // If a card is being dragged, render a floating preview of the card that follows the mouse cursor
                 if let Some(dragging_name) = &self.drag.dragging_provider {
                     if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                        let preview_pos = pointer_pos - egui::vec2(card_width / 2.0, 12.0);
+                        let preview_rect = self.dragged_provider_rect(pointer_pos, card_width);
 
                         egui::Area::new(egui::Id::new("provider_drag_preview"))
-                            .fixed_pos(preview_pos)
+                            .fixed_pos(preview_rect.min)
                             .order(egui::Order::Tooltip)
                             .interactable(false)
                             .show(&ctx, |ui| {
@@ -556,6 +538,63 @@ impl QuotifyApp {
         }
     }
 
+    fn dragged_provider_rect(&self, pointer_pos: egui::Pos2, fallback_width: f32) -> egui::Rect {
+        let pointer_offset = self
+            .drag
+            .pointer_offset
+            .unwrap_or_else(|| egui::vec2(fallback_width / 2.0, 12.0));
+        let card_size = self
+            .drag
+            .card_size
+            .unwrap_or_else(|| egui::vec2(fallback_width, 0.0));
+
+        egui::Rect::from_min_size(pointer_pos - pointer_offset, card_size)
+    }
+
+    fn autoscroll_provider_drag(&self, ui: &mut egui::Ui, ctx: &egui::Context, card_width: f32) {
+        if self.drag.dragging_provider.is_none() {
+            return;
+        }
+
+        let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+
+        let viewport = ui.clip_rect();
+        let dragged_rect = self.dragged_provider_rect(pointer_pos, card_width);
+        let top_overflow = (viewport.min.y - dragged_rect.min.y).max(0.0);
+        let bottom_overflow = (dragged_rect.max.y - viewport.max.y).max(0.0);
+        let scroll_delta = if top_overflow > 0.0 {
+            -provider_drag_scroll_step(top_overflow)
+        } else if bottom_overflow > 0.0 {
+            provider_drag_scroll_step(bottom_overflow)
+        } else {
+            0.0
+        };
+
+        if scroll_delta == 0.0 {
+            return;
+        }
+
+        let target_y = if scroll_delta < 0.0 {
+            viewport.min.y + scroll_delta
+        } else {
+            viewport.max.y + scroll_delta
+        };
+        let target_rect = egui::Rect::from_center_size(
+            egui::pos2(viewport.center().x, target_y),
+            egui::vec2(card_width, 1.0),
+        );
+        let align = if scroll_delta < 0.0 {
+            egui::Align::TOP
+        } else {
+            egui::Align::BOTTOM
+        };
+
+        ui.scroll_to_rect(target_rect, Some(align));
+        ctx.request_repaint();
+    }
+
     fn handle_provider_drag(
         &mut self,
         ctx: &egui::Context,
@@ -586,6 +625,8 @@ impl QuotifyApp {
             && pointer_moved
         {
             self.drag.dragging_provider = Some(provider_name.to_string());
+            self.drag.pointer_offset = pointer_pos.map(|pos| pos - response.rect.min);
+            self.drag.card_size = Some(response.rect.size());
         }
 
         let Some(dragging_provider) = self.drag.dragging_provider.clone() else {
@@ -764,6 +805,10 @@ fn reorder_provider(order: &mut Vec<String>, dragged: &str, target: &str) -> boo
     true
 }
 
+fn provider_drag_scroll_step(overflow: f32) -> f32 {
+    (overflow * 0.55 + overflow.powf(1.25) * 0.18).clamp(3.0, 90.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_provider(
     ui: &mut egui::Ui,
@@ -859,6 +904,7 @@ fn render_provider_card(
             + card_frame.outer_margin.left
             + card_frame.outer_margin.right) as f32;
         let content_width = (card_width - margin_x).max(0.0);
+        let is_primary = active_provider.read().eq_ignore_ascii_case(provider_name);
         ui.set_min_width(content_width);
         ui.set_max_width(content_width);
         // Header Row - allocate the full content width to ensure all cards are identical in size
@@ -885,6 +931,36 @@ fn render_provider_card(
                         .size(13.5),
                 );
                 ui.add_space(6.0);
+
+                if is_primary {
+                    let (primary_bg, primary_border, primary_fg) = if is_dark {
+                        (
+                            egui::Color32::from_rgb(34, 43, 66),
+                            egui::Color32::from_rgb(118, 185, 237),
+                            egui::Color32::from_rgb(118, 185, 237),
+                        )
+                    } else {
+                        (
+                            egui::Color32::from_rgb(229, 242, 255),
+                            egui::Color32::from_rgb(0, 120, 212),
+                            egui::Color32::from_rgb(0, 91, 161),
+                        )
+                    };
+                    let primary_frame = egui::Frame::NONE
+                        .fill(primary_bg)
+                        .stroke(egui::Stroke::new(1.0, primary_border))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(5, 2));
+                    primary_frame.show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("PRIMARY")
+                                .strong()
+                                .size(8.0)
+                                .color(primary_fg),
+                        );
+                    });
+                    ui.add_space(4.0);
+                }
 
                 // Fluent-styled Badging (bordered plates with soft tints)
                 let (status_text, bg_color, border_color, fg_color) = if is_dark {
