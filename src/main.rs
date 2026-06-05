@@ -1476,6 +1476,25 @@ pub(crate) fn apply_rounded_window_region(hwnd: HWND) {
     }
 }
 
+#[cfg(feature = "winui-reactor-ui")]
+pub(crate) unsafe fn install_winui_window_subclass(hwnd: HWND) {
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
+    use windows::core::BOOL;
+
+    unsafe extern "system" fn install_child_subclass(child_hwnd: HWND, _lparam: LPARAM) -> BOOL {
+        unsafe {
+            let _ = SetWindowSubclass(child_hwnd, Some(main_window_subclass), 1, 0);
+        }
+        BOOL(1)
+    }
+
+    unsafe {
+        let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+        let _ = EnumChildWindows(Some(hwnd), Some(install_child_subclass), LPARAM(0));
+    }
+}
+
 pub(crate) unsafe extern "system" fn main_window_subclass(
     hwnd: HWND,
     msg: u32,
@@ -1488,10 +1507,20 @@ pub(crate) unsafe extern "system" fn main_window_subclass(
         use windows::Win32::UI::Shell::DefSubclassProc;
         use windows::Win32::UI::WindowsAndMessaging::{
             SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
-            WM_DESTROY, WM_SIZE,
+            WM_DESTROY, WM_MOUSEWHEEL, WM_SIZE,
         };
 
         match msg {
+            #[cfg(feature = "winui-reactor-ui")]
+            WM_MOUSEWHEEL => {
+                let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16;
+                if delta < 0 {
+                    winui_app::scroll_provider_list(1);
+                } else if delta > 0 {
+                    winui_app::scroll_provider_list(-1);
+                }
+                LRESULT(0)
+            }
             tray::WM_APP_SHOW => {
                 let target_page = wparam.0 as u32;
                 let current_page = tray::ACTIVE_PAGE.load(Ordering::SeqCst);

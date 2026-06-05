@@ -2,17 +2,19 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
 use parking_lot::RwLock;
-use windows::Win32::{Foundation::HWND, UI::Shell::SetWindowSubclass};
+use windows::Win32::Foundation::HWND;
 use windows_core::Interface;
+use windows_reactor::core::backend::{ControlKind, Prop, PropValue};
 use windows_reactor::{
-    App, AsyncSetState, Backdrop, BrushBinding, Color, Component, Element, ElementExt, GridLength,
-    ProgressBar, RenderCx, ScrollBarVisibility, SetState, ThemeRef, Thickness, VerticalAlignment,
-    border, button, grid, hstack, scroll_viewer, text_block, vstack,
+    App, AsyncSetState, Backdrop, BrushBinding, Color, Component, CustomElement,
+    CustomElementHandle, Element, ElementExt, GridLength, ImageStretch, ProgressBar, RenderCx,
+    ScrollBarVisibility, SetState, ThemeRef, Thickness, VerticalAlignment, border, button, grid,
+    hstack, scroll_viewer, text_block, vstack,
 };
 
 use crate::{
@@ -25,6 +27,7 @@ use crate::{
 };
 
 static GLOBAL_REFRESH_SIGNAL: OnceLock<Arc<WinUiRefreshSignal>> = OnceLock::new();
+static PROVIDER_SCROLL_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 windows_core::imp::define_interface!(
     IWindowNative,
@@ -57,6 +60,171 @@ pub struct IWindowNative_Vtbl {
         *mut ::core::ffi::c_void,
         *mut *mut ::core::ffi::c_void,
     ) -> windows_core::HRESULT,
+}
+
+#[allow(non_snake_case)]
+mod winui_svg {
+    windows_core::imp::define_interface!(
+        IImage,
+        IImage_Vtbl,
+        0x220d3d8d_66de_53a1_a215_ba9c165565ab
+    );
+    impl windows_core::RuntimeType for IImage {
+        const SIGNATURE: windows_core::imp::ConstBuffer =
+            windows_core::imp::ConstBuffer::for_interface::<Self>();
+    }
+    impl IImage {
+        pub fn put_source<P0>(&self, value: P0) -> windows_core::Result<()>
+        where
+            P0: windows_core::Param<ImageSource>,
+        {
+            unsafe {
+                (windows_core::Interface::vtable(self).put_Source)(
+                    windows_core::Interface::as_raw(self),
+                    value.param().abi(),
+                )
+                .ok()
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[doc(hidden)]
+    pub struct IImage_Vtbl {
+        pub base__: windows_core::IInspectable_Vtbl,
+        get_Source: usize,
+        pub put_Source: unsafe extern "system" fn(
+            *mut core::ffi::c_void,
+            *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT,
+        get_Stretch: usize,
+        put_Stretch: usize,
+        get_NineGrid: usize,
+        put_NineGrid: usize,
+    }
+
+    windows_core::imp::define_interface!(
+        IImageSource,
+        IImageSource_Vtbl,
+        0x6c2038f6_d6d5_55e9_9b9e_082f12dbff60
+    );
+    impl windows_core::RuntimeType for IImageSource {
+        const SIGNATURE: windows_core::imp::ConstBuffer =
+            windows_core::imp::ConstBuffer::for_interface::<Self>();
+    }
+    #[repr(C)]
+    #[doc(hidden)]
+    pub struct IImageSource_Vtbl {
+        pub base__: windows_core::IInspectable_Vtbl,
+    }
+
+    #[repr(transparent)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ImageSource(windows_core::IUnknown);
+    windows_core::imp::interface_hierarchy!(
+        ImageSource,
+        windows_core::IUnknown,
+        windows_core::IInspectable
+    );
+    impl windows_core::RuntimeType for ImageSource {
+        const SIGNATURE: windows_core::imp::ConstBuffer =
+            windows_core::imp::ConstBuffer::for_class::<Self, IImageSource>();
+    }
+    unsafe impl windows_core::Interface for ImageSource {
+        type Vtable = <IImageSource as windows_core::Interface>::Vtable;
+        const IID: windows_core::GUID = <IImageSource as windows_core::Interface>::IID;
+    }
+    impl core::ops::Deref for ImageSource {
+        type Target = IImageSource;
+        fn deref(&self) -> &Self::Target {
+            unsafe { core::mem::transmute(self) }
+        }
+    }
+    impl windows_core::RuntimeName for ImageSource {
+        const NAME: &'static str = "Microsoft.UI.Xaml.Media.ImageSource";
+    }
+
+    windows_core::imp::define_interface!(
+        IXamlReader,
+        IXamlReader_Vtbl,
+        0x54ce54c8_38c6_50d9_ac98_4b03eddbde9f
+    );
+    impl windows_core::RuntimeType for IXamlReader {
+        const SIGNATURE: windows_core::imp::ConstBuffer =
+            windows_core::imp::ConstBuffer::for_interface::<Self>();
+    }
+    #[repr(C)]
+    #[doc(hidden)]
+    pub struct IXamlReader_Vtbl {
+        pub base__: windows_core::IInspectable_Vtbl,
+    }
+
+    windows_core::imp::define_interface!(
+        IXamlReaderStatics,
+        IXamlReaderStatics_Vtbl,
+        0x82a4cd9e_435e_5aeb_8c4f_300cece45cae
+    );
+    impl windows_core::RuntimeType for IXamlReaderStatics {
+        const SIGNATURE: windows_core::imp::ConstBuffer =
+            windows_core::imp::ConstBuffer::for_interface::<Self>();
+    }
+    #[repr(C)]
+    #[doc(hidden)]
+    pub struct IXamlReaderStatics_Vtbl {
+        pub base__: windows_core::IInspectable_Vtbl,
+        pub Load: unsafe extern "system" fn(
+            *mut core::ffi::c_void,
+            *mut core::ffi::c_void,
+            *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT,
+        LoadWithInitialTemplateValidation: usize,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct XamlReader(windows_core::IUnknown);
+    windows_core::imp::interface_hierarchy!(
+        XamlReader,
+        windows_core::IUnknown,
+        windows_core::IInspectable
+    );
+    impl XamlReader {
+        pub fn load(xaml: &str) -> windows_core::Result<windows_core::IInspectable> {
+            Self::statics(|this| unsafe {
+                let mut result = core::mem::zeroed();
+                (windows_core::Interface::vtable(this).Load)(
+                    windows_core::Interface::as_raw(this),
+                    core::mem::transmute_copy(&windows_core::HSTRING::from(xaml)),
+                    &mut result,
+                )
+                .and_then(|| windows_core::Type::from_abi(result))
+            })
+        }
+
+        fn statics<R, F: FnOnce(&IXamlReaderStatics) -> windows_core::Result<R>>(
+            callback: F,
+        ) -> windows_core::Result<R> {
+            static SHARED: windows_core::imp::FactoryCache<XamlReader, IXamlReaderStatics> =
+                windows_core::imp::FactoryCache::new();
+            SHARED.call(callback)
+        }
+    }
+    impl windows_core::RuntimeType for XamlReader {
+        const SIGNATURE: windows_core::imp::ConstBuffer =
+            windows_core::imp::ConstBuffer::for_class::<Self, IXamlReader>();
+    }
+    unsafe impl windows_core::Interface for XamlReader {
+        type Vtable = <IXamlReader as windows_core::Interface>::Vtable;
+        const IID: windows_core::GUID = <IXamlReader as windows_core::Interface>::IID;
+    }
+    impl core::ops::Deref for XamlReader {
+        type Target = IXamlReader;
+        fn deref(&self) -> &Self::Target {
+            unsafe { core::mem::transmute(self) }
+        }
+    }
+    impl windows_core::RuntimeName for XamlReader {
+        const NAME: &'static str = "Microsoft.UI.Xaml.Markup.XamlReader";
+    }
 }
 
 #[derive(Default)]
@@ -92,6 +260,17 @@ pub fn request_rerender() {
     }
 }
 
+pub fn scroll_provider_list(direction: i32) {
+    if direction > 0 {
+        PROVIDER_SCROLL_OFFSET.fetch_add(1, Ordering::SeqCst);
+    } else if direction < 0 {
+        let _ = PROVIDER_SCROLL_OFFSET.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |offset| {
+            Some(offset.saturating_sub(1))
+        });
+    }
+    request_rerender();
+}
+
 pub fn run_window(
     data: Arc<RwLock<Vec<UsageData>>>,
     last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
@@ -100,6 +279,8 @@ pub fn run_window(
     active_provider: Arc<RwLock<String>>,
 ) -> anyhow::Result<()> {
     let _bootstrap_handle = windows_reactor::bootstrap::initialize()?;
+    let refresh_signal = Arc::new(WinUiRefreshSignal::new());
+    let _ = GLOBAL_REFRESH_SIGNAL.set(refresh_signal.clone());
     App::new()
         .title("Quotify - WinUI Preview")
         .run_custom(move |_app| {
@@ -109,7 +290,7 @@ pub fn run_window(
                 config,
                 config_path,
                 active_provider,
-                refresh_signal: None,
+                refresh_signal: Some(refresh_signal),
             };
             let host = windows_reactor::winui::host::ReactorHost::new_with_window_options(
                 "Quotify - WinUI Preview",
@@ -127,6 +308,10 @@ pub fn run_window(
             )?;
             host.set_backdrop(Backdrop::Mica);
             host.activate()?;
+            let hwnd = window_hwnd(host.window())?;
+            unsafe {
+                crate::install_winui_window_subclass(hwnd);
+            }
             Box::leak(Box::new(host));
             Ok(())
         })?;
@@ -175,7 +360,7 @@ pub fn run_popup_window(
         crate::move_popup_offscreen(hwnd);
         crate::set_dwm_cloak(hwnd, true);
         unsafe {
-            let _ = SetWindowSubclass(hwnd, Some(crate::main_window_subclass), 1, 0);
+            crate::install_winui_window_subclass(hwnd);
         }
 
         Box::leak(Box::new(host));
@@ -263,14 +448,19 @@ fn render_root(
     .vertical_alignment(VerticalAlignment::Center);
 
     let page = crate::tray::ACTIVE_PAGE.load(Ordering::SeqCst);
-    let body = if page == 1 {
+    let body: Element = if page == 1 {
         render_about_page()
     } else {
         let mut config = base_config.clone();
         config.general.provider_order = order.clone();
         let snapshot = data.read().clone();
-        let cards: Vec<Element> = provider_display_order(&config)
+        let ordered_providers = provider_display_order(&config);
+        let scroll_offset = PROVIDER_SCROLL_OFFSET
+            .load(Ordering::SeqCst)
+            .min(ordered_providers.len().saturating_sub(1));
+        let cards: Vec<Element> = ordered_providers
             .into_iter()
+            .skip(scroll_offset)
             .map(|(provider_id, display_name)| {
                 let provider_data = snapshot
                     .iter()
@@ -293,14 +483,26 @@ fn render_root(
             })
             .collect();
 
-        scroll_viewer(vstack(cards).spacing(8.0))
+        let controls = hstack((
+            button("Up").subtle().on_click(|| scroll_provider_list(-1)),
+            button("Down").subtle().on_click(|| scroll_provider_list(1)),
+        ))
+        .spacing(8.0);
+        let list: Element = scroll_viewer(vstack(cards).spacing(8.0))
             .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-            .into()
+            .height(360.0)
+            .into();
+
+        vstack((controls, list)).spacing(8.0).into()
     };
 
     let header: Element = header.into();
+    let content = grid((header.grid_row(0), body.grid_row(1)))
+        .rows([GridLength::Auto, GridLength::Star(1.0)])
+        .columns([GridLength::Star(1.0)])
+        .row_spacing(12.0);
 
-    border(vstack((header, body)).spacing(12.0))
+    border(content)
         .padding(Thickness::uniform(14.0))
         .background(ThemeRef::LayerFill)
         .into()
@@ -333,7 +535,7 @@ fn render_provider_card(
 
     let mut rows: Vec<Element> = vec![
         hstack((
-            provider_initial(display_name),
+            provider_icon(&provider_id, display_name),
             text_block(display_name).font_size(15.0).bold(),
             status_badge(status),
             if is_dragging {
@@ -483,6 +685,120 @@ fn provider_initial(display_name: &str) -> Element {
         .background(Color::rgb(232, 240, 255))
         .padding(Thickness::uniform(5.0))
         .into()
+}
+
+fn provider_icon(provider_id: &str, display_name: &str) -> Element {
+    if let Some(path) = provider_icon_path(provider_id) {
+        return Element::Custom(CustomElementHandle::new(SvgIconElement {
+            uri: format!("ms-appx:///{path}"),
+        }));
+    }
+
+    provider_initial(display_name)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SvgIconElement {
+    uri: String,
+}
+
+impl CustomElement for SvgIconElement {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn kind_name(&self) -> &'static str {
+        "SvgIcon"
+    }
+
+    fn eq_dyn(&self, other: &dyn CustomElement) -> bool {
+        other.as_any().downcast_ref::<Self>() == Some(self)
+    }
+
+    fn clone_dyn(&self) -> Box<dyn CustomElement> {
+        Box::new(self.clone())
+    }
+
+    fn mount(&self, backend: &mut dyn windows_reactor::Backend) -> windows_reactor::ControlId {
+        let id = backend.create(ControlKind::Image);
+        backend.set_prop(id, Prop::Width, PropValue::F64(28.0));
+        backend.set_prop(id, Prop::Height, PropValue::F64(28.0));
+        backend.set_prop(
+            id,
+            Prop::ImageStretch,
+            PropValue::ImageStretch(ImageStretch::Uniform),
+        );
+        set_native_svg_source(backend, id, &self.uri);
+        id
+    }
+
+    fn update(
+        &self,
+        prev: &dyn CustomElement,
+        id: windows_reactor::ControlId,
+        backend: &mut dyn windows_reactor::Backend,
+    ) {
+        if prev.as_any().downcast_ref::<Self>() != Some(self) {
+            set_native_svg_source(backend, id, &self.uri);
+        }
+    }
+}
+
+fn set_native_svg_source(
+    backend: &mut dyn windows_reactor::Backend,
+    id: windows_reactor::ControlId,
+    uri: &str,
+) {
+    let Some(native) = backend.get_native_element(id) else {
+        return;
+    };
+    let Ok(image) = native.cast::<winui_svg::IImage>() else {
+        return;
+    };
+    let xaml = format!(
+        r#"<SvgImageSource xmlns="using:Microsoft.UI.Xaml.Media.Imaging" UriSource="{uri}"/>"#
+    );
+    let Ok(source) =
+        winui_svg::XamlReader::load(&xaml).and_then(|item| item.cast::<winui_svg::ImageSource>())
+    else {
+        return;
+    };
+    let _ = image.put_source(&source);
+}
+
+fn provider_icon_path(provider_id: &str) -> Option<&'static str> {
+    let relative = match provider_id {
+        "abacus" => "Assets/provider-icons/abacus-ai-dark.svg",
+        "alibabatoken" => "Assets/provider-icons/alibaba.svg",
+        "amp" => "Assets/provider-icons/amp.svg",
+        "augment" => "Assets/provider-icons/augment.svg",
+        "codex" => "Assets/provider-icons/codex.svg",
+        "codebuff" => "Assets/provider-icons/codebuff.svg",
+        "copilot" => "Assets/provider-icons/copilot.svg",
+        "cursor" => "Assets/provider-icons/cursor.svg",
+        "droid" => "Assets/provider-icons/droid.svg",
+        "elevenlabs" => "Assets/provider-icons/elevenlabs.svg",
+        "jetbrains" => "Assets/provider-icons/jetbrains-ai.svg",
+        "kilo" => "Assets/provider-icons/kilo.svg",
+        "kimi" => "Assets/provider-icons/kimi.svg",
+        "kiro" => "Assets/provider-icons/kiro.svg",
+        "minimax" => "Assets/provider-icons/minimax.svg",
+        "mistral" => "Assets/provider-icons/mistral.svg",
+        "ollama" => "Assets/provider-icons/ollama.svg",
+        "opencode" | "opencodego" => "Assets/provider-icons/opencode.svg",
+        "openrouter" => "Assets/provider-icons/openrouter.svg",
+        "claude" => "Assets/provider-icons/claude.svg",
+        "gemini" => "Assets/provider-icons/gemini.svg",
+        "antigravity" => "Assets/provider-icons/antigravity.svg",
+        "deepseek" => "Assets/provider-icons/deepseek.svg",
+        "synthetic" => "Assets/provider-icons/synthetic.svg",
+        "vertexai" => "Assets/provider-icons/vertex-ai.svg",
+        "warp" => "Assets/provider-icons/warp.svg",
+        "zai" => "Assets/provider-icons/zai.svg",
+        _ => return None,
+    };
+
+    Some(relative)
 }
 
 fn status_badge(status: ProviderStatus) -> Element {
