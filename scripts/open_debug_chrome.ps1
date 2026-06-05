@@ -1,7 +1,14 @@
+param (
+    [int]$Port = 9222,
+
+    [string]$StartUrl = "",
+
+    [string]$ProfileDir = (Join-Path $HOME ".quotify\BrowserProfile")
+)
+
 $ErrorActionPreference = "Stop"
 
 # 1. Define custom Profile Directory in user's home directory
-$ProfileDir = Join-Path $HOME ".quotify\BrowserProfile"
 if (-not (Test-Path $ProfileDir)) {
     Write-Host "Creating browser profile directory at $ProfileDir..." -ForegroundColor Gray
     New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
@@ -35,12 +42,21 @@ if (-not $ChromeExe) {
 }
 
 # 3. Launch Chrome in Debug mode
-Write-Host "Launching Google Chrome with remote debugging on port 9222..." -ForegroundColor Green
+Write-Host "Launching Google Chrome with remote debugging on port $Port..." -ForegroundColor Green
 Write-Host "Executable: $ChromeExe" -ForegroundColor Gray
 Write-Host "Profile: $ProfileDir" -ForegroundColor Gray
 
-Start-Process $ChromeExe -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=$ProfileDir"
+$Arguments = @(
+    "--remote-debugging-port=$Port",
+    "--user-data-dir=$ProfileDir"
+)
+
+if (-not [string]::IsNullOrWhiteSpace($StartUrl)) {
+    $Arguments += $StartUrl
+}
+
+Start-Process $ChromeExe -ArgumentList $Arguments
 
 Write-Host "`nChrome started successfully!" -ForegroundColor Green
-Write-Host "Please navigate to your target site (e.g. xiaomimimo.com or claude.ai) in the new Chrome window and log in." -ForegroundColor Yellow
+Write-Host "Please navigate to your target site (e.g. platform.xiaomimimo.com or claude.ai) in the new Chrome window and log in." -ForegroundColor Yellow
 Write-Host "Ensure to check 'Allow remote debugging for this browser instance' on the chrome://inspect page if prompted." -ForegroundColor Yellow
