@@ -1,6 +1,6 @@
 fn main() {
     let git_tag = std::process::Command::new("git")
-        .args(&["describe", "--tags", "--always"])
+        .args(["describe", "--tags", "--always"])
         .output()
         .ok()
         .and_then(|output| {
@@ -22,5 +22,9 @@ fn main() {
             .manifest_optional()
             .unwrap();
     }
-}
 
+    #[cfg(all(target_os = "windows", feature = "winui-reactor-ui"))]
+    {
+        windows_reactor_setup::as_framework_dependent();
+    }
+}

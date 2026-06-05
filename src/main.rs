@@ -1,10 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(not(feature = "winui-reactor-ui"))]
 mod app;
 mod config;
 mod icon;
 mod provider;
 mod tray;
+mod ui_model;
+#[cfg(feature = "winui-reactor-ui")]
+mod winui_app;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -30,9 +34,11 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+#[cfg(not(feature = "winui-reactor-ui"))]
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, TranslateMessage,
 };
+#[cfg(not(feature = "winui-reactor-ui"))]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
@@ -111,6 +117,8 @@ enum Commands {
     },
     Init,
     Tray,
+    #[cfg(feature = "winui-reactor-ui")]
+    WinuiPreview,
 }
 
 fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Provider>> {
@@ -950,9 +958,35 @@ fn main() -> Result<()> {
         Commands::Tray => {
             run_tray(config, config_path)?;
         }
+        #[cfg(feature = "winui-reactor-ui")]
+        Commands::WinuiPreview => {
+            run_winui_preview(config, config_path)?;
+        }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "winui-reactor-ui")]
+fn run_winui_preview(
+    config: config::AppConfig,
+    config_path: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(Vec::new()));
+    let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> =
+        Arc::new(RwLock::new(chrono::Utc::now()));
+    let active_provider = Arc::new(RwLock::new(
+        config.general.active_provider.trim().to_string(),
+    ));
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(fetch_all_providers(
+        &config,
+        data.clone(),
+        last_refresh.clone(),
+    ));
+
+    winui_app::run_window(data, last_refresh, config, config_path, active_provider)
 }
 
 async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -> Result<()> {
@@ -1062,6 +1096,8 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let active_provider = Arc::new(RwLock::new(
         config.general.active_provider.trim().to_string(),
     ));
+    #[cfg(feature = "winui-reactor-ui")]
+    let winui_refresh_signal = Arc::new(winui_app::WinUiRefreshSignal::new());
 
     let tray_controller =
         Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
@@ -1088,6 +1124,8 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let config_path_bg = config_path.clone();
     let tc_bg = tray_controller.clone();
     let active_provider_bg = active_provider.clone();
+    #[cfg(feature = "winui-reactor-ui")]
+    let winui_refresh_signal_bg = winui_refresh_signal.clone();
 
     // Spawn background refresh thread
     std::thread::spawn(move || {
@@ -1125,6 +1163,8 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                 if let Some(&main_hwnd) = tray::MAIN_HWND.get() {
                     let _ = main_hwnd.post_message(tray::WM_APP_UPDATE_DATA, WPARAM(0), LPARAM(0));
                 }
+                #[cfg(feature = "winui-reactor-ui")]
+                winui_refresh_signal_bg.notify();
                 last_fetch = Some(std::time::Instant::now());
                 continue;
             }
@@ -1134,130 +1174,147 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         }
     });
 
-    // Spawn the eframe UI window on a separate thread
-    let data_window = data.clone();
-    let last_refresh_window = last_refresh.clone();
-    let config_window = config.clone();
-    let config_path_window = config_path.clone();
-    let active_provider_window = active_provider.clone();
+    #[cfg(feature = "winui-reactor-ui")]
+    {
+        winui_app::run_popup_window(
+            data,
+            last_refresh,
+            config,
+            config_path,
+            active_provider,
+            winui_refresh_signal,
+        )?;
+    }
 
-    std::thread::spawn(move || {
-        let win_w = 400.0_f32;
-        let win_h = 520.0_f32;
-        let pos = hidden_popup_position();
+    #[cfg(not(feature = "winui-reactor-ui"))]
+    {
+        // Spawn the eframe UI window on a separate thread
+        let data_window = data.clone();
+        let last_refresh_window = last_refresh.clone();
+        let config_window = config.clone();
+        let config_path_window = config_path.clone();
+        let active_provider_window = active_provider.clone();
 
-        let app = app::QuotifyApp::new(
-            data_window,
-            last_refresh_window,
-            config_window,
-            config_path_window,
-            active_provider_window,
-        );
+        std::thread::spawn(move || {
+            let win_w = 400.0_f32;
+            let win_h = 520.0_f32;
+            let pos = hidden_popup_position();
 
-        let native_options = eframe::NativeOptions {
-            renderer: eframe::Renderer::Glow,
-            viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([win_w, win_h])
-                .with_position(eframe::egui::pos2(pos[0] as f32, pos[1] as f32))
-                .with_title("Quotify - AI Quota Monitor")
-                .with_resizable(true)
-                .with_decorations(false)
-                .with_taskbar(false)
-                .with_transparent(true)
-                .with_visible(true),
-            event_loop_builder: Some(Box::new(|builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    builder.with_any_thread(true);
-                }
-            })),
-            ..Default::default()
-        };
+            let app = app::QuotifyApp::new(
+                data_window,
+                last_refresh_window,
+                config_window,
+                config_path_window,
+                active_provider_window,
+            );
 
-        if let Err(err) = eframe::run_native(
-            "Quotify",
-            native_options,
-            Box::new(move |cc| {
-                let _ = EGUI_CONTEXT.set(cc.egui_ctx.clone());
-
-                let mut fonts = eframe::egui::FontDefinitions::default();
-                let mut loaded_any = false;
-
-                // Try to load Segoe UI Variable for true Windows 11 Fluent typography
-                let font_path = std::path::Path::new("C:\\Windows\\Fonts\\SegUIVar.ttf");
-                if let Ok(font_data) = std::fs::read(font_path) {
-                    fonts.font_data.insert(
-                        "SegoeUIVariable".to_owned(),
-                        std::sync::Arc::new(eframe::egui::FontData::from_owned(font_data).tweak(
-                            eframe::egui::FontTweak {
-                                scale: 1.05, // Slightly upscale to match expected reading size
-                                ..Default::default()
-                            },
-                        )),
-                    );
-                    fonts
-                        .families
-                        .get_mut(&eframe::egui::FontFamily::Proportional)
-                        .unwrap()
-                        .insert(0, "SegoeUIVariable".to_owned());
-                    loaded_any = true;
-                }
-
-                // Try to load Segoe MDL2 Assets for native WinUI system icon glyphs
-                let icon_font_path = std::path::Path::new("C:\\Windows\\Fonts\\segmdl2.ttf");
-                if let Ok(icon_font_data) = std::fs::read(icon_font_path) {
-                    fonts.font_data.insert(
-                        "SegoeMDL2".to_owned(),
-                        std::sync::Arc::new(eframe::egui::FontData::from_owned(icon_font_data)),
-                    );
-                    fonts
-                        .families
-                        .get_mut(&eframe::egui::FontFamily::Proportional)
-                        .unwrap()
-                        .push("SegoeMDL2".to_owned());
-                    loaded_any = true;
-                }
-
-                if loaded_any {
-                    cc.egui_ctx.set_fonts(fonts);
-                }
-
-                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                use windows::Win32::UI::Shell::SetWindowSubclass;
-
-                let mut hwnd = HWND(std::ptr::null_mut());
-                if let Ok(RawWindowHandle::Win32(win32_handle)) =
-                    cc.window_handle().map(|h| h.as_raw())
-                {
-                    hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
-                }
-
-                if !hwnd.0.is_null() {
-                    let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
-                    apply_mica_backdrop(hwnd);
-                    apply_rounded_window_region(hwnd);
-                    move_popup_offscreen(hwnd);
-                    set_dwm_cloak(hwnd, true);
-                    unsafe {
-                        let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+            let native_options = eframe::NativeOptions {
+                renderer: eframe::Renderer::Glow,
+                viewport: eframe::egui::ViewportBuilder::default()
+                    .with_inner_size([win_w, win_h])
+                    .with_position(eframe::egui::pos2(pos[0] as f32, pos[1] as f32))
+                    .with_title("Quotify - AI Quota Monitor")
+                    .with_resizable(true)
+                    .with_decorations(false)
+                    .with_taskbar(false)
+                    .with_transparent(true)
+                    .with_visible(true),
+                event_loop_builder: Some(Box::new(|builder| {
+                    #[cfg(target_os = "windows")]
+                    {
+                        builder.with_any_thread(true);
                     }
-                } else {
-                    tracing::error!("Could not find Quotify main window HWND");
-                }
+                })),
+                ..Default::default()
+            };
 
-                Ok(Box::new(app))
-            }),
-        ) {
-            tracing::error!("Detail window failed: {err}");
-        }
-    });
+            if let Err(err) = eframe::run_native(
+                "Quotify",
+                native_options,
+                Box::new(move |cc| {
+                    let _ = EGUI_CONTEXT.set(cc.egui_ctx.clone());
 
-    // Run the main Win32 tray message loop (proper blocking pump)
-    unsafe {
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+                    let mut fonts = eframe::egui::FontDefinitions::default();
+                    let mut loaded_any = false;
+
+                    // Try to load Segoe UI Variable for true Windows 11 Fluent typography
+                    let font_path = std::path::Path::new("C:\\Windows\\Fonts\\SegUIVar.ttf");
+                    if let Ok(font_data) = std::fs::read(font_path) {
+                        fonts.font_data.insert(
+                            "SegoeUIVariable".to_owned(),
+                            std::sync::Arc::new(
+                                eframe::egui::FontData::from_owned(font_data).tweak(
+                                    eframe::egui::FontTweak {
+                                        scale: 1.05, // Slightly upscale to match expected reading size
+                                        ..Default::default()
+                                    },
+                                ),
+                            ),
+                        );
+                        fonts
+                            .families
+                            .get_mut(&eframe::egui::FontFamily::Proportional)
+                            .unwrap()
+                            .insert(0, "SegoeUIVariable".to_owned());
+                        loaded_any = true;
+                    }
+
+                    // Try to load Segoe MDL2 Assets for native WinUI system icon glyphs
+                    let icon_font_path = std::path::Path::new("C:\\Windows\\Fonts\\segmdl2.ttf");
+                    if let Ok(icon_font_data) = std::fs::read(icon_font_path) {
+                        fonts.font_data.insert(
+                            "SegoeMDL2".to_owned(),
+                            std::sync::Arc::new(eframe::egui::FontData::from_owned(icon_font_data)),
+                        );
+                        fonts
+                            .families
+                            .get_mut(&eframe::egui::FontFamily::Proportional)
+                            .unwrap()
+                            .push("SegoeMDL2".to_owned());
+                        loaded_any = true;
+                    }
+
+                    if loaded_any {
+                        cc.egui_ctx.set_fonts(fonts);
+                    }
+
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    use windows::Win32::UI::Shell::SetWindowSubclass;
+
+                    let mut hwnd = HWND(std::ptr::null_mut());
+                    if let Ok(RawWindowHandle::Win32(win32_handle)) =
+                        cc.window_handle().map(|h| h.as_raw())
+                    {
+                        hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
+                    }
+
+                    if !hwnd.0.is_null() {
+                        let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
+                        apply_mica_backdrop(hwnd);
+                        apply_rounded_window_region(hwnd);
+                        move_popup_offscreen(hwnd);
+                        set_dwm_cloak(hwnd, true);
+                        unsafe {
+                            let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+                        }
+                    } else {
+                        tracing::error!("Could not find Quotify main window HWND");
+                    }
+
+                    Ok(Box::new(app))
+                }),
+            ) {
+                tracing::error!("Detail window failed: {err}");
+            }
+        });
+
+        // Run the main Win32 tray message loop (proper blocking pump)
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 
@@ -1393,7 +1450,7 @@ fn apply_mica_backdrop(hwnd: HWND) {
     }
 }
 
-fn apply_rounded_window_region(hwnd: HWND) {
+pub(crate) fn apply_rounded_window_region(hwnd: HWND) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Graphics::Dwm::{
@@ -1419,7 +1476,7 @@ fn apply_rounded_window_region(hwnd: HWND) {
     }
 }
 
-unsafe extern "system" fn main_window_subclass(
+pub(crate) unsafe extern "system" fn main_window_subclass(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
@@ -1445,6 +1502,8 @@ unsafe extern "system" fn main_window_subclass(
                         return LRESULT(0);
                     } else {
                         tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
+                        #[cfg(feature = "winui-reactor-ui")]
+                        winui_app::request_rerender();
                         if let Some(ctx) = EGUI_CONTEXT.get() {
                             ctx.request_repaint();
                         }
@@ -1456,6 +1515,8 @@ unsafe extern "system" fn main_window_subclass(
                 }
 
                 tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
+                #[cfg(feature = "winui-reactor-ui")]
+                winui_app::request_rerender();
 
                 let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
                 let pos = compute_popup_position(win_w, win_h);
@@ -1492,6 +1553,8 @@ unsafe extern "system" fn main_window_subclass(
                 LRESULT(0)
             }
             tray::WM_APP_UPDATE_DATA => {
+                #[cfg(feature = "winui-reactor-ui")]
+                winui_app::request_rerender();
                 if tray::WINDOW_VISIBLE.load(Ordering::SeqCst)
                     && let Some(ctx) = EGUI_CONTEXT.get()
                 {
@@ -1639,7 +1702,7 @@ fn hidden_popup_position() -> [i32; 2] {
     [-32000, -32000]
 }
 
-fn move_popup_offscreen(hwnd: HWND) {
+pub(crate) fn move_popup_offscreen(hwnd: HWND) {
     #[cfg(target_os = "windows")]
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -1663,7 +1726,7 @@ fn move_popup_offscreen(hwnd: HWND) {
     }
 }
 
-fn set_dwm_cloak(hwnd: HWND, cloaked: bool) {
+pub(crate) fn set_dwm_cloak(hwnd: HWND, cloaked: bool) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};

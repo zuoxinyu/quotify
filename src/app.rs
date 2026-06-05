@@ -7,6 +7,10 @@ use std::{
 };
 
 use crate::provider::UsageData;
+use crate::ui_model::{
+    ProviderStatus, UsageLevel, format_credits_balance, is_newer, provider_catalog,
+    provider_display_order, provider_status, reorder_provider, reset_time_text,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateStatus {
@@ -60,13 +64,6 @@ struct ProviderDragState {
     hold_started: Option<Instant>,
     dragging_provider: Option<String>,
     order_dirty: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderStatus {
-    Active,
-    Error,
-    Disabled,
 }
 
 impl eframe::App for QuotifyApp {
@@ -476,10 +473,7 @@ impl eframe::App for QuotifyApp {
                                         .unwrap_or(dragging_name)
                                         .to_string();
 
-                                    let status = match provider_data.error.is_some() {
-                                        true => ProviderStatus::Error,
-                                        false => ProviderStatus::Active,
-                                    };
+                                    let status = provider_status(Some(provider_data));
                                     let credits = provider_data.credits.as_ref();
                                     let error_msg = provider_data.error.as_deref();
                                     let windows = &provider_data.windows;
@@ -618,31 +612,6 @@ impl QuotifyApp {
     }
 }
 
-fn format_credits_balance(balance: f64) -> String {
-    if balance.abs() >= 1_000_000_000.0 {
-        let val = balance / 1_000_000_000.0;
-        format!("{:.2}B", val)
-    } else if balance.abs() >= 1_000_000.0 {
-        let val = balance / 1_000_000.0;
-        if (val - val.round()).abs() < 0.01 {
-            format!("{:.0}M", val)
-        } else {
-            format!("{:.2}M", val)
-        }
-    } else if balance.abs() >= 1_000.0 {
-        let val = balance / 1_000.0;
-        if (val - val.round()).abs() < 0.01 {
-            format!("{:.0}K", val)
-        } else {
-            format!("{:.2}K", val)
-        }
-    } else if (balance - balance.round()).abs() < 0.01 {
-        format!("{:.0}", balance)
-    } else {
-        format!("{:.2}", balance)
-    }
-}
-
 fn open_config_file() -> anyhow::Result<()> {
     let path = crate::config::AppConfig::config_path();
     if !path.exists() {
@@ -654,114 +623,6 @@ fn open_config_file() -> anyhow::Result<()> {
         .spawn()
         .map(|_| ())
         .map_err(anyhow::Error::from)
-}
-
-fn provider_catalog() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("codex", "Codex"),
-        ("openai", "OpenAI"),
-        ("opencode", "OpenCode"),
-        ("opencodego", "OpenCode Go"),
-        ("claude", "Claude"),
-        ("gemini", "Gemini"),
-        ("antigravity", "Antigravity"),
-        ("deepseek", "DeepSeek"),
-        ("openrouter", "OpenRouter"),
-        ("moonshot", "Moonshot"),
-        ("elevenlabs", "ElevenLabs"),
-        ("doubao", "Doubao"),
-        ("zai", "z.ai"),
-        ("venice", "Venice"),
-        ("crof", "Crof"),
-        ("synthetic", "Synthetic"),
-        ("warp", "Warp"),
-        ("groqcloud", "GroqCloud"),
-        ("deepgram", "Deepgram"),
-        ("llmproxy", "LLM Proxy"),
-        ("codebuff", "Codebuff"),
-        ("kiro", "Kiro"),
-        ("copilot", "Copilot"),
-        ("azureopenai", "Azure OpenAI"),
-        ("ollama", "Ollama"),
-        ("minimax", "MiniMax"),
-        ("jetbrains", "JetBrains AI"),
-        ("kimi", "Kimi"),
-        ("kilo", "Kilo Code"),
-        ("augment", "Augment"),
-        ("bedrock", "AWS Bedrock"),
-        ("vertexai", "Vertex AI"),
-        ("stepfun", "StepFun"),
-        ("abacus", "Abacus AI"),
-        ("alibabatoken", "Alibaba Token"),
-        ("t3chat", "T3 Chat"),
-        ("amp", "Amp"),
-        ("mistral", "Mistral"),
-        ("grok", "Grok"),
-        ("cursor", "Cursor"),
-        ("droid", "Factory Droid"),
-        ("windsurf", "Windsurf"),
-        ("mimo", "MiMo"),
-    ]
-}
-
-fn provider_display_order(config: &crate::config::AppConfig) -> Vec<(String, &'static str)> {
-    let mut ordered = Vec::new();
-    for configured in &config.general.provider_order {
-        if let Some((id, display_name)) = provider_catalog()
-            .iter()
-            .find(|(id, _)| id.eq_ignore_ascii_case(configured))
-            && !ordered.iter().any(|(existing, _)| existing == id)
-        {
-            ordered.push(((*id).to_string(), *display_name));
-        }
-    }
-
-    for (id, display_name) in provider_catalog() {
-        if !ordered.iter().any(|(existing, _)| existing == id) {
-            ordered.push(((*id).to_string(), *display_name));
-        }
-    }
-
-    ordered
-}
-
-fn ensure_provider_order(order: &mut Vec<String>) {
-    let mut normalized = Vec::new();
-    for configured in order.iter() {
-        if let Some((id, _)) = provider_catalog()
-            .iter()
-            .find(|(id, _)| id.eq_ignore_ascii_case(configured))
-            && !normalized.iter().any(|existing| existing == id)
-        {
-            normalized.push((*id).to_string());
-        }
-    }
-
-    for (id, _) in provider_catalog() {
-        if !normalized.iter().any(|existing| existing == id) {
-            normalized.push((*id).to_string());
-        }
-    }
-
-    *order = normalized;
-}
-
-fn reorder_provider(order: &mut Vec<String>, dragged: &str, target: &str) -> bool {
-    ensure_provider_order(order);
-    let Some(from) = order.iter().position(|id| id == dragged) else {
-        return false;
-    };
-    let Some(to) = order.iter().position(|id| id == target) else {
-        return false;
-    };
-    if from == to {
-        return false;
-    }
-
-    let item = order.remove(from);
-    let target_index = order.iter().position(|id| id == target).unwrap_or(to);
-    order.insert(target_index, item);
-    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -778,11 +639,7 @@ fn render_provider(
     collapse: bool,
     is_dragged: bool,
 ) -> egui::Response {
-    let status = match data {
-        Some(d) if d.error.is_some() => ProviderStatus::Error,
-        Some(_) => ProviderStatus::Active,
-        None => ProviderStatus::Disabled,
-    };
+    let status = provider_status(data);
 
     let credits = data.and_then(|d| d.credits.as_ref());
     let error_msg = data.and_then(|d| d.error.as_deref());
@@ -1330,43 +1187,13 @@ fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {
 }
 
 fn progress_color(pct: f32, is_dark: bool) -> egui::Color32 {
-    if is_dark {
-        if pct >= 80.0 {
-            egui::Color32::from_rgb(241, 112, 122)
-        } else if pct >= 50.0 {
-            egui::Color32::from_rgb(255, 200, 0)
-        } else {
-            egui::Color32::from_rgb(96, 205, 255)
-        }
-    } else if pct >= 80.0 {
-        egui::Color32::from_rgb(196, 43, 28)
-    } else if pct >= 50.0 {
-        egui::Color32::from_rgb(179, 123, 0)
-    } else {
-        egui::Color32::from_rgb(0, 120, 212)
-    }
-}
-
-fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
-    let Some(resets) = resets_at else {
-        return "-".to_string();
-    };
-
-    let remaining = resets - chrono::Utc::now();
-    if remaining.num_seconds() <= 0 {
-        return "resetting".to_string();
-    }
-
-    let days = remaining.num_days();
-    let hours = remaining.num_hours() % 24;
-    let minutes = remaining.num_minutes() % 60;
-
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{minutes}m")
+    match (crate::ui_model::usage_level(pct), is_dark) {
+        (UsageLevel::Critical, true) => egui::Color32::from_rgb(241, 112, 122),
+        (UsageLevel::Warning, true) => egui::Color32::from_rgb(255, 200, 0),
+        (UsageLevel::Normal, true) => egui::Color32::from_rgb(96, 205, 255),
+        (UsageLevel::Critical, false) => egui::Color32::from_rgb(196, 43, 28),
+        (UsageLevel::Warning, false) => egui::Color32::from_rgb(179, 123, 0),
+        (UsageLevel::Normal, false) => egui::Color32::from_rgb(0, 120, 212),
     }
 }
 
@@ -1651,63 +1478,8 @@ impl QuotifyApp {
     }
 }
 
-fn normalize_version(v: &str) -> String {
-    let v = v.trim().trim_start_matches('v').trim_start_matches('V');
-    if let Some((main, _)) = v.split_once('-') {
-        main.to_string()
-    } else {
-        v.to_string()
-    }
-}
-
-fn is_newer(current: &str, latest: &str) -> bool {
-    let current_norm = normalize_version(current);
-    let latest_norm = normalize_version(latest);
-
-    let current_parts: Vec<u32> = current_norm
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let latest_parts: Vec<u32> = latest_norm
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    for i in 0..std::cmp::max(current_parts.len(), latest_parts.len()) {
-        let curr = current_parts.get(i).cloned().unwrap_or(0);
-        let lat = latest_parts.get(i).cloned().unwrap_or(0);
-        if lat > curr {
-            return true;
-        } else if curr > lat {
-            return false;
-        }
-    }
-    false
-}
-
 fn open_browser(url: &str) {
     let _ = std::process::Command::new("cmd")
-        .args(&["/C", "start", "", url])
+        .args(["/C", "start", "", url])
         .spawn();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_version() {
-        assert_eq!(normalize_version("v0.1.0-1-gae62f96"), "0.1.0");
-        assert_eq!(normalize_version("V1.2.3"), "1.2.3");
-        assert_eq!(normalize_version("2.0.0"), "2.0.0");
-    }
-
-    #[test]
-    fn test_is_newer() {
-        assert!(is_newer("v0.1.0-1-gae62f96", "v0.2.0"));
-        assert!(is_newer("0.1.0", "v0.1.1"));
-        assert!(!is_newer("v0.2.0", "v0.1.0"));
-        assert!(!is_newer("v0.1.0", "v0.1.0"));
-        assert!(is_newer("v0.1.0", "1.0.0"));
-    }
 }
