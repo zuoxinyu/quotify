@@ -3324,6 +3324,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+ "windows-collections 0.3.2 (git+https://github.com/microsoft/windows-rs.git?rev=cf58d5cfe7deccb73a55aeb4aa6799dc1b06544c)",
  "windows-core 0.62.2 (git+https://github.com/microsoft/windows-rs.git?rev=cf58d5cfe7deccb73a55aeb4aa6799dc1b06544c)",
  "windows-reactor",
  "windows-reactor-setup",

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeneralConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval: u64,
@@ -10,6 +10,8 @@ pub struct GeneralConfig {
     pub active_provider: String,
     #[serde(default)]
     pub provider_order: Vec<String>,
+    #[serde(default)]
+    pub theme: String,
 }
 
 fn default_refresh_interval() -> u64 {
@@ -22,17 +24,18 @@ impl Default for GeneralConfig {
             refresh_interval: default_refresh_interval(),
             active_provider: String::new(),
             provider_order: Vec::new(),
+            theme: String::new(),
         }
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(default)]
     pub proxy: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeepSeekConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -40,7 +43,7 @@ pub struct DeepSeekConfig {
     pub api_key: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiKeyProviderConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -52,7 +55,7 @@ pub struct ApiKeyProviderConfig {
     pub deployment: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -66,7 +69,7 @@ pub struct ClaudeConfig {
     pub access_token: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodexConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -74,7 +77,7 @@ pub struct CodexConfig {
     pub auth_file: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeminiConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -82,7 +85,7 @@ pub struct GeminiConfig {
     pub api_key: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenCodeConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -94,7 +97,7 @@ pub struct OpenCodeConfig {
     pub auth_cookie: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MimoConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -106,7 +109,7 @@ pub struct MimoConfig {
     pub cookie_header: String,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AntigravityConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -114,7 +117,7 @@ pub struct AntigravityConfig {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,

@@ -1495,6 +1495,30 @@ pub(crate) unsafe fn install_winui_window_subclass(hwnd: HWND) {
     }
 }
 
+#[cfg(feature = "winui-reactor-ui")]
+pub(crate) unsafe fn configure_native_winui_window(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongW, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
+        SetWindowLongW, SetWindowPos, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    };
+
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let next_style =
+            style & !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0 | WS_MINIMIZEBOX.0);
+        let _ = SetWindowLongW(hwnd, GWL_STYLE, next_style as i32);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
 pub(crate) unsafe extern "system" fn main_window_subclass(
     hwnd: HWND,
     msg: u32,
@@ -1507,20 +1531,10 @@ pub(crate) unsafe extern "system" fn main_window_subclass(
         use windows::Win32::UI::Shell::DefSubclassProc;
         use windows::Win32::UI::WindowsAndMessaging::{
             SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
-            WM_DESTROY, WM_MOUSEWHEEL, WM_SIZE,
+            WM_DESTROY, WM_SIZE,
         };
 
         match msg {
-            #[cfg(feature = "winui-reactor-ui")]
-            WM_MOUSEWHEEL => {
-                let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16;
-                if delta < 0 {
-                    winui_app::scroll_provider_list(1);
-                } else if delta > 0 {
-                    winui_app::scroll_provider_list(-1);
-                }
-                LRESULT(0)
-            }
             tray::WM_APP_SHOW => {
                 let target_page = wparam.0 as u32;
                 let current_page = tray::ACTIVE_PAGE.load(Ordering::SeqCst);

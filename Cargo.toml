@@ -38,6 +38,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Gdi",
 ] }
 windows-core = { git = "https://github.com/microsoft/windows-rs.git", rev = "cf58d5cfe7deccb73a55aeb4aa6799dc1b06544c" }
+windows-collections = { git = "https://github.com/microsoft/windows-rs.git", rev = "cf58d5cfe7deccb73a55aeb4aa6799dc1b06544c" }
 sha2 = "0.11"
 regex = "1"
 eframe = { version = "0.34", default-features = false, features = [
@@ -58,7 +59,7 @@ embed-resource = "3.0"
 windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs.git", rev = "cf58d5cfe7deccb73a55aeb4aa6799dc1b06544c", optional = true }
 
 [features]
-default = []
+default = ["winui-reactor-ui"]
 winui-reactor-ui = ["dep:windows-reactor", "dep:windows-reactor-setup"]
 
 [profile.release]
