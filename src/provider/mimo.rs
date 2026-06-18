@@ -83,6 +83,28 @@ struct MimoApiResponse {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct MimoBalanceResponse {
+    data: Option<MimoBalanceData>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MimoBalanceData {
+    balance: Option<String>,
+    #[allow(dead_code)]
+    frozen_balance: Option<String>,
+    currency: Option<String>,
+    #[allow(dead_code)]
+    overdraft_limit: Option<String>,
+    #[allow(dead_code)]
+    remaining_overdraft_limit: Option<String>,
+    #[allow(dead_code)]
+    gift_balance: Option<String>,
+    #[allow(dead_code)]
+    cash_balance: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MimoApiData {
     #[serde(default)]
@@ -119,13 +141,13 @@ impl Provider for MimoProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let mut cookie_header = self.resolve_cookie_header().await?;
+        let cookie_header = self.resolve_cookie_header().await?;
 
-        let url = "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage";
-
+        // 1. Fetch Plan Usage
+        let usage_url = "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage";
         let mut resp = self
             .client
-            .get(url)
+            .get(usage_url)
             .header("Cookie", &cookie_header)
             .header("Content-Type", "application/json")
             .header("Accept", "*/*")
@@ -138,7 +160,9 @@ impl Provider for MimoProvider {
             .header("Referer", "https://platform.xiaomimimo.com/console/plan-manage")
             .send()
             .await
-            .context("Failed to connect to MiMo API")?;
+            .context("Failed to connect to MiMo Usage API")?;
+
+        let mut current_cookie_header = cookie_header;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             tracing::info!("MiMo token expired. Attempting WebView2 login...");
@@ -152,13 +176,13 @@ impl Provider for MimoProvider {
                 let _ = config.save();
             }
 
-            cookie_header = full_cookie;
+            current_cookie_header = full_cookie;
             
             // Retry request
             resp = self
                 .client
-                .get(url)
-                .header("Cookie", &cookie_header)
+                .get(usage_url)
+                .header("Cookie", &current_cookie_header)
                 .header("Content-Type", "application/json")
                 .header("Accept", "*/*")
                 .header("Accept-Language", "zh")
@@ -176,22 +200,52 @@ impl Provider for MimoProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MiMo API error: {status} - {body}");
+            anyhow::bail!("MiMo Usage API error: {status} - {body}");
         }
 
-        let body: serde_json::Value = resp
+        let usage_body: MimoApiResponse = resp
             .json()
             .await
             .context("Failed to parse MiMo tokenPlan/usage response")?;
 
-        tracing::debug!("MiMo tokenPlan/usage response: {body:#?}");
+        // 2. Fetch Balance
+        let balance_url = "https://platform.xiaomimimo.com/api/v1/balance";
+        let resp = self
+            .client
+            .get(balance_url)
+            .header("Cookie", &current_cookie_header)
+            .header("Content-Type", "application/json")
+            .header("Accept", "*/*")
+            .header("Accept-Language", "zh")
+            .header("X-Timezone", "Asia/Shanghai")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+            )
+            .header("Referer", "https://platform.xiaomimimo.com/console/balance")
+            .send()
+            .await
+            .context("Failed to connect to MiMo Balance API")?;
+
+        let mut credits = None;
+        if resp.status().is_success() {
+            if let Ok(balance_resp) = resp.json::<MimoBalanceResponse>().await {
+                if let Some(data) = balance_resp.data {
+                    let total = data.balance.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    let currency = data.currency.unwrap_or_else(|| "CNY".to_string());
+                    credits = Some(CreditsInfo {
+                        balance: total,
+                        currency,
+                        total_granted: None,
+                        topped_up: None,
+                    });
+                }
+            }
+        }
 
         let mut windows = Vec::new();
-        let mut credits = None;
 
-        if let Ok(resp) = serde_json::from_value::<MimoApiResponse>(body.clone())
-            && let Some(data) = resp.data
-        {
+        if let Some(data) = usage_body.data {
             // Parse monthly usage
             if let Some(month) = &data.month_usage {
                 for item in &month.items {
@@ -247,18 +301,20 @@ impl Provider for MimoProvider {
                     });
                 }
             }
-
-            // Compute credits from the main plan usage group
-            if let Some(usage) = &data.usage {
-                let total_limit: f64 = usage.items.iter().filter_map(|i| i.limit).sum();
-                let total_used: f64 = usage.items.iter().filter_map(|i| i.used).sum();
-                if total_limit > 0.0 {
-                    credits = Some(CreditsInfo {
-                        balance: total_limit - total_used,
-                        currency: "tokens".to_string(),
-                        total_granted: Some(total_limit),
-                        topped_up: None,
-                    });
+            
+            // If we didn't get credits from the balance API, try fallback to tokens remaining
+            if credits.is_none() {
+                if let Some(usage) = &data.usage {
+                    let total_limit: f64 = usage.items.iter().filter_map(|i| i.limit).sum();
+                    let total_used: f64 = usage.items.iter().filter_map(|i| i.used).sum();
+                    if total_limit > 0.0 {
+                        credits = Some(CreditsInfo {
+                            balance: total_limit - total_used,
+                            currency: "tokens".to_string(),
+                            total_granted: Some(total_limit),
+                            topped_up: None,
+                        });
+                    }
                 }
             }
         }

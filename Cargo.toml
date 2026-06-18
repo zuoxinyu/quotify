@@ -59,6 +59,6 @@ embed-resource = "3.0"
 
 [profile.release]
 opt-level = "z"
-lto = true
+lto = "thin"
 strip = true
 codegen-units = 1

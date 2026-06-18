@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 thread_local! {
     static WEBVIEW: RefCell<Option<wry::WebView>> = const { RefCell::new(None) };
     static TX: RefCell<Option<mpsc::Sender<String>>> = const { RefCell::new(None) };
+    static TICKS: RefCell<usize> = const { RefCell::new(0) };
 }
 
 struct RawWindow {
@@ -61,6 +62,12 @@ unsafe extern "system" fn window_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         },
         WM_TIMER => {
+            let mut current_ticks = 0;
+            TICKS.with(|t| {
+                *t.borrow_mut() += 1;
+                current_ticks = *t.borrow();
+            });
+
             WEBVIEW.with(|wv| {
                 if let Some(webview) = wv.borrow().as_ref() {
                     // Try to get all cookies
@@ -101,8 +108,18 @@ unsafe extern "system" fn window_proc(
                                     LPARAM(0),
                                 );
                             }
-                        } else if !cookie_names.is_empty() {
-                            tracing::debug!("MiMo: Waiting for serviceToken. Current cookies: {:?}", cookie_names);
+                        } else {
+                            if !cookie_names.is_empty() {
+                                tracing::debug!("MiMo: Waiting for serviceToken. Current cookies: {:?}", cookie_names);
+                            }
+                            
+                            // Show window after 3 seconds if not auto-logged in
+                            if current_ticks == 3 {
+                                tracing::info!("MiMo: Manual login required, showing window...");
+                                unsafe {
+                                    let _ = ShowWindow(hwnd, SW_SHOW);
+                                }
+                            }
                         }
                     }
                 }
@@ -179,10 +196,8 @@ pub fn login_and_get_cookie() -> Result<String> {
             TX.with(|t| {
                 *t.borrow_mut() = Some(tx);
             });
-
-            let _ = ShowWindow(hwnd, SW_SHOW);
             
-            // Start polling timer
+            // Start polling timer (window starts hidden)
             let _ = SetTimer(Some(hwnd), 1, 1000, None);
 
             let mut msg = MSG::default();
@@ -198,6 +213,9 @@ pub fn login_and_get_cookie() -> Result<String> {
             });
             TX.with(|t| {
                 *t.borrow_mut() = None;
+            });
+            TICKS.with(|t| {
+                *t.borrow_mut() = 0;
             });
             let _ = DestroyWindow(hwnd);
         }
