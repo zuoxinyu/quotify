@@ -110,6 +110,7 @@ pub fn login_and_get_cookie() -> Result<String> {
             "#;
 
             let webview = WebViewBuilder::new()
+                .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
                 .with_url("https://platform.xiaomimimo.com")
                 .with_initialization_script(init_script)
                 .with_ipc_handler(move |msg| {
