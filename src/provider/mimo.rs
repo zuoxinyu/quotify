@@ -38,6 +38,9 @@ impl MimoProvider {
         if let Some(token) = &self.service_token
             && !token.is_empty()
         {
+            if token.contains('=') {
+                return Ok(token.clone());
+            }
             return Ok(format!("serviceToken={token}"));
         }
 
@@ -52,35 +55,26 @@ impl MimoProvider {
         if let Ok(token) = std::env::var("MIMO_SERVICE_TOKEN")
             && !token.is_empty()
         {
+            if token.contains('=') {
+                return Ok(token);
+            }
             return Ok(format!("serviceToken={token}"));
         }
 
         // 5. If everything fails, try to prompt webview login
         tracing::info!("No MiMo credentials found. Attempting WebView2 login...");
-        let new_token = tokio::task::spawn_blocking(|| {
+        let full_cookie = tokio::task::spawn_blocking(|| {
             crate::webview_login::login_and_get_cookie()
         }).await??;
         
-        let extracted_token = extract_service_token(&new_token);
-        
-        // Save to config
+        // Save to config - prefer saving the full cookie header to avoid missing userId etc.
         if let Ok(mut config) = crate::config::AppConfig::load() {
-            config.mimo.service_token = extracted_token.clone();
+            config.mimo.cookie_header = full_cookie.clone();
             let _ = config.save();
         }
 
-        Ok(format!("serviceToken={extracted_token}"))
+        Ok(full_cookie)
     }
-}
-
-fn extract_service_token(cookie_str: &str) -> String {
-    for part in cookie_str.split(';') {
-        let part = part.trim();
-        if let Some(token) = part.strip_prefix("serviceToken=") {
-            return token.to_string();
-        }
-    }
-    cookie_str.to_string()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -148,19 +142,17 @@ impl Provider for MimoProvider {
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             tracing::info!("MiMo token expired. Attempting WebView2 login...");
-            let new_token = tokio::task::spawn_blocking(|| {
+            let full_cookie = tokio::task::spawn_blocking(|| {
                 crate::webview_login::login_and_get_cookie()
             }).await??;
             
-            let extracted_token = extract_service_token(&new_token);
-            
             // Save to config
             if let Ok(mut config) = crate::config::AppConfig::load() {
-                config.mimo.service_token = extracted_token.clone();
+                config.mimo.cookie_header = full_cookie.clone();
                 let _ = config.save();
             }
 
-            cookie_header = format!("serviceToken={extracted_token}");
+            cookie_header = full_cookie;
             
             // Retry request
             resp = self

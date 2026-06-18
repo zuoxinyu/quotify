@@ -63,21 +63,25 @@ unsafe extern "system" fn window_proc(
         WM_TIMER => {
             WEBVIEW.with(|wv| {
                 if let Some(webview) = wv.borrow().as_ref() {
-                    // Try to get all cookies for the domain
+                    // Try to get all cookies
                     if let Ok(cookies) = webview.cookies() {
                         let mut cookies_str = String::new();
                         let mut token_found = false;
+                        let mut cookie_names: Vec<String> = Vec::new();
+
                         for cookie in cookies {
                             let name = cookie.name();
                             let value = cookie.value();
+                            cookie_names.push(name.to_string());
                             
                             if !cookies_str.is_empty() {
                                 cookies_str.push_str("; ");
                             }
                             cookies_str.push_str(&format!("{}={}", name, value));
                             
-                            if name.to_lowercase() == "servicetoken" && !value.is_empty() {
-                                tracing::info!("MiMo: serviceToken found in cookies!");
+                            // MiMo often uses api-platform_serviceToken or serviceToken
+                            if name.to_lowercase().contains("servicetoken") && !value.is_empty() {
+                                tracing::info!("MiMo: Detected relevant token: {}", name);
                                 token_found = true;
                             }
                         }
@@ -97,6 +101,8 @@ unsafe extern "system" fn window_proc(
                                     LPARAM(0),
                                 );
                             }
+                        } else if !cookie_names.is_empty() {
+                            tracing::debug!("MiMo: Waiting for serviceToken. Current cookies: {:?}", cookie_names);
                         }
                     }
                 }
