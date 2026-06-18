@@ -28,12 +28,16 @@ impl MimoProvider {
 
     async fn resolve_cookie_header(&self) -> Result<String> {
         // 1. Config: cookie_header (full header string)
-        if let Some(header) = &self.cookie_header {
+        if let Some(header) = &self.cookie_header
+            && !header.is_empty()
+        {
             return Ok(header.clone());
         }
 
         // 2. Config: service_token
-        if let Some(token) = &self.service_token {
+        if let Some(token) = &self.service_token
+            && !token.is_empty()
+        {
             return Ok(format!("serviceToken={token}"));
         }
 
@@ -51,10 +55,32 @@ impl MimoProvider {
             return Ok(format!("serviceToken={token}"));
         }
 
-        anyhow::bail!(
-            "No MiMo credentials found. Set MIMO_SERVICE_TOKEN, MIMO_COOKIE_HEADER, service_token, or cookie_header"
-        )
+        // 5. If everything fails, try to prompt webview login
+        tracing::info!("No MiMo credentials found. Attempting WebView2 login...");
+        let new_token = tokio::task::spawn_blocking(|| {
+            crate::webview_login::login_and_get_cookie()
+        }).await??;
+        
+        let extracted_token = extract_service_token(&new_token);
+        
+        // Save to config
+        if let Ok(mut config) = crate::config::AppConfig::load() {
+            config.mimo.service_token = extracted_token.clone();
+            let _ = config.save();
+        }
+
+        Ok(format!("serviceToken={extracted_token}"))
     }
+}
+
+fn extract_service_token(cookie_str: &str) -> String {
+    for part in cookie_str.split(';') {
+        let part = part.trim();
+        if let Some(token) = part.strip_prefix("serviceToken=") {
+            return token.to_string();
+        }
+    }
+    cookie_str.to_string()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -99,14 +125,14 @@ impl Provider for MimoProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let cookie_header = self.resolve_cookie_header().await?;
+        let mut cookie_header = self.resolve_cookie_header().await?;
 
         let url = "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage";
 
-        let resp = self
+        let mut resp = self
             .client
             .get(url)
-            .header("Cookie", cookie_header)
+            .header("Cookie", &cookie_header)
             .header("Content-Type", "application/json")
             .header("Accept", "*/*")
             .header("Accept-Language", "zh")
@@ -119,6 +145,41 @@ impl Provider for MimoProvider {
             .send()
             .await
             .context("Failed to connect to MiMo API")?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            tracing::info!("MiMo token expired. Attempting WebView2 login...");
+            let new_token = tokio::task::spawn_blocking(|| {
+                crate::webview_login::login_and_get_cookie()
+            }).await??;
+            
+            let extracted_token = extract_service_token(&new_token);
+            
+            // Save to config
+            if let Ok(mut config) = crate::config::AppConfig::load() {
+                config.mimo.service_token = extracted_token.clone();
+                let _ = config.save();
+            }
+
+            cookie_header = format!("serviceToken={extracted_token}");
+            
+            // Retry request
+            resp = self
+                .client
+                .get(url)
+                .header("Cookie", &cookie_header)
+                .header("Content-Type", "application/json")
+                .header("Accept", "*/*")
+                .header("Accept-Language", "zh")
+                .header("X-Timezone", "Asia/Shanghai")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+                )
+                .header("Referer", "https://platform.xiaomimimo.com/console/plan-manage")
+                .send()
+                .await
+                .context("Failed to connect to MiMo API on retry")?;
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();

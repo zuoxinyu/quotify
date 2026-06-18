@@ -51,6 +51,8 @@ winit = { version = "0.30", default-features = false }
 image = { version = "0.25", features = ["png"] }
 parking_lot = "0.12"
 raw-window-handle = "0.6"
+wry = "0.55.1"
+webview2-com = "0.38.2"
 
 [build-dependencies]
 embed-resource = "3.0"
