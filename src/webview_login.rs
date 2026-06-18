@@ -10,11 +10,12 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, RegisterClassW,
     ShowWindow, TranslateMessage, CW_USEDEFAULT, MSG, SW_SHOW, WINDOW_EX_STYLE,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW, GetClientRect,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW, GetClientRect, SetTimer, KillTimer, WM_TIMER, WM_SIZE, WM_DESTROY, WM_CLOSE, PostQuitMessage, PostMessageW,
 };
 
 thread_local! {
-    static WEBVIEW: RefCell<Option<wry::WebView>> = RefCell::new(None);
+    static WEBVIEW: RefCell<Option<wry::WebView>> = const { RefCell::new(None) };
+    static TX: RefCell<Option<mpsc::Sender<String>>> = const { RefCell::new(None) };
 }
 
 struct RawWindow {
@@ -43,7 +44,7 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        windows::Win32::UI::WindowsAndMessaging::WM_SIZE => unsafe {
+        WM_SIZE => unsafe {
             let mut rect = RECT::default();
             let _ = GetClientRect(hwnd, &mut rect);
             WEBVIEW.with(|wv| {
@@ -59,8 +60,51 @@ unsafe extern "system" fn window_proc(
             });
             DefWindowProcW(hwnd, msg, wparam, lparam)
         },
-        windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => unsafe {
-            windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+        WM_TIMER => {
+            WEBVIEW.with(|wv| {
+                if let Some(webview) = wv.borrow().as_ref() {
+                    // Try to get all cookies for the domain
+                    if let Ok(cookies) = webview.cookies() {
+                        let mut cookies_str = String::new();
+                        let mut token_found = false;
+                        for cookie in cookies {
+                            let name = cookie.name();
+                            let value = cookie.value();
+                            
+                            if !cookies_str.is_empty() {
+                                cookies_str.push_str("; ");
+                            }
+                            cookies_str.push_str(&format!("{}={}", name, value));
+                            
+                            if name.to_lowercase() == "servicetoken" && !value.is_empty() {
+                                tracing::info!("MiMo: serviceToken found in cookies!");
+                                token_found = true;
+                            }
+                        }
+                        
+                        if token_found {
+                            TX.with(|tx| {
+                                if let Some(tx) = tx.borrow().as_ref() {
+                                    let _ = tx.send(cookies_str);
+                                }
+                            });
+                            // Close window
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(hwnd),
+                                    WM_CLOSE,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+            LRESULT(0)
+        }
+        WM_DESTROY => unsafe {
+            PostQuitMessage(0);
             LRESULT(0)
         },
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -87,12 +131,12 @@ pub fn login_and_get_cookie() -> Result<String> {
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                w!("Xiaomi Mimo Login"),
+                w!("Xiaomi Mimo Login (Please login to continue)"),
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                800,
-                600,
+                900,
+                700,
                 None,
                 None,
                 Some(hinstance.into()),
@@ -101,31 +145,14 @@ pub fn login_and_get_cookie() -> Result<String> {
 
             let window = RawWindow { hwnd };
 
-            let tx_clone = tx.clone();
-            
-            let init_script = r#"
-                setInterval(function() {
-                    window.ipc.postMessage(document.cookie);
-                }, 1000);
-            "#;
+            let mut data_dir = std::env::temp_dir();
+            data_dir.push("QuotifyMimoWebviewData");
+            let mut web_context = wry::WebContext::new(Some(data_dir));
 
-            let webview = WebViewBuilder::new()
+            let webview = WebViewBuilder::new_with_web_context(&mut web_context)
                 .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
                 .with_url("https://platform.xiaomimimo.com")
-                .with_initialization_script(init_script)
-                .with_ipc_handler(move |msg| {
-                    let body = msg.body();
-                    if body.contains("serviceToken=") {
-                        let _ = tx_clone.send(body.clone());
-                        // Post a close message to ourselves so the loop exits
-                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                            Some(hwnd),
-                            windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                    }
-                })
+                .with_devtools(true)
                 .build(&window)
                 .expect("Failed to build webview");
 
@@ -143,18 +170,28 @@ pub fn login_and_get_cookie() -> Result<String> {
             WEBVIEW.with(|wv| {
                 *wv.borrow_mut() = Some(webview);
             });
+            TX.with(|t| {
+                *t.borrow_mut() = Some(tx);
+            });
 
             let _ = ShowWindow(hwnd, SW_SHOW);
+            
+            // Start polling timer
+            let _ = SetTimer(Some(hwnd), 1, 1000, None);
 
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).into() {
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
             
-            // Clean up thread local
+            // Clean up
+            let _ = KillTimer(Some(hwnd), 1);
             WEBVIEW.with(|wv| {
                 *wv.borrow_mut() = None;
+            });
+            TX.with(|t| {
+                *t.borrow_mut() = None;
             });
             let _ = DestroyWindow(hwnd);
         }
