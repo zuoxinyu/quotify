@@ -119,19 +119,25 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
 
     match name {
         "deepseek" => {
+            if config.deepseek.enabled == Some(false) {
+                return None;
+            }
             let api_key = if !config.deepseek.api_key.is_empty() {
                 config.deepseek.api_key.clone()
             } else {
                 std::env::var("DEEPSEEK_API_KEY").unwrap_or_default()
             };
-            if config.deepseek.enabled || !api_key.is_empty() {
+            if config.deepseek.enabled.unwrap_or(false) || !api_key.is_empty() {
                 Some(Box::new(DeepSeekProvider::new(api_key, proxy)))
             } else {
                 None
             }
         }
         "openrouter" => {
-            if config.openrouter.enabled
+            if config.openrouter.enabled == Some(false) {
+                return None;
+            }
+            if config.openrouter.enabled.unwrap_or(false)
                 || !config.openrouter.api_key.is_empty()
                 || std::env::var("OPENROUTER_API_KEY")
                     .ok()
@@ -147,7 +153,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "openai" => {
-            if config.openai.enabled
+            if config.openai.enabled == Some(false) {
+                return None;
+            }
+            if config.openai.enabled.unwrap_or(false)
                 || !config.openai.api_key.is_empty()
                 || std::env::var("OPENAI_ADMIN_KEY")
                     .or_else(|_| std::env::var("OPENAI_API_KEY"))
@@ -164,7 +173,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "moonshot" => {
-            if config.moonshot.enabled
+            if config.moonshot.enabled == Some(false) {
+                return None;
+            }
+            if config.moonshot.enabled.unwrap_or(false)
                 || !config.moonshot.api_key.is_empty()
                 || std::env::var("MOONSHOT_API_KEY")
                     .or_else(|_| std::env::var("KIMI_API_KEY"))
@@ -181,7 +193,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "elevenlabs" => {
-            if config.elevenlabs.enabled
+            if config.elevenlabs.enabled == Some(false) {
+                return None;
+            }
+            if config.elevenlabs.enabled.unwrap_or(false)
                 || !config.elevenlabs.api_key.is_empty()
                 || std::env::var("ELEVENLABS_API_KEY")
                     .or_else(|_| std::env::var("XI_API_KEY"))
@@ -198,7 +213,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "doubao" => {
-            if config.doubao.enabled
+            if config.doubao.enabled == Some(false) {
+                return None;
+            }
+            if config.doubao.enabled.unwrap_or(false)
                 || !config.doubao.api_key.is_empty()
                 || std::env::var("ARK_API_KEY")
                     .or_else(|_| std::env::var("VOLCENGINE_API_KEY"))
@@ -216,7 +234,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "zai" => {
-            if config.zai.enabled
+            if config.zai.enabled == Some(false) {
+                return None;
+            }
+            if config.zai.enabled.unwrap_or(false)
                 || !config.zai.api_key.is_empty()
                 || std::env::var("Z_AI_API_KEY")
                     .or_else(|_| std::env::var("ZAI_API_KEY"))
@@ -233,7 +254,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "venice" => {
-            if config.venice.enabled
+            if config.venice.enabled == Some(false) {
+                return None;
+            }
+            if config.venice.enabled.unwrap_or(false)
                 || !config.venice.api_key.is_empty()
                 || std::env::var("VENICE_API_KEY")
                     .or_else(|_| std::env::var("VENICE_KEY"))
@@ -250,7 +274,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "crof" => {
-            if config.crof.enabled
+            if config.crof.enabled == Some(false) {
+                return None;
+            }
+            if config.crof.enabled.unwrap_or(false)
                 || !config.crof.api_key.is_empty()
                 || std::env::var("CROF_API_KEY")
                     .or_else(|_| std::env::var("CROFAI_API_KEY"))
@@ -267,7 +294,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "synthetic" => {
-            if config.synthetic.enabled
+            if config.synthetic.enabled == Some(false) {
+                return None;
+            }
+            if config.synthetic.enabled.unwrap_or(false)
                 || !config.synthetic.api_key.is_empty()
                 || std::env::var("SYNTHETIC_API_KEY")
                     .ok()
@@ -283,7 +313,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "warp" => {
-            if config.warp.enabled
+            if config.warp.enabled == Some(false) {
+                return None;
+            }
+            if config.warp.enabled.unwrap_or(false)
                 || !config.warp.api_key.is_empty()
                 || std::env::var("WARP_API_KEY")
                     .or_else(|_| std::env::var("WARP_TOKEN"))
@@ -300,7 +333,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "groqcloud" => {
-            if config.groqcloud.enabled
+            if config.groqcloud.enabled == Some(false) {
+                return None;
+            }
+            if config.groqcloud.enabled.unwrap_or(false)
                 || !config.groqcloud.api_key.is_empty()
                 || std::env::var("GROQ_API_KEY")
                     .or_else(|_| std::env::var("GROQCLOUD_API_KEY"))
@@ -317,7 +353,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "deepgram" => {
-            if config.deepgram.enabled
+            if config.deepgram.enabled == Some(false) {
+                return None;
+            }
+            if config.deepgram.enabled.unwrap_or(false)
                 || !config.deepgram.api_key.is_empty()
                 || std::env::var("DEEPGRAM_API_KEY")
                     .ok()
@@ -333,7 +372,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "llmproxy" => {
-            if config.llmproxy.enabled
+            if config.llmproxy.enabled == Some(false) {
+                return None;
+            }
+            if config.llmproxy.enabled.unwrap_or(false)
                 || !config.llmproxy.api_key.is_empty()
                 || std::env::var("LLM_PROXY_API_KEY")
                     .or_else(|_| std::env::var("LLMPROXY_API_KEY"))
@@ -350,7 +392,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "codebuff" => {
-            if config.codebuff.enabled
+            if config.codebuff.enabled == Some(false) {
+                return None;
+            }
+            if config.codebuff.enabled.unwrap_or(false)
                 || !config.codebuff.api_key.is_empty()
                 || CodebuffProvider::credentials_file_exists()
                 || std::env::var("CODEBUFF_API_KEY")
@@ -367,7 +412,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "kiro" => {
-            if config.kiro.enabled
+            if config.kiro.enabled == Some(false) {
+                return None;
+            }
+            if config.kiro.enabled.unwrap_or(false)
                 || !config.kiro.api_key.is_empty()
                 || std::env::var("KIRO_API_KEY")
                     .ok()
@@ -379,7 +427,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "copilot" => {
-            if config.copilot.enabled
+            if config.copilot.enabled == Some(false) {
+                return None;
+            }
+            if config.copilot.enabled.unwrap_or(false)
                 || !config.copilot.api_key.is_empty()
                 || std::env::var("GITHUB_COPILOT_TOKEN")
                     .or_else(|_| std::env::var("COPILOT_TOKEN"))
@@ -397,7 +448,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "azureopenai" => {
-            if config.azureopenai.enabled
+            if config.azureopenai.enabled == Some(false) {
+                return None;
+            }
+            if config.azureopenai.enabled.unwrap_or(false)
                 || !config.azureopenai.api_key.is_empty()
                 || std::env::var("AZURE_OPENAI_API_KEY")
                     .or_else(|_| std::env::var("AZURE_OPENAI_KEY"))
@@ -415,7 +469,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "ollama" => {
-            if config.ollama.enabled
+            if config.ollama.enabled == Some(false) {
+                return None;
+            }
+            if config.ollama.enabled.unwrap_or(false)
                 || !config.ollama.api_key.is_empty()
                 || std::env::var("OLLAMA_API_KEY")
                     .ok()
@@ -431,7 +488,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "minimax" => {
-            if config.minimax.enabled
+            if config.minimax.enabled == Some(false) {
+                return None;
+            }
+            if config.minimax.enabled.unwrap_or(false)
                 || !config.minimax.api_key.is_empty()
                 || std::env::var("MINIMAX_API_KEY")
                     .ok()
@@ -447,7 +507,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "jetbrains" => {
-            if config.jetbrains.enabled
+            if config.jetbrains.enabled == Some(false) {
+                return None;
+            }
+            if config.jetbrains.enabled.unwrap_or(false)
                 || !config.jetbrains.api_key.is_empty()
                 || JetBrainsProvider::quota_file_exists(&config.jetbrains.base_url)
             {
@@ -459,7 +522,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "kimi" => {
-            if config.kimi.enabled
+            if config.kimi.enabled == Some(false) {
+                return None;
+            }
+            if config.kimi.enabled.unwrap_or(false)
                 || !config.kimi.api_key.is_empty()
                 || std::env::var("KIMI_AUTH_TOKEN")
                     .ok()
@@ -475,7 +541,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "kilo" => {
-            if config.kilo.enabled
+            if config.kilo.enabled == Some(false) {
+                return None;
+            }
+            if config.kilo.enabled.unwrap_or(false)
                 || !config.kilo.api_key.is_empty()
                 || KiloProvider::has_cli_or_token(&config.kilo.api_key)
             {
@@ -485,7 +554,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "augment" => {
-            if config.augment.enabled
+            if config.augment.enabled == Some(false) {
+                return None;
+            }
+            if config.augment.enabled.unwrap_or(false)
                 || !config.augment.api_key.is_empty()
                 || AugmentProvider::has_cli_or_token(&config.augment.api_key)
             {
@@ -497,7 +569,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "bedrock" => {
-            if config.bedrock.enabled
+            if config.bedrock.enabled == Some(false) {
+                return None;
+            }
+            if config.bedrock.enabled.unwrap_or(false)
                 || std::env::var("AWS_ACCESS_KEY_ID").is_ok()
                 || std::env::var("AWS_PROFILE").is_ok()
                 || std::env::var("CODEXBAR_BEDROCK_BUDGET").is_ok()
@@ -510,7 +585,12 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "vertexai" => {
-            if config.vertexai.enabled || VertexAiProvider::has_project(&config.vertexai.api_key) {
+            if config.vertexai.enabled == Some(false) {
+                return None;
+            }
+            if config.vertexai.enabled.unwrap_or(false)
+                || VertexAiProvider::has_project(&config.vertexai.api_key)
+            {
                 Some(Box::new(VertexAiProvider::new(
                     config.vertexai.api_key.clone(),
                 )))
@@ -519,7 +599,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "stepfun" => {
-            if config.stepfun.enabled
+            if config.stepfun.enabled == Some(false) {
+                return None;
+            }
+            if config.stepfun.enabled.unwrap_or(false)
                 || !config.stepfun.api_key.is_empty()
                 || std::env::var("STEPFUN_TOKEN")
                     .or_else(|_| std::env::var("OASIS_TOKEN"))
@@ -536,7 +619,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "abacus" => {
-            if config.abacus.enabled
+            if config.abacus.enabled == Some(false) {
+                return None;
+            }
+            if config.abacus.enabled.unwrap_or(false)
                 || !config.abacus.api_key.is_empty()
                 || std::env::var("ABACUS_COOKIE")
                     .or_else(|_| std::env::var("ABACUS_COOKIE_HEADER"))
@@ -554,7 +640,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "alibabatoken" => {
-            if config.alibabatoken.enabled
+            if config.alibabatoken.enabled == Some(false) {
+                return None;
+            }
+            if config.alibabatoken.enabled.unwrap_or(false)
                 || !config.alibabatoken.api_key.is_empty()
                 || std::env::var("ALIBABA_TOKEN_PLAN_COOKIE")
                     .or_else(|_| std::env::var("ALIBABA_TOKEN_COOKIE"))
@@ -571,7 +660,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "t3chat" => {
-            if config.t3chat.enabled
+            if config.t3chat.enabled == Some(false) {
+                return None;
+            }
+            if config.t3chat.enabled.unwrap_or(false)
                 || !config.t3chat.api_key.is_empty()
                 || std::env::var("T3_CHAT_COOKIE")
                     .or_else(|_| std::env::var("T3CHAT_COOKIE"))
@@ -588,7 +680,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "amp" => {
-            if config.amp.enabled
+            if config.amp.enabled == Some(false) {
+                return None;
+            }
+            if config.amp.enabled.unwrap_or(false)
                 || !config.amp.api_key.is_empty()
                 || std::env::var("AMP_COOKIE")
                     .or_else(|_| std::env::var("AMPCODE_COOKIE"))
@@ -605,7 +700,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "mistral" => {
-            if config.mistral.enabled
+            if config.mistral.enabled == Some(false) {
+                return None;
+            }
+            if config.mistral.enabled.unwrap_or(false)
                 || !config.mistral.api_key.is_empty()
                 || std::env::var("MISTRAL_API_KEY")
                     .ok()
@@ -621,7 +719,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "grok" => {
-            if config.grok.enabled
+            if config.grok.enabled == Some(false) {
+                return None;
+            }
+            if config.grok.enabled.unwrap_or(false)
                 || !config.grok.api_key.is_empty()
                 || std::env::var("XAI_API_KEY")
                     .or_else(|_| std::env::var("GROK_API_KEY"))
@@ -638,7 +739,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "cursor" => {
-            if config.cursor.enabled
+            if config.cursor.enabled == Some(false) {
+                return None;
+            }
+            if config.cursor.enabled.unwrap_or(false)
                 || !config.cursor.api_key.is_empty()
                 || std::env::var("CURSOR_COOKIE")
                     .or_else(|_| std::env::var("CURSOR_SESSION_COOKIE"))
@@ -655,7 +759,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "droid" => {
-            if config.droid.enabled
+            if config.droid.enabled == Some(false) {
+                return None;
+            }
+            if config.droid.enabled.unwrap_or(false)
                 || !config.droid.api_key.is_empty()
                 || DroidProvider::has_cli_or_token(&config.droid.api_key)
             {
@@ -665,7 +772,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "windsurf" => {
-            if config.windsurf.enabled
+            if config.windsurf.enabled == Some(false) {
+                return None;
+            }
+            if config.windsurf.enabled.unwrap_or(false)
                 || !config.windsurf.api_key.is_empty()
                 || std::env::var("WINDSURF_SERVICE_KEY")
                     .or_else(|_| std::env::var("CODEIUM_SERVICE_KEY"))
@@ -682,6 +792,9 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "claude" => {
+            if config.claude.enabled == Some(false) {
+                return None;
+            }
             let session_key = if config.claude.session_key.is_empty() {
                 None
             } else {
@@ -703,7 +816,7 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                 Some(config.claude.auth_file.clone())
             };
 
-            let has_creds = config.claude.enabled
+            let has_creds = config.claude.enabled.unwrap_or(false)
                 || auth_file.is_some()
                 || session_key.is_some()
                 || api_key.is_some()
@@ -736,7 +849,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             }
         }
         "codex" => {
-            let has_auth = config.codex.enabled
+            if config.codex.enabled == Some(false) {
+                return None;
+            }
+            let has_auth = config.codex.enabled.unwrap_or(false)
                 || !config.codex.auth_file.is_empty()
                 || dirs::home_dir()
                     .unwrap_or_default()
@@ -760,7 +876,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             } else {
                 None
             };
-            if config.gemini.enabled
+            if config.gemini.enabled == Some(false) {
+                return None;
+            }
+            if config.gemini.enabled.unwrap_or(false)
                 || api_key.is_some()
                 || std::env::var("GEMINI_API_KEY").is_ok()
                 || std::env::var("GOOGLE_API_KEY").is_ok()
@@ -781,7 +900,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
             } else {
                 None
             };
-            if config.antigravity.enabled
+            if config.antigravity.enabled == Some(false) {
+                return None;
+            }
+            if config.antigravity.enabled.unwrap_or(false)
                 || api_key.is_some()
                 || std::env::var("ANTIGRAVITY_API_KEY").is_ok()
                 || std::env::var("ANTIGRAVITY_OAUTH_CREDENTIALS_JSON").is_ok()
@@ -809,7 +931,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                 Some(config.opencode.auth_cookie.clone())
             };
 
-            if config.opencode.enabled
+            if config.opencode.enabled == Some(false) {
+                return None;
+            }
+            if config.opencode.enabled.unwrap_or(false)
                 || workspace_id.is_some()
                 || auth_cookie.is_some()
                 || OpenCodeProvider::has_workspace_hint()
@@ -866,7 +991,10 @@ fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Pro
                 Some(config.mimo.cookie_header.clone())
             };
 
-            if config.mimo.enabled
+            if config.mimo.enabled == Some(false) {
+                return None;
+            }
+            if config.mimo.enabled.unwrap_or(false)
                 || service_token.is_some()
                 || cookie_header.is_some()
                 || std::env::var("MIMO_SERVICE_TOKEN")

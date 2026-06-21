@@ -63,10 +63,9 @@ impl MimoProvider {
 
         // 5. If everything fails, try to prompt webview login
         tracing::info!("No MiMo credentials found. Attempting WebView2 login...");
-        let full_cookie = tokio::task::spawn_blocking(|| {
-            crate::webview_login::login_and_get_cookie()
-        }).await??;
-        
+        let full_cookie =
+            tokio::task::spawn_blocking(|| crate::webview_login::login_and_get_cookie()).await??;
+
         // Save to config - prefer saving the full cookie header to avoid missing userId etc.
         if let Ok(mut config) = crate::config::AppConfig::load() {
             config.mimo.cookie_header = full_cookie.clone();
@@ -166,10 +165,10 @@ impl Provider for MimoProvider {
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             tracing::info!("MiMo token expired. Attempting WebView2 login...");
-            let full_cookie = tokio::task::spawn_blocking(|| {
-                crate::webview_login::login_and_get_cookie()
-            }).await??;
-            
+            let full_cookie =
+                tokio::task::spawn_blocking(|| crate::webview_login::login_and_get_cookie())
+                    .await??;
+
             // Save to config
             if let Ok(mut config) = crate::config::AppConfig::load() {
                 config.mimo.cookie_header = full_cookie.clone();
@@ -177,7 +176,7 @@ impl Provider for MimoProvider {
             }
 
             current_cookie_header = full_cookie;
-            
+
             // Retry request
             resp = self
                 .client
@@ -231,7 +230,10 @@ impl Provider for MimoProvider {
         if resp.status().is_success() {
             if let Ok(balance_resp) = resp.json::<MimoBalanceResponse>().await {
                 if let Some(data) = balance_resp.data {
-                    let total = data.balance.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    let total = data
+                        .balance
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
                     let currency = data.currency.unwrap_or_else(|| "CNY".to_string());
                     credits = Some(CreditsInfo {
                         balance: total,
@@ -301,7 +303,7 @@ impl Provider for MimoProvider {
                     });
                 }
             }
-            
+
             // If we didn't get credits from the balance API, try fallback to tokens remaining
             if credits.is_none() {
                 if let Some(usage) = &data.usage {

@@ -1,17 +1,21 @@
-use anyhow::{anyhow, Result};
-use std::sync::mpsc;
+use anyhow::{Result, anyhow};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, Win32WindowHandle, WindowHandle,
+    WindowsDisplayHandle,
+};
 use std::cell::RefCell;
-use wry::WebViewBuilder;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, DisplayHandle, WindowHandle, WindowsDisplayHandle, Win32WindowHandle, HandleError};
 use std::num::NonZeroIsize;
-use windows::core::w;
+use std::sync::mpsc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, RegisterClassW,
-    ShowWindow, TranslateMessage, CW_USEDEFAULT, MSG, SW_SHOW, WINDOW_EX_STYLE,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW, GetClientRect, SetTimer, KillTimer, WM_TIMER, WM_SIZE, WM_DESTROY, WM_CLOSE, PostQuitMessage, PostMessageW,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+    GetMessageW, KillTimer, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, SetTimer,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_SIZE, WM_TIMER,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
+use windows::core::w;
+use wry::WebViewBuilder;
 
 thread_local! {
     static WEBVIEW: RefCell<Option<wry::WebView>> = const { RefCell::new(None) };
@@ -55,7 +59,8 @@ unsafe extern "system" fn window_proc(
                         size: wry::dpi::PhysicalSize::new(
                             (rect.right - rect.left) as u32,
                             (rect.bottom - rect.top) as u32,
-                        ).into(),
+                        )
+                        .into(),
                     });
                 }
             });
@@ -80,19 +85,19 @@ unsafe extern "system" fn window_proc(
                             let name = cookie.name();
                             let value = cookie.value();
                             cookie_names.push(name.to_string());
-                            
+
                             if !cookies_str.is_empty() {
                                 cookies_str.push_str("; ");
                             }
                             cookies_str.push_str(&format!("{}={}", name, value));
-                            
+
                             // MiMo often uses api-platform_serviceToken or serviceToken
                             if name.to_lowercase().contains("servicetoken") && !value.is_empty() {
                                 tracing::info!("MiMo: Detected relevant token: {}", name);
                                 token_found = true;
                             }
                         }
-                        
+
                         if token_found {
                             TX.with(|tx| {
                                 if let Some(tx) = tx.borrow().as_ref() {
@@ -101,18 +106,16 @@ unsafe extern "system" fn window_proc(
                             });
                             // Close window
                             unsafe {
-                                let _ = PostMessageW(
-                                    Some(hwnd),
-                                    WM_CLOSE,
-                                    WPARAM(0),
-                                    LPARAM(0),
-                                );
+                                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                             }
                         } else {
                             if !cookie_names.is_empty() {
-                                tracing::debug!("MiMo: Waiting for serviceToken. Current cookies: {:?}", cookie_names);
+                                tracing::debug!(
+                                    "MiMo: Waiting for serviceToken. Current cookies: {:?}",
+                                    cookie_names
+                                );
                             }
-                            
+
                             // Show window after 3 seconds if not auto-logged in
                             if current_ticks == 3 {
                                 tracing::info!("MiMo: Manual login required, showing window...");
@@ -141,14 +144,14 @@ pub fn login_and_get_cookie() -> Result<String> {
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap_or_default();
             let class_name = w!("QuotifyMimoLoginClass");
-            
+
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(window_proc),
                 hInstance: hinstance.into(),
                 lpszClassName: class_name,
                 ..Default::default()
             };
-            
+
             RegisterClassW(&wc);
 
             let hwnd = CreateWindowExW(
@@ -164,7 +167,8 @@ pub fn login_and_get_cookie() -> Result<String> {
                 None,
                 Some(hinstance.into()),
                 None,
-            ).expect("Failed to create window");
+            )
+            .expect("Failed to create window");
 
             let window = RawWindow { hwnd };
 
@@ -187,7 +191,8 @@ pub fn login_and_get_cookie() -> Result<String> {
                 size: wry::dpi::PhysicalSize::new(
                     (rect.right - rect.left) as u32,
                     (rect.bottom - rect.top) as u32,
-                ).into(),
+                )
+                .into(),
             });
 
             WEBVIEW.with(|wv| {
@@ -196,7 +201,7 @@ pub fn login_and_get_cookie() -> Result<String> {
             TX.with(|t| {
                 *t.borrow_mut() = Some(tx);
             });
-            
+
             // Start polling timer (window starts hidden)
             let _ = SetTimer(Some(hwnd), 1, 1000, None);
 
@@ -205,7 +210,7 @@ pub fn login_and_get_cookie() -> Result<String> {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            
+
             // Clean up
             let _ = KillTimer(Some(hwnd), 1);
             WEBVIEW.with(|wv| {
@@ -223,7 +228,9 @@ pub fn login_and_get_cookie() -> Result<String> {
 
     let res = rx.recv().unwrap_or_else(|_| "".to_string());
     if res.is_empty() {
-        Err(anyhow!("Window closed before login was completed or no cookie found"))
+        Err(anyhow!(
+            "Window closed before login was completed or no cookie found"
+        ))
     } else {
         Ok(res)
     }

@@ -34,16 +34,16 @@ pub struct NetworkConfig {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct DeepSeekConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub api_key: String,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyProviderConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub api_key: String,
     #[serde(default)]
@@ -54,8 +54,8 @@ pub struct ApiKeyProviderConfig {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub auth_file: String,
     #[serde(default)]
@@ -68,24 +68,24 @@ pub struct ClaudeConfig {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct CodexConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub auth_file: String,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub api_key: String,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct OpenCodeConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub api_key: String,
     #[serde(default)]
@@ -96,8 +96,8 @@ pub struct OpenCodeConfig {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct MimoConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub api_key: String,
     #[serde(default)]
@@ -108,8 +108,8 @@ pub struct MimoConfig {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct AntigravityConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub api_key: String,
 }

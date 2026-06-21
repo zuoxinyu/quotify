@@ -206,6 +206,8 @@ impl eframe::App for QuotifyApp {
         ]
         .into();
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        // Disable the top/bottom fade-out gradients on the card scroll area.
+        style.spacing.scroll.fade.strength = 0.0;
         ctx.set_global_style(style);
 
         ctx.set_visuals(visuals);
@@ -379,7 +381,7 @@ impl eframe::App for QuotifyApp {
                         drag: !provider_drag_active,
                         ..egui::containers::scroll_area::ScrollSource::ALL
                     };
-                    egui::ScrollArea::vertical()
+                    let _scroll_output = egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .hscroll(false)
                         .scroll_source(scroll_source)
@@ -387,13 +389,36 @@ impl eframe::App for QuotifyApp {
                             let data = self.data.read().clone();
                             let all_providers = provider_display_order(&self.config);
 
-                            let dragging_any = self.drag.dragging_provider.is_some();
+                            // Compute the scrollbar's interactive rect — matches egui's own
+                            // `max_bar_rect` for the floating vertical scrollbar. When the
+                            // pointer is inside this area the scrollbar owns the interaction,
+                            // so we must not arm or continue any card drag.
+                            let scroll_style = &ui.style().spacing.scroll;
+                            let content_right = ui.max_rect().max.x;
+                            let scrollbar_left = content_right
+                                - scroll_style.bar_outer_margin
+                                - scroll_style.bar_width;
+                            let pointer_in_scrollbar = ctx.input(|i| {
+                                i.pointer
+                                    .hover_pos()
+                                    .is_some_and(|pos| pos.x >= scrollbar_left)
+                            });
+
+                            if pointer_in_scrollbar {
+                                // Scrollbar owns the interaction — cancel any pending card hold
+                                // so a long-press that drifts onto the bar doesn't arm a drag.
+                                self.drag.held_provider = None;
+                                self.drag.hold_started = None;
+                            }
+
                             let mut shown = 0usize;
                             for (name, display_name) in all_providers {
                                 let Some(provider_data) = data.iter().find(|d| d.provider == name) else {
                                     continue;
                                 };
-                                let collapse = dragging_any && self.drag.dragging_provider.as_deref() != Some(&name);
+                                // Keep all cards at full height while dragging so positions stay
+                                // stable and autoscroll moves smoothly. Only the dragged card is
+                                // dimmed via set_opacity in render_provider.
                                 let is_dragged = self.drag.dragging_provider.as_deref() == Some(&name);
                                 let response = render_provider(
                                     ui,
@@ -405,10 +430,12 @@ impl eframe::App for QuotifyApp {
                                     &mut self.config,
                                     self.config_path.as_ref(),
                                     &self.data,
-                                    collapse,
+                                    false,
                                     is_dragged,
                                 );
-                                self.handle_provider_drag(&ctx, &response, &name);
+                                if !pointer_in_scrollbar {
+                                    self.handle_provider_drag(&ctx, &response, &name);
+                                }
                                 shown += 1;
                                 ui.add_space(6.0);
                             }
