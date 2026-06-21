@@ -118,7 +118,9 @@ impl eframe::App for QuotifyApp {
                 egui::Color32::from_rgb(26, 26, 26)
             };
 
-            // Semi-transparent Acrylic Plate card backgrounds (Dark mode)
+            // Semi-transparent Acrylic Plate card backgrounds (Dark mode).
+            // Cards stay fairly opaque for text contrast, while the panel
+            // background between them is transparent to show the Mica backdrop.
             v.widgets.noninteractive.bg_fill =
                 egui::Color32::from_rgba_premultiplied(45, 45, 45, 200);
             v.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(50, 50, 50, 200);
@@ -150,7 +152,9 @@ impl eframe::App for QuotifyApp {
                 egui::Color32::from_rgb(255, 255, 255)
             };
 
-            // Semi-transparent Acrylic Plate card backgrounds (Light mode)
+            // Semi-transparent Acrylic Plate card backgrounds (Light mode).
+            // Cards stay fairly opaque for text contrast, while the panel
+            // background between them is transparent to show the Mica backdrop.
             v.widgets.noninteractive.bg_fill =
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 180);
             v.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(249, 249, 249, 180);
@@ -215,15 +219,18 @@ impl eframe::App for QuotifyApp {
         // Semi-transparent popup panel to let native Mica show through.
         // We let Windows DWM handle the window rounded corners and native border/shadow,
         // avoiding drawing a second rounded border in egui to prevent mismatched curvatures.
+        // Native Win11 flyout: cards stay opaque for contrast, the panel
+        // background is fully transparent so the Mica backdrop shows through
+        // the gaps between cards. Without Mica we fall back to a solid fill.
         let panel_bg = if is_dark {
             if is_mica {
-                egui::Color32::from_rgba_premultiplied(20, 20, 20, 30)
+                egui::Color32::TRANSPARENT
             } else {
                 egui::Color32::from_rgb(32, 32, 32)
             }
         } else {
             if is_mica {
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)
+                egui::Color32::TRANSPARENT
             } else {
                 egui::Color32::from_rgb(243, 243, 243)
             }
