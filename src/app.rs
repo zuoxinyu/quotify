@@ -58,10 +58,21 @@ impl QuotifyApp {
 struct ProviderDragState {
     held_provider: Option<String>,
     hold_started: Option<Instant>,
-    dragging_provider: Option<String>,
+    dragging: Option<ProviderDragPayload>,
     pointer_offset: Option<egui::Vec2>,
     card_size: Option<egui::Vec2>,
-    order_dirty: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProviderDragPayload {
+    provider: String,
+    row: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProviderDropTarget {
+    Item { provider: String, row: usize },
+    End,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,7 +394,7 @@ impl eframe::App for QuotifyApp {
                     self.render_about_page(ui, &ctx, card_width, card_left_indent);
                 } else {
                     let provider_drag_active =
-                        self.drag.held_provider.is_some() || self.drag.dragging_provider.is_some();
+                        self.drag.held_provider.is_some() || self.drag.dragging.is_some();
                     let scroll_source = egui::containers::scroll_area::ScrollSource {
                         drag: !provider_drag_active,
                         ..egui::containers::scroll_area::ScrollSource::ALL
@@ -395,16 +406,16 @@ impl eframe::App for QuotifyApp {
                         .show(ui, |ui| {
                             let data = self.data.read().clone();
                             let all_providers = provider_display_order(&self.config);
+                            let visible_providers = all_providers
+                                .into_iter()
+                                .filter(|(name, _)| data.iter().any(|d| d.provider == *name))
+                                .collect::<Vec<_>>();
 
                             // Compute the scrollbar's interactive rect — matches egui's own
                             // `max_bar_rect` for the floating vertical scrollbar. When the
                             // pointer is inside this area the scrollbar owns the interaction,
                             // so we must not arm or continue any card drag.
-                            let scroll_style = &ui.style().spacing.scroll;
-                            let content_right = ui.max_rect().max.x;
-                            let scrollbar_left = content_right
-                                - scroll_style.bar_outer_margin
-                                - scroll_style.bar_width;
+                            let scrollbar_left = provider_scrollbar_left(ui);
                             let pointer_in_scrollbar = ctx.input(|i| {
                                 i.pointer
                                     .hover_pos()
@@ -418,18 +429,25 @@ impl eframe::App for QuotifyApp {
                                 self.drag.hold_started = None;
                             }
 
-                            let mut shown = 0usize;
-                            for (name, display_name) in all_providers {
-                                let Some(provider_data) = data.iter().find(|d| d.provider == name) else {
+                            let mut drop_target = None;
+                            let mut last_card_bottom = None;
+                            for (row_idx, (name, display_name)) in
+                                visible_providers.iter().enumerate()
+                            {
+                                let Some(provider_data) = data.iter().find(|d| d.provider == *name) else {
                                     continue;
                                 };
                                 // Keep all cards at full height while dragging so positions stay
                                 // stable and autoscroll moves smoothly. Only the dragged card is
                                 // dimmed via set_opacity in render_provider.
-                                let is_dragged = self.drag.dragging_provider.as_deref() == Some(&name);
+                                let is_dragged = self
+                                    .drag
+                                    .dragging
+                                    .as_ref()
+                                    .is_some_and(|payload| payload.provider == *name);
                                 let response = render_provider(
                                     ui,
-                                    &name,
+                                    name,
                                     display_name,
                                     Some(provider_data),
                                     card_width,
@@ -441,17 +459,40 @@ impl eframe::App for QuotifyApp {
                                     is_dragged,
                                 );
                                 if !pointer_in_scrollbar {
-                                    self.handle_provider_drag(&ctx, &response, &name);
+                                    drop_target = drop_target.or_else(|| {
+                                        self.handle_provider_drag(&ctx, ui, &response, name, row_idx)
+                                    });
                                 }
-                                shown += 1;
+                                last_card_bottom = Some(response.rect.bottom());
                                 ui.add_space(6.0);
                             }
 
                             self.autoscroll_provider_drag(ui, &ctx, card_width);
 
-                            self.finish_provider_drag_if_released(&ctx);
+                            if drop_target.is_none()
+                                && self.drag.dragging.is_some()
+                                && !ctx.input(|i| i.pointer.primary_down())
+                                && ctx.input(|i| {
+                                    i.pointer.hover_pos().is_some_and(|pos| {
+                                        ui.clip_rect().contains(pos)
+                                            && last_card_bottom.is_some_and(|bottom| pos.y > bottom)
+                                    })
+                                })
+                            {
+                                drop_target = Some(ProviderDropTarget::End);
+                            }
 
-                            if shown == 0 {
+                            let visible_provider_names = visible_providers
+                                .iter()
+                                .map(|(name, _)| name.as_str())
+                                .collect::<Vec<_>>();
+                            self.finish_provider_drag_if_released(
+                                &ctx,
+                                drop_target,
+                                &visible_provider_names,
+                            );
+
+                            if visible_providers.is_empty() {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(48.0);
                                     ui.label(
@@ -466,7 +507,7 @@ impl eframe::App for QuotifyApp {
                 }
 
                 // If a card is being dragged, render a floating preview of the card that follows the mouse cursor
-                if let Some(dragging_name) = &self.drag.dragging_provider {
+                if let Some(dragging) = &self.drag.dragging {
                     if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
                         let preview_rect = self.dragged_provider_rect(pointer_pos, card_width);
 
@@ -484,12 +525,14 @@ impl eframe::App for QuotifyApp {
                                     .linear_multiply(0.85);
 
                                 let data = self.data.read().clone();
-                                if let Some(provider_data) = data.iter().find(|d| d.provider == *dragging_name) {
+                                if let Some(provider_data) =
+                                    data.iter().find(|d| d.provider == dragging.provider)
+                                {
                                     let display_name = provider_catalog()
                                         .iter()
-                                        .find(|(id, _)| id.eq_ignore_ascii_case(dragging_name))
+                                        .find(|(id, _)| id.eq_ignore_ascii_case(&dragging.provider))
                                         .map(|(_, d)| *d)
-                                        .unwrap_or(dragging_name)
+                                        .unwrap_or(&dragging.provider)
                                         .to_string();
 
                                     let status = match provider_data.error.is_some() {
@@ -512,7 +555,7 @@ impl eframe::App for QuotifyApp {
                                         ui.set_max_width(card_width);
                                         render_provider_card(
                                             ui,
-                                            dragging_name,
+                                            &dragging.provider,
                                             &display_name,
                                             status,
                                             credits,
@@ -538,7 +581,7 @@ impl eframe::App for QuotifyApp {
 
 impl QuotifyApp {
     fn reload_config_if_due(&mut self) {
-        if self.drag.dragging_provider.is_some()
+        if self.drag.dragging.is_some()
             || self.last_config_reload.elapsed() < Duration::from_secs(2)
         {
             return;
@@ -586,7 +629,7 @@ impl QuotifyApp {
     }
 
     fn autoscroll_provider_drag(&self, ui: &mut egui::Ui, ctx: &egui::Context, card_width: f32) {
-        if self.drag.dragging_provider.is_none() {
+        if self.drag.dragging.is_none() {
             return;
         }
 
@@ -632,62 +675,82 @@ impl QuotifyApp {
     fn handle_provider_drag(
         &mut self,
         ctx: &egui::Context,
+        ui: &egui::Ui,
         response: &egui::Response,
         provider_name: &str,
-    ) {
+        row_idx: usize,
+    ) -> Option<ProviderDropTarget> {
         let pointer_down = ctx.input(|i| i.pointer.primary_down());
-        if !pointer_down {
-            return;
+        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+        let contains_pointer = pointer_pos.is_some_and(|pos| response.rect.contains(pos));
+        let can_start_from_card = response.contains_pointer();
+
+        if self.drag.dragging.is_some() && contains_pointer {
+            let insert_after = pointer_pos.is_some_and(|pos| pos.y >= response.rect.center().y);
+            paint_provider_drop_preview(ui, response.rect, insert_after);
+
+            if !pointer_down {
+                return Some(ProviderDropTarget::Item {
+                    provider: provider_name.to_string(),
+                    row: row_idx + usize::from(insert_after),
+                });
+            }
         }
 
-        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
-        let hovered = pointer_pos.is_some_and(|pos| response.rect.contains(pos));
+        if !pointer_down {
+            return None;
+        }
 
         let now = Instant::now();
-        if hovered && self.drag.held_provider.is_none() {
+        if can_start_from_card && self.drag.held_provider.is_none() {
             self.drag.held_provider = Some(provider_name.to_string());
             self.drag.hold_started = Some(now);
         }
 
         let pointer_moved = ctx.input(|i| i.pointer.delta().length_sq() > 0.25);
         if self.drag.held_provider.as_deref() == Some(provider_name)
-            && self.drag.dragging_provider.is_none()
+            && self.drag.dragging.is_none()
             && self
                 .drag
                 .hold_started
                 .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(350))
             && pointer_moved
         {
-            self.drag.dragging_provider = Some(provider_name.to_string());
+            self.drag.dragging = Some(ProviderDragPayload {
+                provider: provider_name.to_string(),
+                row: row_idx,
+            });
             self.drag.pointer_offset = pointer_pos.map(|pos| pos - response.rect.min);
             self.drag.card_size = Some(response.rect.size());
         }
-
-        let Some(dragging_provider) = self.drag.dragging_provider.clone() else {
-            return;
-        };
-
-        if dragging_provider == provider_name || !hovered {
-            return;
-        }
-
-        if reorder_provider(
-            &mut self.config.general.provider_order,
-            &dragging_provider,
-            provider_name,
-        ) {
-            self.drag.order_dirty = true;
-            ctx.request_repaint();
-        }
+        None
     }
 
-    fn finish_provider_drag_if_released(&mut self, ctx: &egui::Context) {
+    fn finish_provider_drag_if_released(
+        &mut self,
+        ctx: &egui::Context,
+        drop_target: Option<ProviderDropTarget>,
+        visible_providers: &[&str],
+    ) {
         if ctx.input(|i| i.pointer.primary_down()) {
             return;
         }
 
-        if self.drag.order_dirty {
+        let changed =
+            if let (Some(dragging), Some(target)) = (self.drag.dragging.as_ref(), drop_target) {
+                reorder_provider(
+                    &mut self.config.general.provider_order,
+                    dragging,
+                    target,
+                    visible_providers,
+                )
+            } else {
+                false
+            };
+
+        if changed {
             self.save_config();
+            ctx.request_repaint();
         }
         self.drag = ProviderDragState::default();
     }
@@ -821,26 +884,90 @@ fn ensure_provider_order(order: &mut Vec<String>) {
     *order = normalized;
 }
 
-fn reorder_provider(order: &mut Vec<String>, dragged: &str, target: &str) -> bool {
+fn reorder_provider(
+    order: &mut Vec<String>,
+    dragged: &ProviderDragPayload,
+    target: ProviderDropTarget,
+    visible_providers: &[&str],
+) -> bool {
     ensure_provider_order(order);
-    let Some(from) = order.iter().position(|id| id == dragged) else {
+
+    let mut visible_order = visible_providers
+        .iter()
+        .map(|provider| (*provider).to_string())
+        .collect::<Vec<_>>();
+    let Some(from) = visible_order
+        .iter()
+        .position(|provider| provider == &dragged.provider)
+    else {
         return false;
     };
-    let Some(to) = order.iter().position(|id| id == target) else {
-        return false;
+
+    let mut to = match target {
+        ProviderDropTarget::Item { provider, row } => {
+            if provider == dragged.provider {
+                row
+            } else {
+                visible_order
+                    .iter()
+                    .position(|candidate| candidate == &provider)
+                    .map(|target_row| {
+                        if row > target_row {
+                            target_row + 1
+                        } else {
+                            target_row
+                        }
+                    })
+                    .unwrap_or(row)
+            }
+        }
+        ProviderDropTarget::End => visible_order.len(),
     };
-    if from == to {
+
+    if from < to {
+        to -= 1;
+    }
+    to = to.min(visible_order.len().saturating_sub(1));
+    if from == to || from == dragged.row && from == to {
         return false;
     }
 
-    let item = order.remove(from);
-    let target_index = order.iter().position(|id| id == target).unwrap_or(to);
-    order.insert(target_index, item);
+    let item = visible_order.remove(from);
+    visible_order.insert(to, item);
+
+    let mut reordered_visible = visible_order.into_iter();
+    for provider in order.iter_mut() {
+        if visible_providers
+            .iter()
+            .any(|visible| provider.eq_ignore_ascii_case(visible))
+            && let Some(next_visible) = reordered_visible.next()
+        {
+            *provider = next_visible;
+        }
+    }
+
     true
 }
 
 fn provider_drag_scroll_step(overflow: f32) -> f32 {
     (overflow * 0.55 + overflow.powf(1.25) * 0.18).clamp(3.0, 90.0)
+}
+
+fn provider_scrollbar_left(ui: &egui::Ui) -> f32 {
+    let scroll_style = &ui.style().spacing.scroll;
+    let full_width = scroll_style.bar_width.max(scroll_style.floating_width);
+    ui.clip_rect().max.x - scroll_style.bar_outer_margin - full_width
+}
+
+fn paint_provider_drop_preview(ui: &egui::Ui, rect: egui::Rect, insert_after: bool) {
+    let y = if insert_after {
+        rect.bottom()
+    } else {
+        rect.top()
+    };
+    let stroke = ui.visuals().selection.stroke;
+    ui.painter()
+        .hline(rect.x_range(), y, egui::Stroke::new(2.0, stroke.color));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1819,5 +1946,75 @@ mod tests {
         assert!(!is_newer("v0.2.0", "v0.1.0"));
         assert!(!is_newer("v0.1.0", "v0.1.0"));
         assert!(is_newer("v0.1.0", "1.0.0"));
+    }
+
+    #[test]
+    fn test_reorder_provider_moves_to_item_row() {
+        let mut order = vec![
+            "openai".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+        ];
+        let dragged = ProviderDragPayload {
+            provider: "codex".to_string(),
+            row: 2,
+        };
+
+        assert!(reorder_provider(
+            &mut order,
+            &dragged,
+            ProviderDropTarget::Item {
+                provider: "openai".to_string(),
+                row: 0,
+            },
+            &["openai", "claude", "codex"],
+        ));
+        assert_eq!(&order[..3], ["codex", "openai", "claude"]);
+    }
+
+    #[test]
+    fn test_reorder_provider_moves_to_visible_end_without_moving_hidden_slots() {
+        let mut order = vec![
+            "openai".to_string(),
+            "deepseek".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+        ];
+        let dragged = ProviderDragPayload {
+            provider: "openai".to_string(),
+            row: 0,
+        };
+
+        assert!(reorder_provider(
+            &mut order,
+            &dragged,
+            ProviderDropTarget::End,
+            &["openai", "claude", "codex"],
+        ));
+        assert_eq!(&order[..4], ["claude", "deepseek", "codex", "openai"]);
+    }
+
+    #[test]
+    fn test_reorder_provider_ignores_same_position_drop() {
+        let mut order = vec![
+            "openai".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+        ];
+        let dragged = ProviderDragPayload {
+            provider: "claude".to_string(),
+            row: 1,
+        };
+
+        assert!(!reorder_provider(
+            &mut order,
+            &dragged,
+            ProviderDropTarget::Item {
+                provider: "claude".to_string(),
+                row: 1,
+            },
+            &["openai", "claude", "codex"],
+        ));
+        assert_eq!(&order[..3], ["openai", "claude", "codex"]);
     }
 }
