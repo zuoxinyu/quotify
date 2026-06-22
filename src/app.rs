@@ -190,6 +190,8 @@ impl eframe::App for QuotifyApp {
         visuals.widgets.inactive.corner_radius = 6.into(); // standard Win11 control rounding
         visuals.widgets.hovered.corner_radius = 6.into();
         visuals.widgets.active.corner_radius = 6.into();
+        visuals.popup_shadow = egui::Shadow::NONE;
+        visuals.window_shadow = egui::Shadow::NONE;
 
         // Set WinUI 3 typography metrics
         let mut style = (*ctx.global_style()).clone();
