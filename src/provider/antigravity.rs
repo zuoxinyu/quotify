@@ -29,11 +29,20 @@ struct AntigravityCredentials {
     expiry_millis: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum QuotaWindowType {
+    FiveHour,
+    Daily,
+    Weekly,
+    Unknown,
+}
+
 #[derive(Clone)]
 struct AntigravityQuotaEntry {
     model_id: String,
     remaining_percent: f64,
     reset_time: Option<chrono::DateTime<Utc>>,
+    window_type: QuotaWindowType,
 }
 
 impl AntigravityProvider {
@@ -162,6 +171,7 @@ impl Provider for AntigravityProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
+        // Try local language server first to inspect what models it exposes
         match self.fetch_local_language_server_usage().await {
             Ok(windows) if !windows.is_empty() => {
                 return Ok(UsageData {
@@ -177,6 +187,26 @@ impl Provider for AntigravityProvider {
             }
             Err(e) => {
                 tracing::debug!("Antigravity local language server quota fetch failed: {e}");
+            }
+        }
+
+        // Try remote fetch if local fails
+        if let Some(credentials) = Self::read_oauth_credentials() {
+            match self.fetch_remote_quota(credentials).await {
+                Ok(windows) => {
+                    if !windows.is_empty() {
+                        return Ok(UsageData {
+                            provider: self.name().to_string(),
+                            windows,
+                            credits: None,
+                            fetched_at: Utc::now(),
+                            error: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Antigravity remote quota fetch failed: {e}");
+                }
             }
         }
 
@@ -199,24 +229,7 @@ impl Provider for AntigravityProvider {
             }
         })?;
 
-        let access_token = self.resolve_access_token(credentials.clone()).await?;
-        let quota = match self.fetch_quota_with_token(&access_token).await {
-            Ok(quota) => quota,
-            Err(e) if is_auth_error(&e) => {
-                tracing::debug!("Antigravity quota token rejected, refreshing and retrying: {e}");
-                let refresh_token = credentials.refresh_token.clone().context(
-                    "Antigravity OAuth token was rejected and no refresh token is available",
-                )?;
-                let refreshed = self
-                    .refresh_access_token(credentials, &refresh_token)
-                    .await
-                    .context("Antigravity OAuth token was rejected and refresh failed")?;
-                self.fetch_quota_with_token(&refreshed).await?
-            }
-            Err(e) => return Err(e),
-        };
-        let windows = parse_antigravity_quota(&quota);
-
+        let windows = self.fetch_remote_quota(credentials).await?;
         if windows.is_empty() {
             anyhow::bail!("Antigravity quota response did not contain model usage data");
         }
@@ -231,24 +244,118 @@ impl Provider for AntigravityProvider {
     }
 }
 
+enum QuotaOrSummary {
+    Quota(serde_json::Value),
+    Summary(serde_json::Value),
+}
+
 impl AntigravityProvider {
-    async fn fetch_quota_with_token(&self, access_token: &str) -> Result<serde_json::Value> {
-        let project = match self.load_code_assist_project(access_token).await {
-            Ok(project) => {
-                tracing::debug!("Antigravity loadCodeAssist project: {project:?}");
-                project
+    async fn fetch_remote_quota(
+        &self,
+        credentials: AntigravityCredentials,
+    ) -> Result<Vec<UsageWindow>> {
+        let access_token = self.resolve_access_token(credentials.clone()).await?;
+        let quota_summary_or_quota = match self.fetch_remote_quota_with_token(&access_token).await {
+            Ok(val) => val,
+            Err(e) if is_auth_error(&e) => {
+                tracing::debug!("Antigravity quota token rejected, refreshing and retrying: {e}");
+                let refresh_token = credentials.refresh_token.clone().context(
+                    "Antigravity OAuth token was rejected and no refresh token is available",
+                )?;
+                let refreshed = self
+                    .refresh_access_token(credentials, &refresh_token)
+                    .await
+                    .context("Antigravity OAuth token was rejected and refresh failed")?;
+                self.fetch_remote_quota_with_token(&refreshed).await?
             }
+            Err(e) => return Err(e),
+        };
+
+        match quota_summary_or_quota {
+            QuotaOrSummary::Summary(summary) => {
+                let windows = parse_antigravity_quota_summary(&summary);
+                if !windows.is_empty() {
+                    return Ok(windows);
+                }
+                anyhow::bail!("Antigravity remote summary parsed to empty windows");
+            }
+            QuotaOrSummary::Quota(quota) => {
+                let windows = parse_antigravity_quota(&quota);
+                Ok(windows)
+            }
+        }
+    }
+
+    async fn fetch_remote_quota_with_token(&self, access_token: &str) -> Result<QuotaOrSummary> {
+        let fallback_proj = self
+            .discover_project_fallback(access_token)
+            .await
+            .ok()
+            .flatten();
+
+        let project = match self.load_code_assist_project(access_token).await {
+            Ok(project) => project,
             Err(e) => {
                 tracing::debug!("Antigravity loadCodeAssist project discovery failed: {e}");
-                self.discover_project_fallback(access_token)
-                    .await
-                    .ok()
-                    .flatten()
+                fallback_proj
             }
         };
 
-        self.retrieve_user_quota(access_token, project.as_deref())
+        let body = if let Some(project) = project.as_deref().filter(|p| !p.is_empty()) {
+            json!({ "project": project })
+        } else {
+            json!({})
+        };
+
+        // Try retrieveUserQuotaSummary first
+        let summary_urls = [
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+        ];
+
+        for url in summary_urls {
+            if let Ok(resp) = self
+                .client
+                .post(url)
+                .bearer_auth(access_token)
+                .json(&body)
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if json.get("response").and_then(|r| r.get("groups")).is_some()
+                            || json.get("groups").is_some()
+                        {
+                            return Ok(QuotaOrSummary::Summary(json));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to retrieveUserQuota
+        let resp = self
+            .client
+            .post(ANTIGRAVITY_QUOTA_URL)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
             .await
+            .context("Failed to call Antigravity quota API")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Antigravity quota API error: {status} - {body}");
+        }
+
+        let json = resp
+            .json()
+            .await
+            .context("Failed to parse Antigravity quota response")?;
+
+        Ok(QuotaOrSummary::Quota(json))
     }
 
     async fn fetch_local_language_server_usage(&self) -> Result<Vec<UsageWindow>> {
@@ -270,10 +377,32 @@ impl AntigravityProvider {
             .or_else(local_language_server_csrf_token)
             .context("Antigravity local language server CSRF token not found")?;
 
+        // 1. Try to get summary first (which includes weekly and five hour limits)
+        let summary_url = format!(
+            "{base_url}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+        );
+        if let Ok(resp) = local_client
+            .post(&summary_url)
+            .header("x-codeium-csrf-token", &csrf)
+            .json(&json!({}))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    let parsed = parse_antigravity_quota_summary(&json);
+                    if !parsed.is_empty() {
+                        return Ok(parsed);
+                    }
+                }
+            }
+        }
+
+        // 2. Fall back to GetAvailableModels if summary fails
         let url = format!("{base_url}{ANTIGRAVITY_GET_AVAILABLE_MODELS_PATH}");
         let resp = local_client
             .post(url)
-            .header("x-codeium-csrf-token", csrf)
+            .header("x-codeium-csrf-token", &csrf)
             .json(&json!({}))
             .send()
             .await
@@ -421,41 +550,11 @@ impl AntigravityProvider {
             .json()
             .await
             .context("Failed to parse Google Cloud projects response")?;
+        println!(
+            "LISTED PROJECTS: {}",
+            serde_json::to_string_pretty(&json).unwrap()
+        );
         Ok(select_antigravity_project(&json))
-    }
-
-    async fn retrieve_user_quota(
-        &self,
-        access_token: &str,
-        project: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        let body = if let Some(project) = project.filter(|project| !project.is_empty()) {
-            json!({ "project": project })
-        } else {
-            json!({})
-        };
-
-        let resp = self
-            .client
-            .post(ANTIGRAVITY_QUOTA_URL)
-            .bearer_auth(access_token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to call Antigravity quota API: {e:?}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Antigravity quota API error: {status} - {body}");
-        }
-
-        let json = resp
-            .json()
-            .await
-            .context("Failed to parse Antigravity quota response")?;
-        tracing::debug!("Antigravity quota raw response: {json:?}");
-        Ok(json)
     }
 }
 
@@ -598,63 +697,144 @@ fn parse_antigravity_available_models(value: &serde_json::Value) -> Vec<UsageWin
                 .map(|dt| dt.to_utc())
         };
 
-        entries.push((
-            label,
-            AntigravityQuotaEntry {
-                model_id,
-                remaining_percent,
-                reset_time: resets_at,
-            },
-        ));
+        let mut win = detect_window_type(&model_id);
+        if win == QuotaWindowType::Unknown {
+            win = detect_window_type(&label);
+        }
+
+        entries.push(AntigravityQuotaEntry {
+            model_id: model_id.clone(),
+            remaining_percent,
+            reset_time: resets_at,
+            window_type: win,
+        });
     }
 
-    if entries.is_empty() {
-        return Vec::new();
+    group_antigravity_entries(&entries)
+}
+
+fn map_antigravity_label(group_name: &str, bucket_name: &str) -> String {
+    let lower_group = group_name.to_ascii_lowercase();
+    let lower_bucket = bucket_name.to_ascii_lowercase();
+
+    let prefix = if lower_group.contains("gemini") {
+        "Gemini"
+    } else if lower_group.contains("claude") || lower_group.contains("gpt") {
+        "Claude"
+    } else {
+        group_name
+    };
+
+    let suffix = if lower_bucket.contains("five_hour")
+        || lower_bucket.contains("fivehour")
+        || lower_bucket.contains("five hour")
+        || lower_bucket.contains("5h")
+        || lower_bucket.contains("5hour")
+        || lower_bucket.contains("session")
+    {
+        "5h"
+    } else if lower_bucket.contains("seven_day")
+        || lower_bucket.contains("seven day")
+        || lower_bucket.contains("sevenday")
+        || lower_bucket.contains("7d")
+        || lower_bucket.contains("7day")
+        || lower_bucket.contains("weekly")
+        || lower_bucket.contains("week")
+    {
+        "Weekly"
+    } else if lower_bucket.contains("day")
+        || lower_bucket.contains("daily")
+        || lower_bucket.contains("24h")
+        || lower_bucket.contains("24hour")
+    {
+        "Daily"
+    } else {
+        bucket_name
+    };
+
+    if prefix == group_name && suffix == bucket_name {
+        format!("{} - {}", group_name, bucket_name)
+    } else {
+        format!("{} {}", prefix, suffix)
     }
+}
 
-    let groups = [
-        ("Claude", ModelMatcher::Claude),
-        ("Gemini Pro", ModelMatcher::Needles(&["pro"])),
-        ("Gemini Flash", ModelMatcher::Needles(&["flash"])),
-    ];
-
+fn parse_antigravity_quota_summary(value: &serde_json::Value) -> Vec<UsageWindow> {
     let mut windows = Vec::new();
-    let mut matched_indices = std::collections::HashSet::new();
+    let response = value.get("response").unwrap_or(value);
+    let Some(groups) = response.get("groups").and_then(|v| v.as_array()) else {
+        return windows;
+    };
 
-    for (label, matcher) in groups {
-        let mut group_entries = Vec::new();
-        for (idx, (display_name, entry)) in entries.iter().enumerate() {
-            if !matched_indices.contains(&idx)
-                && (matcher.matches(&entry.model_id) || matcher.matches(display_name))
-            {
-                matched_indices.insert(idx);
-                group_entries.push(entry);
+    for group in groups {
+        let group_name = string_field(group, &["displayName", "display_name"]).unwrap_or_default();
+        if group_name.is_empty() {
+            continue;
+        }
+
+        let Some(buckets) = group.get("buckets").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        for bucket in buckets {
+            let bucket_name =
+                string_field(bucket, &["displayName", "display_name"]).unwrap_or_default();
+            if bucket_name.is_empty() {
+                continue;
             }
-        }
 
-        if let Some(window) = best_antigravity_window(label, group_entries.into_iter()) {
-            windows.push(window);
-        }
-    }
+            let Some(remaining) = bucket
+                .get("remainingFraction")
+                .or_else(|| bucket.get("remaining_fraction"))
+                .and_then(number_value)
+            else {
+                continue;
+            };
 
-    // Add any unmatched entries as individual windows
-    for (idx, (display_name, entry)) in entries.iter().enumerate() {
-        if !matched_indices.contains(&idx) {
-            let label = display_name
-                .strip_prefix("Gemini ")
-                .unwrap_or(display_name)
-                .to_string();
-            let used_percent = (100.0 - entry.remaining_percent).clamp(0.0, 100.0);
+            let remaining_percent = if remaining <= 1.0 {
+                remaining * 100.0
+            } else {
+                remaining
+            }
+            .clamp(0.0, 100.0);
+
+            let used_percent = (100.0 - remaining_percent).clamp(0.0, 100.0);
+
+            let resets_at = string_field(bucket, &["resetTime", "reset_time", "resetsAt"])
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.to_utc());
+
+            let label = map_antigravity_label(&group_name, &bucket_name);
+
             windows.push(UsageWindow {
                 label,
                 used_percent,
                 limit: Some(100.0),
                 used: Some(used_percent),
                 unit: Some("%".to_string()),
-                resets_at: entry.reset_time,
+                resets_at,
             });
         }
     }
+
+    let priority = |label: &str| -> usize {
+        if label.contains("Gemini 5h") {
+            0
+        } else if label.contains("Gemini Daily") {
+            1
+        } else if label.contains("Gemini Weekly") {
+            2
+        } else if label.contains("Claude 5h") {
+            3
+        } else if label.contains("Claude Daily") {
+            4
+        } else if label.contains("Claude Weekly") {
+            5
+        } else {
+            6
+        }
+    };
+    windows.sort_by_key(|w| priority(&w.label));
 
     windows
 }
@@ -908,74 +1088,46 @@ fn parse_oauth_client_from_file(path: &Path) -> Option<(String, String)> {
 
 fn parse_antigravity_quota(value: &serde_json::Value) -> Vec<UsageWindow> {
     let mut entries = Vec::new();
-    collect_quota_entries(value, None, &mut entries);
+    collect_quota_entries(value, None, QuotaWindowType::Unknown, None, &mut entries);
 
     if entries.is_empty() {
         return Vec::new();
     }
 
-    let groups = [
-        ("Claude", ModelMatcher::Claude),
-        ("Gemini Pro", ModelMatcher::Needles(&["pro"])),
-        ("Gemini Flash", ModelMatcher::Needles(&["flash"])),
-    ];
-
-    let mut windows = Vec::new();
-    let mut matched_indices = std::collections::HashSet::new();
-
-    for (label, matcher) in groups {
-        let mut group_entries = Vec::new();
-        for (idx, entry) in entries.iter().enumerate() {
-            if !matched_indices.contains(&idx) && matcher.matches(&entry.model_id) {
-                matched_indices.insert(idx);
-                group_entries.push(entry);
-            }
-        }
-
-        if let Some(window) = best_antigravity_window(label, group_entries.into_iter()) {
-            windows.push(window);
-        }
-    }
-
-    // Add any unmatched entries as individual windows
-    for (idx, entry) in entries.iter().enumerate() {
-        if !matched_indices.contains(&idx) {
-            let used_percent = (100.0 - entry.remaining_percent).clamp(0.0, 100.0);
-            windows.push(UsageWindow {
-                label: entry.model_id.clone(),
-                used_percent,
-                limit: Some(100.0),
-                used: Some(used_percent),
-                unit: Some("%".to_string()),
-                resets_at: entry.reset_time,
-            });
-        }
-    }
-
-    windows
+    group_antigravity_entries(&entries)
 }
 
 fn collect_quota_entries(
     value: &serde_json::Value,
     model_hint: Option<&str>,
+    mut current_window: QuotaWindowType,
+    mut current_model_id: Option<String>,
     out: &mut Vec<AntigravityQuotaEntry>,
 ) {
     match value {
         serde_json::Value::Object(map) => {
-            let model_id = string_field(
+            if let Some(hint) = model_hint {
+                let w = detect_window_type(hint);
+                if w != QuotaWindowType::Unknown {
+                    current_window = w;
+                }
+
+                let lower_hint = hint.to_ascii_lowercase();
+                if lower_hint.contains("gemini")
+                    || lower_hint.contains("claude")
+                    || lower_hint.contains("gpt")
+                {
+                    current_model_id = Some(hint.to_string());
+                }
+            }
+
+            let explicit_model_id = string_field(
                 value,
                 &["modelId", "model_id", "model", "modelName", "name"],
-            )
-            .or_else(|| {
-                model_hint
-                    .filter(|hint| {
-                        let lower = hint.to_ascii_lowercase();
-                        lower.contains("antigravity")
-                            || lower.contains("gemini")
-                            || lower.contains("claude")
-                    })
-                    .map(ToString::to_string)
-            });
+            );
+            if let Some(mid) = explicit_model_id {
+                current_model_id = Some(mid);
+            }
 
             let remaining = map
                 .get("remainingFraction")
@@ -984,32 +1136,58 @@ fn collect_quota_entries(
                 .or_else(|| map.get("remaining_percent"))
                 .and_then(number_value);
 
-            if let (Some(model_id), Some(remaining)) = (model_id, remaining) {
-                let remaining_percent = if remaining <= 1.0 {
-                    remaining * 100.0
-                } else {
-                    remaining
+            if let Some(remaining) = remaining {
+                if let Some(ref model_id) = current_model_id {
+                    let remaining_percent = if remaining <= 1.0 {
+                        remaining * 100.0
+                    } else {
+                        remaining
+                    }
+                    .clamp(0.0, 100.0);
+
+                    let reset_time = string_field(value, &["resetTime", "reset_time", "resetsAt"])
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.to_utc());
+
+                    let mut final_window = current_window;
+                    let w = detect_window_type(model_id);
+                    if w != QuotaWindowType::Unknown {
+                        final_window = w;
+                    }
+
+                    out.push(AntigravityQuotaEntry {
+                        model_id: model_id.clone(),
+                        remaining_percent,
+                        reset_time,
+                        window_type: final_window,
+                    });
                 }
-                .clamp(0.0, 100.0);
-
-                let reset_time = string_field(value, &["resetTime", "reset_time", "resetsAt"])
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                    .map(|dt| dt.to_utc());
-
-                out.push(AntigravityQuotaEntry {
-                    model_id,
-                    remaining_percent,
-                    reset_time,
-                });
             }
 
             for (key, child) in map {
-                collect_quota_entries(child, Some(key), out);
+                let mut child_window = current_window;
+                let w = detect_window_type(key);
+                if w != QuotaWindowType::Unknown {
+                    child_window = w;
+                }
+                collect_quota_entries(
+                    child,
+                    Some(key),
+                    child_window,
+                    current_model_id.clone(),
+                    out,
+                );
             }
         }
         serde_json::Value::Array(items) => {
             for child in items {
-                collect_quota_entries(child, model_hint, out);
+                collect_quota_entries(
+                    child,
+                    model_hint,
+                    current_window,
+                    current_model_id.clone(),
+                    out,
+                );
             }
         }
         _ => {}
@@ -1022,20 +1200,124 @@ fn number_value(value: &serde_json::Value) -> Option<f64> {
         .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
 }
 
-#[derive(Clone, Copy)]
-enum ModelMatcher {
-    Claude,
-    Needles(&'static [&'static str]),
+fn detect_window_type(name: &str) -> QuotaWindowType {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("five_hour")
+        || lower.contains("fivehour")
+        || lower.contains("five hour")
+        || lower.contains("5h")
+        || lower.contains("5hour")
+        || lower.contains("session")
+    {
+        QuotaWindowType::FiveHour
+    } else if lower.contains("seven_day")
+        || lower.contains("seven day")
+        || lower.contains("sevenday")
+        || lower.contains("7d")
+        || lower.contains("7day")
+        || lower.contains("weekly")
+        || lower.contains("week")
+    {
+        QuotaWindowType::Weekly
+    } else if lower.contains("day")
+        || lower.contains("daily")
+        || lower.contains("24h")
+        || lower.contains("24hour")
+    {
+        QuotaWindowType::Daily
+    } else {
+        QuotaWindowType::Unknown
+    }
 }
 
-impl ModelMatcher {
-    fn matches(self, model_id: &str) -> bool {
-        let lower = model_id.to_ascii_lowercase();
-        match self {
-            Self::Claude => lower.contains("claude"),
-            Self::Needles(needles) => needles.iter().all(|needle| lower.contains(needle)),
+fn group_antigravity_entries(entries: &[AntigravityQuotaEntry]) -> Vec<UsageWindow> {
+    let mut gemini_5h = Vec::new();
+    let mut gemini_daily = Vec::new();
+    let mut gemini_weekly = Vec::new();
+
+    let mut claude_gpt_5h = Vec::new();
+    let mut claude_gpt_daily = Vec::new();
+    let mut claude_gpt_weekly = Vec::new();
+
+    let mut unmatched = Vec::new();
+
+    for entry in entries {
+        let is_gemini = entry.model_id.to_ascii_lowercase().contains("gemini");
+        let is_claude_gpt = entry.model_id.to_ascii_lowercase().contains("claude")
+            || entry.model_id.to_ascii_lowercase().contains("gpt");
+
+        let mut win = entry.window_type;
+        if win == QuotaWindowType::Unknown {
+            if let Some(reset) = entry.reset_time {
+                let duration = reset.signed_duration_since(chrono::Utc::now());
+                let hours = duration.num_hours();
+                if hours > 36 {
+                    win = QuotaWindowType::Weekly;
+                } else if hours > 6 {
+                    win = QuotaWindowType::Daily;
+                } else {
+                    win = QuotaWindowType::FiveHour;
+                }
+            } else {
+                win = QuotaWindowType::FiveHour;
+            }
+        }
+
+        if is_gemini {
+            match win {
+                QuotaWindowType::FiveHour => gemini_5h.push(entry),
+                QuotaWindowType::Daily => gemini_daily.push(entry),
+                QuotaWindowType::Weekly => gemini_weekly.push(entry),
+                QuotaWindowType::Unknown => gemini_5h.push(entry),
+            }
+        } else if is_claude_gpt {
+            match win {
+                QuotaWindowType::FiveHour => claude_gpt_5h.push(entry),
+                QuotaWindowType::Daily => claude_gpt_daily.push(entry),
+                QuotaWindowType::Weekly => claude_gpt_weekly.push(entry),
+                QuotaWindowType::Unknown => claude_gpt_5h.push(entry),
+            }
+        } else {
+            unmatched.push(entry);
         }
     }
+
+    let mut windows = Vec::new();
+
+    if let Some(w) = best_antigravity_window("Gemini 5h", gemini_5h.into_iter()) {
+        windows.push(w);
+    }
+    if let Some(w) = best_antigravity_window("Gemini Daily", gemini_daily.into_iter()) {
+        windows.push(w);
+    }
+    if let Some(w) = best_antigravity_window("Gemini Weekly", gemini_weekly.into_iter()) {
+        windows.push(w);
+    }
+    if let Some(w) = best_antigravity_window("Claude 5h", claude_gpt_5h.into_iter()) {
+        windows.push(w);
+    }
+    if let Some(w) = best_antigravity_window("Claude Daily", claude_gpt_daily.into_iter()) {
+        windows.push(w);
+    }
+    if let Some(w) = best_antigravity_window("Claude Weekly", claude_gpt_weekly.into_iter()) {
+        windows.push(w);
+    }
+
+    // Add any unmatched entries as individual windows
+    for entry in unmatched {
+        let label = entry.model_id.clone();
+        let used_percent = (100.0 - entry.remaining_percent).clamp(0.0, 100.0);
+        windows.push(UsageWindow {
+            label,
+            used_percent,
+            limit: Some(100.0),
+            used: Some(used_percent),
+            unit: Some("%".to_string()),
+            resets_at: entry.reset_time,
+        });
+    }
+
+    windows
 }
 
 fn best_antigravity_window<'a>(
@@ -1057,4 +1339,118 @@ fn best_antigravity_window<'a>(
         unit: Some("%".to_string()),
         resets_at: entry.reset_time,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_antigravity_quota_grouping() {
+        let quota_json = json!({
+            "five_hour": {
+                "gemini-1.5-pro": {
+                    "remainingFraction": 0.8
+                },
+                "claude-3-5-sonnet": {
+                    "remainingFraction": 0.6
+                }
+            },
+            "seven_day": {
+                "gemini-1.5-pro": {
+                    "remainingFraction": 0.4
+                },
+                "claude-3-5-sonnet": {
+                    "remainingFraction": 0.2
+                }
+            }
+        });
+
+        let windows = parse_antigravity_quota(&quota_json);
+        assert_eq!(windows.len(), 4);
+
+        let get_window = |label: &str| windows.iter().find(|w| w.label == label).unwrap();
+
+        let g5h = get_window("Gemini 5h");
+        assert_eq!(g5h.used_percent, 20.0);
+
+        let gweekly = get_window("Gemini Weekly");
+        assert_eq!(gweekly.used_percent, 60.0);
+
+        let c5h = get_window("Claude 5h");
+        assert_eq!(c5h.used_percent, 40.0);
+
+        let cweekly = get_window("Claude Weekly");
+        assert_eq!(cweekly.used_percent, 80.0);
+    }
+
+    #[test]
+    fn test_parse_antigravity_quota_summary() {
+        let summary_json = json!({
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-weekly",
+                                "displayName": "Weekly Limit",
+                                "remainingFraction": 0.8287296,
+                                "resetTime": "2026-06-28T06:52:37Z"
+                            },
+                            {
+                                "bucketId": "gemini-5h",
+                                "displayName": "Five Hour Limit",
+                                "remainingFraction": 0.6096169,
+                                "resetTime": "2026-06-22T14:38:32Z"
+                            }
+                        ]
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "displayName": "Weekly Limit",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-06-29T12:12:45Z"
+                            },
+                            {
+                                "bucketId": "3p-5h",
+                                "displayName": "Five Hour Limit",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-06-22T17:12:45Z"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let windows = parse_antigravity_quota_summary(&summary_json);
+        assert_eq!(windows.len(), 4);
+
+        // Priority sorting should ensure Five Hour Limit comes before Weekly Limit
+        assert_eq!(windows[0].label, "Gemini 5h");
+        assert_eq!(windows[1].label, "Gemini Weekly");
+        assert_eq!(windows[2].label, "Claude 5h");
+        assert_eq!(windows[3].label, "Claude Weekly");
+
+        // Remaining 0.6096169 => used (1.0 - 0.6096169) * 100 = 39.03831
+        let delta = 1e-4;
+        assert!((windows[0].used_percent - 39.03831).abs() < delta);
+        assert!((windows[1].used_percent - 17.12704).abs() < delta);
+        assert_eq!(windows[2].used_percent, 0.0);
+        assert_eq!(windows[3].used_percent, 0.0);
+
+        assert_eq!(
+            windows[0].resets_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-22T14:38:32Z")
+                    .unwrap()
+                    .to_utc()
+            )
+        );
+    }
 }

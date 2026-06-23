@@ -930,7 +930,7 @@ fn reorder_provider(
         to -= 1;
     }
     to = to.min(visible_order.len().saturating_sub(1));
-    if from == to || from == dragged.row && from == to {
+    if from == to {
         return false;
     }
 
