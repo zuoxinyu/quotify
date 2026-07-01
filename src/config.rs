@@ -10,10 +10,16 @@ pub struct GeneralConfig {
     pub active_provider: String,
     #[serde(default)]
     pub provider_order: Vec<String>,
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 fn default_refresh_interval() -> u64 {
     300
+}
+
+fn default_theme() -> String {
+    "system".to_string()
 }
 
 impl Default for GeneralConfig {
@@ -22,6 +28,7 @@ impl Default for GeneralConfig {
             refresh_interval: default_refresh_interval(),
             active_provider: String::new(),
             provider_order: Vec::new(),
+            theme: default_theme(),
         }
     }
 }
@@ -249,5 +256,30 @@ impl AppConfig {
         std::fs::write(path, content)
             .with_context(|| format!("Failed to write config to {:?}", path))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_general_config_theme_defaults() {
+        let toml_str = r#"
+            refresh_interval = 300
+            active_provider = "openai"
+            provider_order = []
+        "#;
+        let gen_config: GeneralConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(gen_config.theme, "system");
+
+        let toml_str_with_theme = r#"
+            refresh_interval = 300
+            active_provider = "openai"
+            provider_order = []
+            theme = "dark"
+        "#;
+        let gen_config2: GeneralConfig = toml::from_str(toml_str_with_theme).unwrap();
+        assert_eq!(gen_config2.theme, "dark");
     }
 }

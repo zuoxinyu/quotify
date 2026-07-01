@@ -1,4 +1,5 @@
 use eframe::egui;
+use egui::Widget;
 use parking_lot::RwLock;
 use std::{
     path::PathBuf,
@@ -31,6 +32,8 @@ pub struct QuotifyApp {
     drag: ProviderDragState,
     last_config_reload: Instant,
     update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
+    selected_setting_provider: String,
+    show_secrets: bool,
 }
 
 impl QuotifyApp {
@@ -50,6 +53,8 @@ impl QuotifyApp {
             drag: ProviderDragState::default(),
             last_config_reload: Instant::now(),
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
+            selected_setting_provider: "openai".to_string(),
+            show_secrets: false,
         }
     }
 }
@@ -91,7 +96,11 @@ impl eframe::App for QuotifyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         egui_extras::install_image_loaders(&ctx);
-        self.reload_config_if_due();
+
+        let active_page = crate::tray::ACTIVE_PAGE.load(std::sync::atomic::Ordering::SeqCst);
+        if active_page != 2 {
+            self.reload_config_if_due();
+        }
 
         // Redraw every second to update the "Refreshed X seconds ago" counter,
         // but ONLY if the window is active/focused. When the window loses focus,
@@ -103,30 +112,30 @@ impl eframe::App for QuotifyApp {
         }
 
         // Query the OS/system theme to support dynamic light/dark mode switching
-        let is_dark = match ctx.system_theme() {
-            Some(egui::Theme::Dark) => true,
-            Some(egui::Theme::Light) => false,
-            None => ctx.global_style().visuals.dark_mode,
+        let is_dark = match self.config.general.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => match ctx.system_theme() {
+                Some(egui::Theme::Dark) => true,
+                Some(egui::Theme::Light) => false,
+                None => ctx.global_style().visuals.dark_mode,
+            },
         };
 
         let is_mica = crate::IS_MICA_ACTIVE.load(std::sync::atomic::Ordering::SeqCst);
         let mut visuals = if is_dark {
             let mut v = egui::Visuals::dark();
-            // Transparent window fill so DWM Mica backdrop shows through
-            v.window_fill = if is_mica {
-                egui::Color32::TRANSPARENT
-            } else {
-                egui::Color32::from_rgb(32, 32, 32)
-            };
+            // Solid window fill for dropdown menus and popups to ensure they are opaque
+            v.window_fill = egui::Color32::from_rgb(45, 45, 45);
             v.panel_fill = if is_mica {
                 egui::Color32::TRANSPARENT
             } else {
                 egui::Color32::from_rgb(32, 32, 32)
             };
             v.extreme_bg_color = if is_mica {
-                egui::Color32::from_rgba_premultiplied(26, 26, 26, 180)
+                egui::Color32::from_rgba_premultiplied(32, 32, 32, 180)
             } else {
-                egui::Color32::from_rgb(26, 26, 26)
+                egui::Color32::from_rgb(32, 32, 32)
             };
 
             // Semi-transparent Acrylic Plate card backgrounds (Dark mode).
@@ -158,9 +167,9 @@ impl eframe::App for QuotifyApp {
                 egui::Color32::from_rgb(243, 243, 243)
             };
             v.extreme_bg_color = if is_mica {
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 200)
+                egui::Color32::from_rgba_premultiplied(229, 229, 229, 200)
             } else {
-                egui::Color32::from_rgb(255, 255, 255)
+                egui::Color32::from_rgb(229, 229, 229)
             };
 
             // Semi-transparent Acrylic Plate card backgrounds (Light mode).
@@ -168,7 +177,7 @@ impl eframe::App for QuotifyApp {
             // background between them is transparent to show the Mica backdrop.
             v.widgets.noninteractive.bg_fill =
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 180);
-            v.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(249, 249, 249, 180);
+            v.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(229, 229, 229, 255);
             v.widgets.hovered.bg_fill = egui::Color32::from_rgba_premultiplied(243, 243, 243, 200);
             v.widgets.active.bg_fill = egui::Color32::from_rgba_premultiplied(235, 235, 235, 220);
 
@@ -304,6 +313,32 @@ impl eframe::App for QuotifyApp {
                                         .line_height(Some(24.0)),
                                 );
                             });
+                        } else if active_page == 2 {
+                            ui.horizontal_centered(|ui| {
+                                let back_btn = ui.add_sized(
+                                    egui::vec2(24.0, 24.0),
+                                    egui::Button::new(
+                                        egui::RichText::new("\u{E72B}")
+                                            .size(12.0)
+                                    )
+                                    .frame(true)
+                                    .corner_radius(12)
+                                );
+                                if back_btn.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if back_btn.clicked() {
+                                    crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
+                                    ctx.request_repaint();
+                                }
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("Settings")
+                                        .strong()
+                                        .size(16.0)
+                                        .line_height(Some(24.0)),
+                                );
+                            });
                         } else {
                             let header_response = ui.horizontal_centered(|ui| {
                                 let logo = egui::Image::new(egui::include_image!(
@@ -346,12 +381,11 @@ impl eframe::App for QuotifyApp {
                                     )
                                     .frame(false)
                                     .corner_radius(4)
-                                ).on_hover_text("Open configuration file");
+                                ).on_hover_text("Settings");
 
-                                if settings.clicked()
-                                    && let Err(err) = open_config_file()
-                                {
-                                    tracing::error!("Failed to open config file: {err}");
+                                if settings.clicked() {
+                                    crate::tray::ACTIVE_PAGE.store(2, std::sync::atomic::Ordering::SeqCst);
+                                    ctx.request_repaint();
                                 }
 
                                 ui.add_space(2.0);
@@ -379,7 +413,7 @@ impl eframe::App for QuotifyApp {
                                     egui::Label::new(
                                         egui::RichText::new(refresh_age)
                                             .small()
-                                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                                            .color(ui.visuals().weak_text_color()),
                                     )
                                     .truncate(),
                                 );
@@ -394,6 +428,8 @@ impl eframe::App for QuotifyApp {
 
                 if active_page == 1 {
                     self.render_about_page(ui, &ctx, card_width, card_left_indent);
+                } else if active_page == 2 {
+                    self.render_settings_page(ui, &ctx, card_width, card_left_indent);
                 } else {
                     let provider_drag_active =
                         self.drag.held_provider.is_some() || self.drag.dragging.is_some();
@@ -501,7 +537,7 @@ impl eframe::App for QuotifyApp {
                                         egui::RichText::new(
                                             "No enabled providers. Configure credentials to enable cards.",
                                         )
-                                        .color(egui::Color32::from_rgb(150, 150, 150)),
+                                        .color(ui.visuals().weak_text_color()),
                                     );
                                 });
                             }
@@ -1704,7 +1740,7 @@ impl QuotifyApp {
                                     ui.label(
                                         egui::RichText::new("Checking latest release...")
                                             .size(14.0)
-                                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                                            .color(ui.visuals().weak_text_color()),
                                     );
                                 });
                             }
@@ -1887,6 +1923,373 @@ impl QuotifyApp {
                 ctx.request_repaint();
             });
         });
+    }
+
+    fn render_settings_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &egui::Context,
+        card_width: f32,
+        card_left_indent: f32,
+    ) {
+        let card_frame = egui::Frame::NONE
+            .fill(ui.visuals().widgets.noninteractive.bg_fill)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(16, 12));
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(card_left_indent);
+                    ui.allocate_ui(egui::vec2(card_width, 0.0), |ui| {
+                        ui.vertical(|ui| {
+                            // Section 1: General Settings
+                            ui.label(egui::RichText::new("General Settings").strong().size(14.0));
+                            ui.add_space(4.0);
+
+                            card_frame.show(ui, |ui| {
+                                ui.set_min_width(card_width - 32.0);
+                                ui.vertical(|ui| {
+                                    // Theme Settings
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new("Theme").strong().size(13.0));
+                                            ui.label(egui::RichText::new("Configure app color palette").small().color(ui.visuals().weak_text_color()));
+                                        });
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let mut current_theme = self.config.general.theme.clone();
+                                            egui::ComboBox::from_id_salt("theme_combobox")
+                                                .selected_text(match current_theme.as_str() {
+                                                    "dark" => "Dark",
+                                                    "light" => "Light",
+                                                    _ => "System",
+                                                })
+                                                .show_ui(ui, |ui| {
+                                                    let mut changed = false;
+                                                    changed |= ui.selectable_value(&mut current_theme, "system".to_string(), "System").changed();
+                                                    changed |= ui.selectable_value(&mut current_theme, "dark".to_string(), "Dark").changed();
+                                                    changed |= ui.selectable_value(&mut current_theme, "light".to_string(), "Light").changed();
+                                                    if changed {
+                                                        self.config.general.theme = current_theme;
+                                                        self.save_config();
+                                                    }
+                                                });
+                                        });
+                                    });
+
+                                    ui.add_space(10.0);
+                                    ui.separator();
+                                    ui.add_space(10.0);
+
+                                    // Refresh Interval Settings
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new("Refresh Interval").strong().size(13.0));
+                                        ui.label(egui::RichText::new("Background update frequency").small().color(ui.visuals().weak_text_color()));
+                                        ui.add_space(4.0);
+                                        let mut interval = self.config.general.refresh_interval;
+                                        let slider = ui.add_sized(
+                                            egui::vec2(ui.available_width() - 12.0, 20.0),
+                                            egui::Slider::new(&mut interval, 10..=3600)
+                                                .suffix("s")
+                                                .show_value(true)
+                                                .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.4 })
+                                        );
+                                        if slider.changed() {
+                                            self.config.general.refresh_interval = interval;
+                                            self.save_config();
+                                        }
+                                    });
+
+                                    ui.add_space(10.0);
+                                    ui.separator();
+                                    ui.add_space(10.0);
+
+                                    // Network Proxy Settings
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new("Network Proxy").strong().size(13.0));
+                                        ui.label(egui::RichText::new("Supports http://, https://, or socks5://").small().color(ui.visuals().weak_text_color()));
+                                        ui.add_space(4.0);
+                                        let mut proxy = self.config.network.proxy.clone();
+                                        let text_edit = ui.add(
+                                            egui::TextEdit::singleline(&mut proxy)
+                                                .desired_width(f32::INFINITY)
+                                                .hint_text("e.g. http://127.0.0.1:7890")
+                                        );
+                                        if text_edit.changed() {
+                                            self.config.network.proxy = proxy;
+                                            self.save_config();
+                                        }
+                                    });
+                                });
+                            });
+
+                            ui.add_space(16.0);
+
+                            // Section 2: Provider Configs
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Provider Settings").strong().size(14.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let btn_text = if self.show_secrets { "Hide Secrets" } else { "Show Secrets" };
+                                    if ui.button(btn_text).clicked() {
+                                        self.show_secrets = !self.show_secrets;
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+
+                            card_frame.show(ui, |ui| {
+                                ui.set_min_width(card_width - 32.0);
+                                ui.vertical(|ui| {
+                                    // Dropdown selection to pick which provider to configure
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("Select Provider").strong().size(13.0));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let current_provider = self.selected_setting_provider.clone();
+                                            let catalog = provider_catalog();
+                                            let display_name = catalog.iter()
+                                                .find(|(id, _)| *id == current_provider)
+                                                .map(|(_, name)| *name)
+                                                .unwrap_or(&current_provider);
+
+                                            egui::ComboBox::from_id_salt("provider_select_combo")
+                                                .selected_text(display_name)
+                                                .show_ui(ui, |ui| {
+                                                    let mut selected = self.selected_setting_provider.clone();
+                                                    for (id, display) in catalog {
+                                                        if ui.selectable_value(&mut selected, id.to_string(), *display).clicked() {
+                                                            self.selected_setting_provider = selected.clone();
+                                                        }
+                                                    }
+                                                });
+                                        });
+                                    });
+
+                                    ui.add_space(10.0);
+                                    ui.separator();
+                                    ui.add_space(10.0);
+
+                                    // Render the fields for the selected provider
+                                    let provider_id = self.selected_setting_provider.clone();
+                                    let mut changed = false;
+
+                                    match provider_id.as_str() {
+                                        "deepseek" => {
+                                            let mut enabled = self.config.deepseek.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.deepseek.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
+                                            let text_edit = ui.add(
+                                                egui::TextEdit::singleline(&mut self.config.deepseek.api_key)
+                                                    .password(!self.show_secrets)
+                                                    .desired_width(f32::INFINITY)
+                                            );
+                                            if text_edit.changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "claude" => {
+                                            let mut enabled = self.config.claude.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.claude.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Session Key").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.session_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Access Token").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.access_token).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Auth File Path").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.auth_file).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "codex" => {
+                                            let mut enabled = self.config.codex.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.codex.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("Auth File Path").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.codex.auth_file).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "gemini" => {
+                                            let mut enabled = self.config.gemini.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.gemini.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.gemini.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "antigravity" => {
+                                            let mut enabled = self.config.antigravity.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.antigravity.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.antigravity.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "opencode" => {
+                                            let mut enabled = self.config.opencode.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.opencode.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.opencode.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Workspace ID").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.opencode.workspace_id).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Auth Cookie").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.opencode.auth_cookie).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "mimo" => {
+                                            let mut enabled = self.config.mimo.enabled.unwrap_or(false);
+                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                self.config.mimo.enabled = Some(enabled);
+                                                changed = true;
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.mimo.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Service Token").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.mimo.service_token).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Cookie Header").strong().size(12.0));
+                                            if ui.add(egui::TextEdit::singleline(&mut self.config.mimo.cookie_header).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        "opencodego" => {
+                                            ui.label(egui::RichText::new("OpenCode Go is configured using the OpenCode settings. Please select 'OpenCode' from the dropdown to edit its configuration.").italics().color(ui.visuals().weak_text_color()));
+                                        }
+                                        // All standard ApiKeyProviderConfig providers
+                                        _ => {
+                                            let cfg = match provider_id.as_str() {
+                                                "openai" => Some(&mut self.config.openai),
+                                                "openrouter" => Some(&mut self.config.openrouter),
+                                                "moonshot" => Some(&mut self.config.moonshot),
+                                                "elevenlabs" => Some(&mut self.config.elevenlabs),
+                                                "doubao" => Some(&mut self.config.doubao),
+                                                "zai" => Some(&mut self.config.zai),
+                                                "venice" => Some(&mut self.config.venice),
+                                                "crof" => Some(&mut self.config.crof),
+                                                "synthetic" => Some(&mut self.config.synthetic),
+                                                "warp" => Some(&mut self.config.warp),
+                                                "groqcloud" => Some(&mut self.config.groqcloud),
+                                                "deepgram" => Some(&mut self.config.deepgram),
+                                                "llmproxy" => Some(&mut self.config.llmproxy),
+                                                "codebuff" => Some(&mut self.config.codebuff),
+                                                "kiro" => Some(&mut self.config.kiro),
+                                                "copilot" => Some(&mut self.config.copilot),
+                                                "azureopenai" => Some(&mut self.config.azureopenai),
+                                                "ollama" => Some(&mut self.config.ollama),
+                                                "minimax" => Some(&mut self.config.minimax),
+                                                "jetbrains" => Some(&mut self.config.jetbrains),
+                                                "kimi" => Some(&mut self.config.kimi),
+                                                "kilo" => Some(&mut self.config.kilo),
+                                                "augment" => Some(&mut self.config.augment),
+                                                "bedrock" => Some(&mut self.config.bedrock),
+                                                "vertexai" => Some(&mut self.config.vertexai),
+                                                "stepfun" => Some(&mut self.config.stepfun),
+                                                "abacus" => Some(&mut self.config.abacus),
+                                                "alibabatoken" => Some(&mut self.config.alibabatoken),
+                                                "t3chat" => Some(&mut self.config.t3chat),
+                                                "amp" => Some(&mut self.config.amp),
+                                                "mistral" => Some(&mut self.config.mistral),
+                                                "grok" => Some(&mut self.config.grok),
+                                                "cursor" => Some(&mut self.config.cursor),
+                                                "droid" => Some(&mut self.config.droid),
+                                                "windsurf" => Some(&mut self.config.windsurf),
+                                                _ => None,
+                                            };
+
+                                            if let Some(cfg) = cfg {
+                                                let mut enabled = cfg.enabled.unwrap_or(false);
+                                                if ui.checkbox(&mut enabled, "Enable Provider").changed() {
+                                                    cfg.enabled = Some(enabled);
+                                                    changed = true;
+                                                }
+                                                ui.add_space(8.0);
+                                                ui.label(egui::RichText::new("API Key / Token").strong().size(12.0));
+                                                if ui.add(egui::TextEdit::singleline(&mut cfg.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
+                                                    changed = true;
+                                                }
+                                                ui.add_space(6.0);
+                                                ui.label(egui::RichText::new("Base URL").strong().size(12.0));
+                                                if ui.add(egui::TextEdit::singleline(&mut cfg.base_url).desired_width(f32::INFINITY)).changed() {
+                                                    changed = true;
+                                                }
+                                                ui.add_space(6.0);
+                                                ui.label(egui::RichText::new("Deployment").strong().size(12.0));
+                                                if ui.add(egui::TextEdit::singleline(&mut cfg.deployment).desired_width(f32::INFINITY)).changed() {
+                                                    changed = true;
+                                                }
+                                            } else {
+                                                ui.label("Unknown provider settings.");
+                                            }
+                                        }
+                                    }
+
+                                    if changed {
+                                        self.save_config();
+                                    }
+                                });
+                            });
+
+                            ui.add_space(16.0);
+                            // Link/button to open file in Notepad directly
+                            ui.horizontal(|ui| {
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    if ui.link("Open config file in text editor").clicked() {
+                                        let _ = open_config_file();
+                                    }
+                                });
+                            });
+                            ui.add_space(20.0);
+                        });
+                    });
+                });
+            });
     }
 }
 
