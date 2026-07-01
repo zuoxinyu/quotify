@@ -1,5 +1,4 @@
 use eframe::egui;
-use egui::Widget;
 use parking_lot::RwLock;
 use std::{
     path::PathBuf,
@@ -121,6 +120,21 @@ impl eframe::App for QuotifyApp {
                 None => ctx.global_style().visuals.dark_mode,
             },
         };
+
+        // Update Windows DWM immersive dark mode attribute to match the calculated theme
+        if let Some(send_hwnd) = crate::tray::MAIN_HWND.get() {
+            let hwnd = send_hwnd.raw();
+            use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+            let dark = if is_dark { 1_i32 } else { 0_i32 };
+            unsafe {
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &dark as *const _ as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
 
         let is_mica = crate::IS_MICA_ACTIVE.load(std::sync::atomic::Ordering::SeqCst);
         let mut visuals = if is_dark {
