@@ -193,12 +193,8 @@ impl eframe::App for QuotifyApp {
             v
         } else {
             let mut v = egui::Visuals::light();
-            // Transparent window fill so DWM Mica backdrop shows through
-            v.window_fill = if is_mica {
-                egui::Color32::TRANSPARENT
-            } else {
-                egui::Color32::from_rgb(243, 243, 243)
-            };
+            // Solid window fill for dropdown menus and popups to ensure they are opaque
+            v.window_fill = egui::Color32::from_rgb(255, 255, 255);
             v.panel_fill = if is_mica {
                 egui::Color32::TRANSPARENT
             } else {
@@ -1383,7 +1379,75 @@ fn render_provider_card(
 
                 // Credits Badge (Windows 11 accent tint badge)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(c) = credits {
+                    let codex_reset_credits = if provider_name == "codex" {
+                        windows.iter().find(|w| w.label == "Reset Credits").and_then(|w| {
+                            w.unit.as_deref().and_then(|json_str| {
+                                serde_json::from_str::<crate::provider::CodexResetCredits>(json_str).ok()
+                            })
+                        })
+                    } else {
+                        None
+                    };
+
+                    if let Some(resets) = codex_reset_credits {
+                        let credit_text = format!("{} Resets", resets.available_count);
+
+                        let (credits_bg, credits_border, credits_fg) = if is_dark {
+                            (
+                                egui::Color32::from_rgb(28, 46, 60),
+                                egui::Color32::from_rgb(96, 205, 255), // Fluent Accent Blue
+                                egui::Color32::from_rgb(96, 205, 255),
+                            )
+                        } else {
+                            (
+                                egui::Color32::from_rgb(224, 244, 255),
+                                egui::Color32::from_rgb(0, 120, 212), // Fluent Accent Blue (Light)
+                                egui::Color32::from_rgb(0, 120, 212),
+                            )
+                        };
+
+                        let credits_frame = egui::Frame::NONE
+                            .fill(credits_bg)
+                            .stroke(egui::Stroke::new(1.0, credits_border))
+                            .corner_radius(4)
+                            .inner_margin(egui::Margin::symmetric(8, 3));
+                        let badge_resp = credits_frame.show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(credit_text)
+                                    .strong()
+                                    .size(10.0)
+                                    .color(credits_fg),
+                            );
+                        }).response;
+
+                        badge_resp.on_hover_ui(|ui| {
+                            ui.set_max_width(260.0);
+                            ui.heading("Codex Reset Credits");
+                            ui.add_space(4.0);
+                            ui.label(format!("Available resets: {}", resets.available_count));
+                            if resets.credits.is_empty() {
+                                ui.label("No active reset credits.");
+                            } else {
+                                for (i, credit) in resets.credits.iter().enumerate() {
+                                    ui.separator();
+                                    ui.strong(format!("Credit #{}", i + 1));
+                                    ui.label(format!("Status: {}", credit.status));
+                                    if let Some(granted) = credit.granted_at {
+                                        ui.label(format!(
+                                            "Granted: {}",
+                                            granted.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
+                                        ));
+                                    }
+                                    if let Some(expires) = credit.expires_at {
+                                        ui.label(format!(
+                                            "Expires: {}",
+                                            expires.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
+                                        ));
+                                    }
+                                }
+                            }
+                        });
+                    } else if let Some(c) = credits {
                         let credit_text =
                             format!("{} {}", format_credits_balance(c.balance), c.currency);
 
@@ -1471,7 +1535,8 @@ fn render_provider_card(
                     });
                 }
                 ProviderStatus::Active => {
-                    if windows.is_empty() {
+                    let active_windows: Vec<_> = windows.iter().filter(|w| w.label != "Reset Credits").collect();
+                    if active_windows.is_empty() {
                         if credits.is_none() {
                             ui.add_space(8.0);
                             ui.separator();
@@ -1494,7 +1559,7 @@ fn render_provider_card(
                         let progress_width =
                             (available_width - label_width - reset_width - gap * 2.0).max(96.0);
 
-                        for window in windows {
+                        for window in active_windows {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = gap;
 

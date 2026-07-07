@@ -67,8 +67,10 @@ impl OpenCodeProvider {
             .is_some()
     }
 
-    async fn find_dashboard_cookie_header(&self) -> Result<String> {
-        if let Some(cookie) = &self.auth_cookie {
+    async fn resolve_cookie_header(&self) -> Result<String> {
+        if let Some(cookie) = &self.auth_cookie
+            && !cookie.is_empty()
+        {
             return Ok(cookie.clone());
         }
 
@@ -78,9 +80,22 @@ impl OpenCodeProvider {
             return Ok(cookie);
         }
 
-        anyhow::bail!(
-            "OpenCode requires auth_cookie in config or OPENCODE_AUTH_COOKIE; automatic browser cookie reading is disabled"
-        )
+        if let Ok(Some(cookie)) = crate::secrets::get("opencode", "auth_cookie")
+            && let Some(cookie) = normalize_auth_cookie(&cookie)
+        {
+            return Ok(cookie);
+        }
+
+        tracing::info!("No OpenCode credentials found. Attempting WebView2 login...");
+        let full_cookie =
+            tokio::task::spawn_blocking(crate::webview_login::opencode_login_and_get_cookie)
+                .await??;
+
+        if let Err(err) = crate::secrets::set("opencode", "auth_cookie", &full_cookie) {
+            tracing::error!("Failed to store OpenCode cookie in Windows Credential Manager: {err}");
+        }
+
+        Ok(full_cookie)
     }
 }
 
@@ -91,18 +106,32 @@ impl Provider for OpenCodeProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        // OpenCode Go does not expose a stable public quota API. Use the logged-in
-        // dashboard cookies and parse the same server data that the web app loads.
-        let cookie_header = self
-            .find_dashboard_cookie_header()
-            .await
-            .context("OpenCode requires auth_cookie in config or OPENCODE_AUTH_COOKIE")?;
-        tracing::debug!("Found opencode.ai auth cookie, trying server functions");
+        let mut cookie_header = self.resolve_cookie_header().await?;
 
-        let (windows, credits) = self
-            .fetch_via_server_cookie(&cookie_header)
-            .await
-            .context("Failed to fetch OpenCode Go usage from opencode.ai dashboard")?;
+        let (windows, credits) = match self.fetch_via_server_cookie(&cookie_header).await {
+            Ok(res) => res,
+            Err(err) => {
+                tracing::warn!(
+                    "OpenCode fetch failed ({err:#}). Retrying with fresh WebView2 login..."
+                );
+
+                let fresh_cookie = tokio::task::spawn_blocking(
+                    crate::webview_login::opencode_login_and_get_cookie,
+                )
+                .await??;
+
+                if let Err(err) = crate::secrets::set("opencode", "auth_cookie", &fresh_cookie) {
+                    tracing::error!(
+                        "Failed to store OpenCode cookie in Windows Credential Manager: {err}"
+                    );
+                }
+
+                cookie_header = fresh_cookie;
+                self.fetch_via_server_cookie(&cookie_header)
+                    .await
+                    .context("Failed to fetch OpenCode Go usage after retrying WebView2 login")?
+            }
+        };
 
         Ok(UsageData {
             provider: self.name().to_string(),

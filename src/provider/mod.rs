@@ -64,6 +64,19 @@ pub struct CreditsInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexResetCredit {
+    pub status: String,
+    pub granted_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexResetCredits {
+    pub available_count: i32,
+    pub credits: Vec<CodexResetCredit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageData {
     pub provider: String,
     pub windows: Vec<UsageWindow>,

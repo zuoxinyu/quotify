@@ -394,7 +394,7 @@ fn provider_percent(data: &UsageData) -> Option<f64> {
 fn valid_windows(data: &UsageData) -> Vec<&crate::provider::UsageWindow> {
     data.windows
         .iter()
-        .filter(|w| w.label != "No data" && w.label != "Error" && w.label != "Connected")
+        .filter(|w| w.label != "No data" && w.label != "Error" && w.label != "Connected" && w.label != "Reset Credits")
         .collect()
 }
 

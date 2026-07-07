@@ -194,10 +194,29 @@ impl Provider for CodexProvider {
         };
 
         let mut windows = Vec::new();
-
         let mut credits = None;
+        let mut codex_reset_credits = None;
 
         if let Some(token) = access_token {
+            let reset_resp = self
+                .client
+                .get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+                .header("Authorization", format!("Bearer {token}"))
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                )
+                .send()
+                .await;
+
+            if let Ok(r) = reset_resp {
+                if r.status().is_success() {
+                    if let Ok(parsed) = r.json::<super::CodexResetCredits>().await {
+                        codex_reset_credits = Some(parsed);
+                    }
+                }
+            }
+
             let resp = self
                 .client
                 .get("https://chatgpt.com/backend-api/wham/usage")
@@ -338,6 +357,19 @@ impl Provider for CodexProvider {
             }
         }
 
+        if let Some(resets) = codex_reset_credits {
+            if let Ok(json_str) = serde_json::to_string(&resets) {
+                windows.push(UsageWindow {
+                    label: "Reset Credits".to_string(),
+                    used_percent: 0.0,
+                    limit: None,
+                    used: None,
+                    unit: Some(json_str),
+                    resets_at: None,
+                });
+            }
+        }
+
         if windows.is_empty() {
             windows.push(UsageWindow {
                 label: "No data".to_string(),
@@ -356,5 +388,37 @@ impl Provider for CodexProvider {
             fetched_at: Utc::now(),
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_codex_reset_credits() {
+        let raw_json = json!({
+            "available_count": 2,
+            "credits": [
+                {
+                    "status": "available",
+                    "granted_at": "2026-06-17T17:38:38Z",
+                    "expires_at": "2026-07-17T17:38:38Z"
+                },
+                {
+                    "status": "redeemed",
+                    "granted_at": "2026-06-18T17:38:38Z",
+                    "expires_at": null
+                }
+            ]
+        });
+
+        let parsed: crate::provider::CodexResetCredits = serde_json::from_value(raw_json).unwrap();
+        assert_eq!(parsed.available_count, 2);
+        assert_eq!(parsed.credits.len(), 2);
+        assert_eq!(parsed.credits[0].status, "available");
+        assert!(parsed.credits[0].expires_at.is_some());
+        assert_eq!(parsed.credits[1].status, "redeemed");
+        assert!(parsed.credits[1].expires_at.is_none());
     }
 }

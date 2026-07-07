@@ -17,10 +17,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 use wry::WebViewBuilder;
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum LoginMode {
+    Mimo,
+    OpenCode,
+}
+
 thread_local! {
     static WEBVIEW: RefCell<Option<wry::WebView>> = const { RefCell::new(None) };
     static TX: RefCell<Option<mpsc::Sender<String>>> = const { RefCell::new(None) };
     static TICKS: RefCell<usize> = const { RefCell::new(0) };
+    static MODE: RefCell<LoginMode> = const { RefCell::new(LoginMode::Mimo) };
 }
 
 struct RawWindow {
@@ -73,6 +80,8 @@ unsafe extern "system" fn window_proc(
                 current_ticks = *t.borrow();
             });
 
+            let mode = MODE.with(|m| *m.borrow());
+
             WEBVIEW.with(|wv| {
                 if let Some(webview) = wv.borrow().as_ref() {
                     // Try to get all cookies
@@ -91,10 +100,21 @@ unsafe extern "system" fn window_proc(
                             }
                             cookies_str.push_str(&format!("{}={}", name, value));
 
-                            // MiMo often uses api-platform_serviceToken or serviceToken
-                            if name.to_lowercase().contains("servicetoken") && !value.is_empty() {
-                                tracing::info!("MiMo: Detected relevant token: {}", name);
-                                token_found = true;
+                            match mode {
+                                LoginMode::Mimo => {
+                                    // MiMo often uses api-platform_serviceToken or serviceToken
+                                    if name.to_lowercase().contains("servicetoken") && !value.is_empty() {
+                                        tracing::info!("MiMo: Detected relevant token: {}", name);
+                                        token_found = true;
+                                    }
+                                }
+                                LoginMode::OpenCode => {
+                                    // OpenCode uses cookie named "auth"
+                                    if name.to_lowercase() == "auth" && !value.is_empty() {
+                                        tracing::info!("OpenCode: Detected auth cookie");
+                                        token_found = true;
+                                    }
+                                }
                             }
                         }
 
@@ -110,15 +130,32 @@ unsafe extern "system" fn window_proc(
                             }
                         } else {
                             if !cookie_names.is_empty() {
-                                tracing::debug!(
-                                    "MiMo: Waiting for serviceToken. Current cookies: {:?}",
-                                    cookie_names
-                                );
+                                match mode {
+                                    LoginMode::Mimo => {
+                                        tracing::debug!(
+                                            "MiMo: Waiting for serviceToken. Current cookies: {:?}",
+                                            cookie_names
+                                        );
+                                    }
+                                    LoginMode::OpenCode => {
+                                        tracing::debug!(
+                                            "OpenCode: Waiting for auth cookie. Current cookies: {:?}",
+                                            cookie_names
+                                        );
+                                    }
+                                }
                             }
 
                             // Show window after 3 seconds if not auto-logged in
                             if current_ticks == 3 {
-                                tracing::info!("MiMo: Manual login required, showing window...");
+                                match mode {
+                                    LoginMode::Mimo => {
+                                        tracing::info!("MiMo: Manual login required, showing window...");
+                                    }
+                                    LoginMode::OpenCode => {
+                                        tracing::info!("OpenCode: Manual login required, showing window...");
+                                    }
+                                }
                                 unsafe {
                                     let _ = ShowWindow(hwnd, SW_SHOW);
                                 }
@@ -138,12 +175,27 @@ unsafe extern "system" fn window_proc(
 }
 
 pub fn login_and_get_cookie() -> Result<String> {
+    run_login_flow(LoginMode::Mimo)
+}
+
+pub fn opencode_login_and_get_cookie() -> Result<String> {
+    run_login_flow(LoginMode::OpenCode)
+}
+
+fn run_login_flow(mode: LoginMode) -> Result<String> {
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap_or_default();
-            let class_name = w!("QuotifyMimoLoginClass");
+            let class_name = match mode {
+                LoginMode::Mimo => w!("QuotifyMimoLoginClass"),
+                LoginMode::OpenCode => w!("QuotifyOpenCodeLoginClass"),
+            };
+            let title = match mode {
+                LoginMode::Mimo => w!("Xiaomi Mimo Login (Please login to continue)"),
+                LoginMode::OpenCode => w!("OpenCode Login (Please login to continue)"),
+            };
 
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(window_proc),
@@ -157,7 +209,7 @@ pub fn login_and_get_cookie() -> Result<String> {
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                w!("Xiaomi Mimo Login (Please login to continue)"),
+                title,
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -173,12 +225,20 @@ pub fn login_and_get_cookie() -> Result<String> {
             let window = RawWindow { hwnd };
 
             let mut data_dir = std::env::temp_dir();
-            data_dir.push("QuotifyMimoWebviewData");
+            match mode {
+                LoginMode::Mimo => data_dir.push("QuotifyMimoWebviewData"),
+                LoginMode::OpenCode => data_dir.push("QuotifyOpenCodeWebviewData"),
+            }
             let mut web_context = wry::WebContext::new(Some(data_dir));
+
+            let url = match mode {
+                LoginMode::Mimo => "https://platform.xiaomimimo.com",
+                LoginMode::OpenCode => "https://opencode.ai",
+            };
 
             let webview = WebViewBuilder::new_with_web_context(&mut web_context)
                 .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
-                .with_url("https://platform.xiaomimimo.com")
+                .with_url(url)
                 .with_devtools(true)
                 .build(&window)
                 .expect("Failed to build webview");
@@ -200,6 +260,9 @@ pub fn login_and_get_cookie() -> Result<String> {
             });
             TX.with(|t| {
                 *t.borrow_mut() = Some(tx);
+            });
+            MODE.with(|m| {
+                *m.borrow_mut() = mode;
             });
 
             // Start polling timer (window starts hidden)

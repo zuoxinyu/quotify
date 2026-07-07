@@ -973,7 +973,15 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 Some(config.opencode.auth_cookie.clone())
             };
 
-            if false {
+            if config.opencode.enabled == Some(false) {
+                return None;
+            }
+            if config.opencode.enabled.unwrap_or(false)
+                || workspace_id.is_some()
+                || auth_cookie.is_some()
+                || OpenCodeProvider::has_workspace_hint()
+                || OpenCodeProvider::has_auth_cookie_hint()
+            {
                 Some(Box::new(OpenCodeProvider::new_with_name(
                     "opencodego",
                     workspace_id,
