@@ -154,6 +154,20 @@ function Set-TomlField {
     Set-Content -Path $Path -Encoding UTF8 -Value $Lines
 }
 
+function Set-QuotifyCredential {
+    param (
+        [string]$Provider,
+        [string]$Field,
+        [string]$Value
+    )
+
+    $Target = "quotify/$Provider/$Field"
+    $Output = & cmdkey.exe "/generic:$Target" "/user:quotify" "/pass:$Value" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "cmdkey failed for $Target: $Output"
+    }
+}
+
 function Open-DebugChrome {
     param (
         [string]$StartUrl,
@@ -343,9 +357,9 @@ try {
     Write-Host "`n[JSON Details (First 5 shown)]:" -ForegroundColor Cyan
     $FilteredCookies | Select-Object -First 5 | ConvertTo-Json -Depth 3
 
-    # Sync to quotify.toml if requested
+    # Sync to Windows Credential Manager if requested
     if ($Sync) {
-        Write-Host "`nSyncing cookie to configuration at $ConfigPath..." -ForegroundColor Gray
+        Write-Host "`nSyncing cookie to Windows Credential Manager..." -ForegroundColor Gray
         $Target = if ($ResolvedTarget) { $ResolvedTarget } else { Resolve-ProviderTarget -ProviderName "" -TargetDomain $Domain }
         $MatchedProvider = if ($Target) { $Target.Provider } else { "" }
         $MatchedField = if ($Target) { $Target.Field } else { "" }
@@ -353,8 +367,8 @@ try {
         if ([string]::IsNullOrWhiteSpace($MatchedProvider) -or [string]::IsNullOrWhiteSpace($MatchedField)) {
             Write-Warning "Could not map domain '$Domain' to a known provider. Supported cookie-based providers: mimo, opencode, abacus, alibabatoken, t3chat, amp, cursor."
         } else {
-            Set-TomlField -Path $ConfigPath -Section $MatchedProvider -Field $MatchedField -Value $CookieHeader
-            Write-Host "Successfully synced cookie to $ConfigPath for provider '$MatchedProvider' field '$MatchedField'." -ForegroundColor Green
+            Set-QuotifyCredential -Provider $MatchedProvider -Field $MatchedField -Value $CookieHeader
+            Write-Host "Successfully synced cookie for provider '$MatchedProvider' field '$MatchedField'." -ForegroundColor Green
         }
     }
 } finally {

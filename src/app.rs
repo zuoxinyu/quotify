@@ -22,15 +22,34 @@ pub enum UpdateStatus {
     Error(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum ProviderTestStatus {
+    Idle,
+    Testing {
+        provider: String,
+    },
+    Success {
+        provider: String,
+        fetched_at: chrono::DateTime<chrono::Utc>,
+        summary: String,
+    },
+    Error {
+        provider: String,
+        message: String,
+    },
+}
+
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
+    pub history: Arc<RwLock<crate::usage_history::UsageHistory>>,
     pub config: crate::config::AppConfig,
     pub config_path: Option<PathBuf>,
     pub active_provider: Arc<RwLock<String>>,
     drag: ProviderDragState,
     last_config_reload: Instant,
     update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
+    provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
     selected_setting_provider: String,
     show_secrets: bool,
 }
@@ -42,16 +61,19 @@ impl QuotifyApp {
         config: crate::config::AppConfig,
         config_path: Option<PathBuf>,
         active_provider: Arc<RwLock<String>>,
+        history: Arc<RwLock<crate::usage_history::UsageHistory>>,
     ) -> Self {
         Self {
             data,
             last_refresh,
+            history,
             config,
             config_path,
             active_provider,
             drag: ProviderDragState::default(),
             last_config_reload: Instant::now(),
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
+            provider_test_status: Arc::new(parking_lot::Mutex::new(ProviderTestStatus::Idle)),
             selected_setting_provider: "openai".to_string(),
             show_secrets: false,
         }
@@ -124,7 +146,9 @@ impl eframe::App for QuotifyApp {
         // Update Windows DWM immersive dark mode attribute to match the calculated theme
         if let Some(send_hwnd) = crate::tray::MAIN_HWND.get() {
             let hwnd = send_hwnd.raw();
-            use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+            use windows::Win32::Graphics::Dwm::{
+                DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+            };
             let dark = if is_dark { 1_i32 } else { 0_i32 };
             unsafe {
                 let _ = DwmSetWindowAttribute(
@@ -507,6 +531,7 @@ impl eframe::App for QuotifyApp {
                                     &mut self.config,
                                     self.config_path.as_ref(),
                                     &self.data,
+                                    &self.history,
                                     false,
                                     is_dragged,
                                 );
@@ -620,6 +645,7 @@ impl eframe::App for QuotifyApp {
                                             &mut self.config,
                                             self.config_path.as_ref(),
                                             &self.data,
+                                            &self.history,
                                             false,
                                         );
                                     });
@@ -647,7 +673,8 @@ impl QuotifyApp {
         };
 
         match loaded {
-            Ok(config) => {
+            Ok(mut config) => {
+                crate::secrets::hydrate_config(&mut config);
                 self.config = config;
                 *self.active_provider.write() =
                     self.config.general.active_provider.trim().to_string();
@@ -657,14 +684,121 @@ impl QuotifyApp {
     }
 
     fn save_config(&self) {
-        let result = if let Some(path) = &self.config_path {
-            self.config.save_to(path)
-        } else {
-            self.config.save()
-        };
+        let result = save_config_without_secrets(&self.config, self.config_path.as_ref());
         if let Err(err) = result {
             tracing::error!("Failed to save config: {err}");
         }
+    }
+
+    fn render_provider_test_controls(&self, ui: &mut egui::Ui, provider_id: &str) {
+        let status = self.provider_test_status.lock().clone();
+        let testing_this = matches!(
+            &status,
+            ProviderTestStatus::Testing { provider } if provider == provider_id
+        );
+        let testing_other = matches!(&status, ProviderTestStatus::Testing { .. }) && !testing_this;
+
+        ui.horizontal(|ui| {
+            let button = egui::Button::new(if testing_this {
+                "Testing..."
+            } else {
+                "Test Provider"
+            })
+            .min_size(egui::vec2(104.0, 26.0));
+
+            if ui
+                .add_enabled(!testing_this && !testing_other, button)
+                .clicked()
+            {
+                self.trigger_provider_test(provider_id.to_string(), ui.ctx().clone());
+            }
+
+            if testing_this {
+                ui.spinner();
+            }
+        });
+
+        match status {
+            ProviderTestStatus::Success {
+                provider,
+                fetched_at,
+                summary,
+            } if provider == provider_id => {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Test passed at {}. {summary}",
+                        fetched_at.with_timezone(&chrono::Local).format("%H:%M:%S")
+                    ))
+                    .small()
+                    .color(egui::Color32::from_rgb(46, 125, 50)),
+                );
+            }
+            ProviderTestStatus::Error { provider, message } if provider == provider_id => {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("Test failed: {message}"))
+                        .small()
+                        .color(egui::Color32::from_rgb(198, 40, 40)),
+                );
+            }
+            ProviderTestStatus::Testing { provider } if provider == provider_id => {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Fetching usage with the current provider settings...")
+                        .small()
+                        .weak(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn trigger_provider_test(&self, provider_id: String, ctx: egui::Context) {
+        self.save_config();
+
+        let mut config = self.config.clone();
+        crate::secrets::hydrate_config(&mut config);
+        enable_provider_for_test(&mut config, &provider_id);
+
+        *self.provider_test_status.lock() = ProviderTestStatus::Testing {
+            provider: provider_id.clone(),
+        };
+
+        let status = self.provider_test_status.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<UsageData> {
+                let provider = crate::create_provider(&provider_id, &config).ok_or_else(|| {
+                    anyhow::anyhow!("Provider could not be created from the current settings")
+                })?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(provider.fetch_usage())
+            })();
+
+            *status.lock() = match result {
+                Ok(data) => {
+                    if let Some(error) = data.error.clone() {
+                        ProviderTestStatus::Error {
+                            provider: provider_id,
+                            message: error,
+                        }
+                    } else {
+                        ProviderTestStatus::Success {
+                            provider: provider_id,
+                            fetched_at: data.fetched_at,
+                            summary: summarize_provider_test(&data),
+                        }
+                    }
+                }
+                Err(err) => ProviderTestStatus::Error {
+                    provider: provider_id,
+                    message: err.to_string(),
+                },
+            };
+            ctx.request_repaint();
+        });
     }
 
     fn dragged_provider_rect(&self, pointer_pos: egui::Pos2, fallback_width: f32) -> egui::Rect {
@@ -833,14 +967,24 @@ fn format_credits_balance(balance: f64) -> String {
     }
 }
 
-fn open_config_file() -> anyhow::Result<()> {
-    let path = crate::config::AppConfig::config_path();
+fn open_config_file(config_path: Option<&PathBuf>) -> anyhow::Result<()> {
+    let path = config_path
+        .cloned()
+        .unwrap_or_else(crate::config::AppConfig::config_path);
     if !path.exists() {
         crate::config::AppConfig::default().save_to(&path)?;
     }
 
     std::process::Command::new("notepad.exe")
         .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+}
+
+fn open_folder(path: &std::path::Path) -> anyhow::Result<()> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
         .spawn()
         .map(|_| ())
         .map_err(anyhow::Error::from)
@@ -1033,6 +1177,7 @@ fn render_provider(
     config: &mut crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
+    history: &Arc<RwLock<crate::usage_history::UsageHistory>>,
     collapse: bool,
     is_dragged: bool,
 ) -> egui::Response {
@@ -1083,6 +1228,7 @@ fn render_provider(
                     config,
                     config_path,
                     all_data,
+                    history,
                     collapse,
                 )
             },
@@ -1108,6 +1254,7 @@ fn render_provider_card(
     config: &mut crate::config::AppConfig,
     config_path: Option<&PathBuf>,
     all_data: &Arc<RwLock<Vec<UsageData>>>,
+    history: &Arc<RwLock<crate::usage_history::UsageHistory>>,
     collapse: bool,
 ) -> egui::Response {
     let response = card_frame.show(ui, |ui| {
@@ -1273,6 +1420,7 @@ fn render_provider_card(
         );
 
         if !collapse {
+            let trend = history.read().trend_for(provider_name, 7);
             match status {
                 ProviderStatus::Disabled => {}
                 ProviderStatus::Error => {
@@ -1395,6 +1543,15 @@ fn render_provider_card(
                             });
                             ui.add_space(4.0);
                         }
+
+                        if let Some(trend) = trend {
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new(format_trend_summary(&trend))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
                     }
                 }
             }
@@ -1406,6 +1563,42 @@ fn render_provider_card(
     }
 
     response.response
+}
+
+fn format_trend_summary(trend: &crate::usage_history::ProviderTrend) -> String {
+    let delta = trend
+        .previous_percent
+        .map(|previous| trend.latest_percent - previous)
+        .filter(|value| value.abs() >= 0.05)
+        .map(|value| {
+            if value >= 0.0 {
+                format!("+{value:.1} pp")
+            } else {
+                format!("{value:.1} pp")
+            }
+        })
+        .unwrap_or_else(|| "flat".to_string());
+
+    format!(
+        "7d trend: avg {:.0}% · peak {:.0}% · {delta} · {} samples",
+        trend.average_percent, trend.peak_percent, trend.samples
+    )
+}
+
+fn render_secret_status(ui: &mut egui::Ui, provider: &str, field: &str, env_names: &[&str]) {
+    ui.horizontal(|ui| {
+        let status = if crate::secrets::configured(provider, field, env_names) {
+            "Stored in Windows Credential Manager"
+        } else {
+            "Not stored"
+        };
+        ui.label(egui::RichText::new(status).small().weak());
+        if ui.link("Clear").clicked()
+            && let Err(err) = crate::secrets::delete(provider, field)
+        {
+            tracing::error!("Failed to clear credential {provider}/{field}: {err}");
+        }
+    });
 }
 
 fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource<'static>> {
@@ -1556,17 +1749,108 @@ fn set_active_provider(
     *active_provider.write() = provider_name.to_string();
 
     config.general.active_provider = provider_name.to_string();
-    let result = if let Some(path) = config_path {
-        config.save_to(path)
-    } else {
-        config.save()
-    };
-    if let Err(err) = result {
+    if let Err(err) = save_config_without_secrets(config, config_path) {
         tracing::error!("Failed to save active provider {provider_name}: {err}");
     }
 
     update_tray_icon_for_active_provider(provider_name, data);
     crate::tray::request_refresh();
+}
+
+fn save_config_without_secrets(
+    config: &crate::config::AppConfig,
+    config_path: Option<&PathBuf>,
+) -> anyhow::Result<()> {
+    let mut config_to_save = config.clone();
+    crate::secrets::store_and_scrub_config(&mut config_to_save);
+    if let Some(path) = config_path {
+        config_to_save.save_to(path)
+    } else {
+        config_to_save.save()
+    }
+}
+
+fn enable_provider_for_test(config: &mut crate::config::AppConfig, provider: &str) {
+    match provider {
+        "deepseek" => config.deepseek.enabled = Some(true),
+        "claude" => config.claude.enabled = Some(true),
+        "codex" => config.codex.enabled = Some(true),
+        "gemini" => config.gemini.enabled = Some(true),
+        "antigravity" => config.antigravity.enabled = Some(true),
+        "opencode" | "opencodego" => config.opencode.enabled = Some(true),
+        "mimo" => config.mimo.enabled = Some(true),
+        _ => {
+            if let Some(cfg) = api_key_provider_config_mut(config, provider) {
+                cfg.enabled = Some(true);
+            }
+        }
+    }
+}
+
+fn api_key_provider_config_mut<'a>(
+    config: &'a mut crate::config::AppConfig,
+    provider: &str,
+) -> Option<&'a mut crate::config::ApiKeyProviderConfig> {
+    match provider {
+        "openai" => Some(&mut config.openai),
+        "openrouter" => Some(&mut config.openrouter),
+        "moonshot" => Some(&mut config.moonshot),
+        "elevenlabs" => Some(&mut config.elevenlabs),
+        "doubao" => Some(&mut config.doubao),
+        "zai" => Some(&mut config.zai),
+        "venice" => Some(&mut config.venice),
+        "crof" => Some(&mut config.crof),
+        "synthetic" => Some(&mut config.synthetic),
+        "warp" => Some(&mut config.warp),
+        "groqcloud" => Some(&mut config.groqcloud),
+        "deepgram" => Some(&mut config.deepgram),
+        "llmproxy" => Some(&mut config.llmproxy),
+        "codebuff" => Some(&mut config.codebuff),
+        "kiro" => Some(&mut config.kiro),
+        "copilot" => Some(&mut config.copilot),
+        "azureopenai" => Some(&mut config.azureopenai),
+        "ollama" => Some(&mut config.ollama),
+        "minimax" => Some(&mut config.minimax),
+        "jetbrains" => Some(&mut config.jetbrains),
+        "kimi" => Some(&mut config.kimi),
+        "kilo" => Some(&mut config.kilo),
+        "augment" => Some(&mut config.augment),
+        "bedrock" => Some(&mut config.bedrock),
+        "vertexai" => Some(&mut config.vertexai),
+        "stepfun" => Some(&mut config.stepfun),
+        "abacus" => Some(&mut config.abacus),
+        "alibabatoken" => Some(&mut config.alibabatoken),
+        "t3chat" => Some(&mut config.t3chat),
+        "amp" => Some(&mut config.amp),
+        "mistral" => Some(&mut config.mistral),
+        "grok" => Some(&mut config.grok),
+        "cursor" => Some(&mut config.cursor),
+        "droid" => Some(&mut config.droid),
+        "windsurf" => Some(&mut config.windsurf),
+        _ => None,
+    }
+}
+
+fn summarize_provider_test(data: &UsageData) -> String {
+    let max_percent = data.max_used_percent();
+    let windows = data.windows.len();
+    let credits = data
+        .credits
+        .as_ref()
+        .map(|credits| {
+            format!(
+                " Credits: {} {}.",
+                format_credits_balance(credits.balance),
+                credits.currency
+            )
+        })
+        .unwrap_or_default();
+
+    if windows == 0 && data.credits.is_none() {
+        "Provider responded, but no usage windows or credits were returned.".to_string()
+    } else {
+        format!("Returned {windows} usage window(s), max usage {max_percent:.0}%.{credits}")
+    }
 }
 
 fn update_tray_icon_for_active_provider(provider_name: &str, data: &Arc<RwLock<Vec<UsageData>>>) {
@@ -1997,6 +2281,46 @@ impl QuotifyApp {
                                     ui.separator();
                                     ui.add_space(10.0);
 
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Start with Windows")
+                                                    .strong()
+                                                    .size(13.0),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new("Launch Quotify when you sign in")
+                                                    .small()
+                                                    .color(ui.visuals().weak_text_color()),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let mut enabled =
+                                                    self.config.general.start_with_windows;
+                                                if ui.checkbox(&mut enabled, "").changed() {
+                                                    match crate::startup::set_enabled(enabled) {
+                                                        Ok(()) => {
+                                                            self.config.general.start_with_windows =
+                                                                enabled;
+                                                            self.save_config();
+                                                        }
+                                                        Err(err) => {
+                                                            tracing::error!(
+                                                                "Failed to update startup setting: {err}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    ui.add_space(10.0);
+                                    ui.separator();
+                                    ui.add_space(10.0);
+
                                     // Refresh Interval Settings
                                     ui.vertical(|ui| {
                                         ui.label(egui::RichText::new("Refresh Interval").strong().size(13.0));
@@ -2265,6 +2589,7 @@ impl QuotifyApp {
                                                 }
                                                 ui.add_space(8.0);
                                                 ui.label(egui::RichText::new("API Key / Token").strong().size(12.0));
+                                                render_secret_status(ui, provider_id.as_str(), "api_key", &[]);
                                                 if ui.add(egui::TextEdit::singleline(&mut cfg.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
                                                     changed = true;
                                                 }
@@ -2287,6 +2612,11 @@ impl QuotifyApp {
                                     if changed {
                                         self.save_config();
                                     }
+
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(10.0);
+                                    self.render_provider_test_controls(ui, &provider_id);
                                 });
                             });
 
@@ -2295,7 +2625,23 @@ impl QuotifyApp {
                             ui.horizontal(|ui| {
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                     if ui.link("Open config file in text editor").clicked() {
-                                        let _ = open_config_file();
+                                        let _ = open_config_file(self.config_path.as_ref());
+                                    }
+                                    ui.separator();
+                                    if ui.link("Open logs").clicked() {
+                                        let _ = open_folder(&crate::diagnostics::log_dir());
+                                    }
+                                    ui.separator();
+                                    if ui.link("Create diagnostic report").clicked() {
+                                        match crate::diagnostics::write_diagnostic_report(
+                                            self.config_path.as_deref(),
+                                            Some(&self.history.read()),
+                                        ) {
+                                            Ok(path) => {
+                                                let _ = open_folder(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
+                                            }
+                                            Err(err) => tracing::error!("Failed to write diagnostic report: {err}"),
+                                        }
                                     }
                                 });
                             });
@@ -2343,7 +2689,7 @@ fn is_newer(current: &str, latest: &str) -> bool {
 
 fn open_browser(url: &str) {
     let _ = std::process::Command::new("cmd")
-        .args(&["/C", "start", "", url])
+        .args(["/C", "start", "", url])
         .spawn();
 }
 
@@ -2435,5 +2781,18 @@ mod tests {
             &["openai", "claude", "codex"],
         ));
         assert_eq!(&order[..3], ["openai", "claude", "codex"]);
+    }
+
+    #[test]
+    fn test_enable_provider_for_test_does_not_require_ui_enabled_state() {
+        let mut config = crate::config::AppConfig::default();
+        config.openai.enabled = Some(false);
+        config.opencode.enabled = Some(false);
+
+        enable_provider_for_test(&mut config, "openai");
+        enable_provider_for_test(&mut config, "opencodego");
+
+        assert_eq!(config.openai.enabled, Some(true));
+        assert_eq!(config.opencode.enabled, Some(true));
     }
 }

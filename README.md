@@ -77,7 +77,11 @@ The default config path is:
 %APPDATA%\quotify\quotify.toml
 ```
 
-See `config.example.toml` for available fields. Common environment variables include 
+See `config.example.toml` for available fields. Non-secret settings remain in
+`quotify.toml`; API keys, cookies, service tokens, and session values entered in
+the settings UI are stored in Windows Credential Manager under
+`quotify/<provider>/<field>` and are injected into memory at runtime. Common
+environment variables include 
  - `OPENCODE_AUTH_COOKIE`
  - `OPENCODE_WORKSPACE_ID`
  - `CLAUDE_ACCESS_TOKEN`
@@ -123,12 +127,20 @@ See `config.example.toml` for available fields. Common environment variables inc
  - `MIMO_SERVICE_TOKEN`
  - `MIMO_COOKIE_HEADER`.
 
+### Desktop facilities
+
+Quotify enforces a single running tray instance. It writes rotating daily logs to
+`%APPDATA%\quotify\logs`, can generate diagnostic reports from the settings UI,
+can register itself to start with Windows, and stores usage snapshots in
+`%APPDATA%\quotify\usage-history.json` so the popup can show the last successful
+data and recent trend summaries before the next refresh completes.
+
 ### Cookie helper scripts
 
-Some providers require an explicit browser cookie header in `quotify.toml`. The
-PowerShell helper can open a separate Chrome profile with remote debugging,
-wait for you to log in, fetch cookies for the selected provider, and sync the
-cookie header into the matching config field.
+Some providers require an explicit browser cookie header. The PowerShell helper
+can open a separate Chrome profile with remote debugging, wait for you to log in,
+fetch cookies for the selected provider, and sync the cookie header into Windows
+Credential Manager.
 
 Run the interactive flow:
 
@@ -137,7 +149,7 @@ Run the interactive flow:
 ```
 
 This prompts for a provider, opens the provider page, waits for you to press
-Enter after login, then writes the cookie to `%APPDATA%\quotify\quotify.toml`.
+Enter after login, then writes the cookie to Windows Credential Manager.
 For MiMo, the script opens `https://platform.xiaomimimo.com/console/balance`.
 
 You can also run it directly for a provider:

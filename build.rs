@@ -1,6 +1,6 @@
 fn main() {
     let git_tag = std::process::Command::new("git")
-        .args(&["describe", "--tags", "--always"])
+        .args(["describe", "--tags", "--always"])
         .output()
         .ok()
         .and_then(|output| {

@@ -1,6 +1,13 @@
+[secrets]
+# Secret values are not persisted in this TOML file. Enter API keys, cookies,
+# session keys, and service tokens from the settings UI or with the cookie helper;
+# Quotify stores them in Windows Credential Manager as quotify/<provider>/<field>.
+# Environment variables listed below are still supported for automation.
+
 [general]
 refresh_interval = 300
 active_provider = ""                # Optional primary provider for tray icon/tip, e.g. "codex", "opencode", "claude"
+start_with_windows = false          # Register Quotify under HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 provider_order = [
   "claude",
   "codex",

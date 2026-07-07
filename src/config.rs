@@ -12,6 +12,8 @@ pub struct GeneralConfig {
     pub provider_order: Vec<String>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default)]
+    pub start_with_windows: bool,
 }
 
 fn default_refresh_interval() -> u64 {
@@ -29,6 +31,7 @@ impl Default for GeneralConfig {
             active_provider: String::new(),
             provider_order: Vec::new(),
             theme: default_theme(),
+            start_with_windows: false,
         }
     }
 }

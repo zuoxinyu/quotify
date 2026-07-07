@@ -2,9 +2,14 @@
 
 mod app;
 mod config;
+mod diagnostics;
 mod icon;
 mod provider;
+mod secrets;
+mod single_instance;
+mod startup;
 mod tray;
+mod usage_history;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -113,7 +118,7 @@ enum Commands {
     Tray,
 }
 
-fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Provider>> {
+pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Provider>> {
     let proxy = config.network.proxy.trim();
     let proxy = (!proxy.is_empty()).then_some(proxy);
 
@@ -1025,6 +1030,7 @@ async fn fetch_all_providers(
     config: &config::AppConfig,
     data: Arc<RwLock<Vec<UsageData>>>,
     last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
+    history: Arc<RwLock<usage_history::UsageHistory>>,
 ) {
     let all_providers = PROVIDER_ORDER;
 
@@ -1044,24 +1050,27 @@ async fn fetch_all_providers(
 
     *data.write() = results;
     *last_refresh.write() = chrono::Utc::now();
+    {
+        let mut history = history.write();
+        history.append(data.read().clone());
+        if let Err(err) = history.save() {
+            tracing::error!("Failed to save usage history: {err}");
+        }
+    }
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    let _log_guard = diagnostics::init_file_logging();
 
     let cli = Cli::parse();
 
     let config_path = cli.config.as_ref().map(std::path::PathBuf::from);
-    let config = if let Some(ref path) = config_path {
-        config::AppConfig::load_from(&path)?
+    let mut config = if let Some(ref path) = config_path {
+        config::AppConfig::load_from(path)?
     } else {
         config::AppConfig::load()?
     };
+    secrets::hydrate_config(&mut config);
 
     match cli.command.unwrap_or(Commands::Tray) {
         Commands::Fetch {
@@ -1072,10 +1081,11 @@ fn main() -> Result<()> {
         }
         Commands::Init => {
             let path = config::AppConfig::config_path();
-            config.save()?;
+            config::AppConfig::default().save()?;
             println!("Config written to: {}", path.display());
         }
         Commands::Tray => {
+            let _single_instance = single_instance::SingleInstanceGuard::acquire()?;
             run_tray(config, config_path)?;
         }
     }
@@ -1177,16 +1187,30 @@ fn load_runtime_config(
         config::AppConfig::load()
     };
 
-    loaded.unwrap_or_else(|err| {
+    let mut config = loaded.unwrap_or_else(|err| {
         tracing::error!("Failed to reload config, using previous config: {err}");
         fallback.clone()
-    })
+    });
+    secrets::hydrate_config(&mut config);
+    config
 }
 
 fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) -> Result<()> {
-    let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(Vec::new()));
-    let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> =
-        Arc::new(RwLock::new(chrono::Utc::now()));
+    if let Err(err) = startup::set_enabled(config.general.start_with_windows) {
+        tracing::error!("Failed to sync startup setting: {err}");
+    }
+
+    let history = Arc::new(RwLock::new(usage_history::UsageHistory::load()));
+    let cached_data = history.read().latest_successful();
+    let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(cached_data));
+    let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> = Arc::new(RwLock::new(
+        history
+            .read()
+            .entries
+            .last()
+            .map(|entry| entry.fetched_at)
+            .unwrap_or_else(chrono::Utc::now),
+    ));
     let active_provider = Arc::new(RwLock::new(
         config.general.active_provider.trim().to_string(),
     ));
@@ -1212,6 +1236,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let refresh_interval = config.general.refresh_interval;
     let data_bg = data.clone();
     let last_refresh_bg = last_refresh.clone();
+    let history_bg = history.clone();
     let config_bg = config.clone();
     let config_path_bg = config_path.clone();
     let tc_bg = tray_controller.clone();
@@ -1237,6 +1262,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                     &current_config,
                     data_bg.clone(),
                     last_refresh_bg.clone(),
+                    history_bg.clone(),
                 ));
 
                 // Regenerate HICON
@@ -1265,6 +1291,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     // Spawn the eframe UI window on a separate thread
     let data_window = data.clone();
     let last_refresh_window = last_refresh.clone();
+    let history_window = history.clone();
     let config_window = config.clone();
     let config_path_window = config_path.clone();
     let active_provider_window = active_provider.clone();
@@ -1280,6 +1307,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             config_window,
             config_path_window,
             active_provider_window,
+            history_window,
         );
 
         let native_options = eframe::NativeOptions {
