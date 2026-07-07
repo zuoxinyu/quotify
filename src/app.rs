@@ -227,6 +227,12 @@ impl eframe::App for QuotifyApp {
             v
         };
 
+        // Remove default white/light borders from interactive widgets (buttons, dropdowns, etc.)
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
+
         // Standard Windows 11 layout corner roundings
         visuals.window_corner_radius = 12.into(); // standard Win11 window rounding
         visuals.widgets.noninteractive.corner_radius = 8.into(); // standard Win11 card rounding
@@ -323,22 +329,27 @@ impl eframe::App for QuotifyApp {
 
                         if active_page == 1 {
                             ui.horizontal_centered(|ui| {
-                                let back_btn = ui.add_sized(
-                                    egui::vec2(24.0, 24.0),
-                                    egui::Button::new(
-                                        egui::RichText::new("\u{E72B}")
-                                            .size(12.0)
-                                    )
-                                    .frame(true)
-                                    .corner_radius(12)
-                                );
-                                if back_btn.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                                if back_btn.clicked() {
-                                    crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
-                                    ctx.request_repaint();
-                                }
+                                ui.scope(|ui| {
+                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+
+                                    let back_btn = ui.add_sized(
+                                        egui::vec2(24.0, 24.0),
+                                        egui::Button::new(
+                                            egui::RichText::new("\u{E72B}")
+                                                .size(12.0)
+                                        )
+                                        .corner_radius(4)
+                                    );
+                                    if back_btn.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if back_btn.clicked() {
+                                        crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
+                                        ctx.request_repaint();
+                                    }
+                                });
                                 ui.add_space(8.0);
                                 ui.label(
                                     egui::RichText::new("About")
@@ -349,22 +360,27 @@ impl eframe::App for QuotifyApp {
                             });
                         } else if active_page == 2 {
                             ui.horizontal_centered(|ui| {
-                                let back_btn = ui.add_sized(
-                                    egui::vec2(24.0, 24.0),
-                                    egui::Button::new(
-                                        egui::RichText::new("\u{E72B}")
-                                            .size(12.0)
-                                    )
-                                    .frame(true)
-                                    .corner_radius(12)
-                                );
-                                if back_btn.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                                if back_btn.clicked() {
-                                    crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
-                                    ctx.request_repaint();
-                                }
+                                ui.scope(|ui| {
+                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+
+                                    let back_btn = ui.add_sized(
+                                        egui::vec2(24.0, 24.0),
+                                        egui::Button::new(
+                                            egui::RichText::new("\u{E72B}")
+                                                .size(12.0)
+                                        )
+                                        .corner_radius(4)
+                                    );
+                                    if back_btn.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if back_btn.clicked() {
+                                        crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
+                                        ctx.request_repaint();
+                                    }
+                                });
                                 ui.add_space(8.0);
                                 ui.label(
                                     egui::RichText::new("Settings")
@@ -380,7 +396,7 @@ impl eframe::App for QuotifyApp {
                                 ))
                                 .fit_to_exact_size(egui::vec2(18.0, 18.0))
                                 .maintain_aspect_ratio(true);
-                                ui.add(logo);
+                                ui.add(logo).on_hover_text("About");
 
                                 ui.add_space(6.0);
 
@@ -406,39 +422,57 @@ impl eframe::App for QuotifyApp {
                             }
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let settings = ui.add_sized(
-                                    egui::vec2(24.0, 24.0),
-                                    egui::Button::new(
-                                        egui::RichText::new("\u{E713}")
-                                            .strong()
-                                            .size(12.0)
-                                    )
-                                    .frame(false)
-                                    .corner_radius(4)
-                                ).on_hover_text("Settings");
+                                ui.scope(|ui| {
+                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
 
-                                if settings.clicked() {
-                                    crate::tray::ACTIVE_PAGE.store(2, std::sync::atomic::Ordering::SeqCst);
-                                    ctx.request_repaint();
-                                }
+                                    let settings = ui.add_sized(
+                                        egui::vec2(24.0, 24.0),
+                                        egui::Button::new(
+                                            egui::RichText::new("\u{E713}")
+                                                .strong()
+                                                .size(12.0)
+                                        )
+                                        .corner_radius(4)
+                                    ).on_hover_text("Settings");
+
+                                    if settings.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+
+                                    if settings.clicked() {
+                                        crate::tray::ACTIVE_PAGE.store(2, std::sync::atomic::Ordering::SeqCst);
+                                        ctx.request_repaint();
+                                    }
+                                });
 
                                 ui.add_space(2.0);
 
-                                let refresh = ui.add_sized(
-                                    egui::vec2(24.0, 24.0),
-                                    egui::Button::new(
-                                        egui::RichText::new("\u{E72C}")
-                                            .strong()
-                                            .size(12.0)
-                                    )
-                                    .frame(false)
-                                    .corner_radius(4)
-                                ).on_hover_text("Refresh usage now");
+                                ui.scope(|ui| {
+                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
 
-                                if refresh.clicked() {
-                                    crate::tray::request_refresh();
-                                    ctx.request_repaint();
-                                }
+                                    let refresh = ui.add_sized(
+                                        egui::vec2(24.0, 24.0),
+                                        egui::Button::new(
+                                            egui::RichText::new("\u{E72C}")
+                                                .strong()
+                                                .size(12.0)
+                                        )
+                                        .corner_radius(4)
+                                    ).on_hover_text("Refresh usage now");
+
+                                    if refresh.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+
+                                    if refresh.clicked() {
+                                        crate::tray::request_refresh();
+                                        ctx.request_repaint();
+                                    }
+                                });
 
                                 ui.add_space(4.0);
 
@@ -1306,14 +1340,19 @@ fn render_provider_card(
                         .stroke(egui::Stroke::new(1.0, primary_border))
                         .corner_radius(4)
                         .inner_margin(egui::Margin::symmetric(5, 2));
-                    primary_frame.show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("PRIMARY")
-                                .strong()
-                                .size(8.0)
-                                .color(primary_fg),
-                        );
-                    });
+                    let resp = primary_frame
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("PRIMARY")
+                                    .strong()
+                                    .size(8.0)
+                                    .color(primary_fg),
+                            );
+                        })
+                        .response;
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                    }
                     ui.add_space(4.0);
                 }
 
@@ -1367,23 +1406,34 @@ fn render_provider_card(
                     .stroke(egui::Stroke::new(1.0, border_color))
                     .corner_radius(4)
                     .inner_margin(egui::Margin::symmetric(5, 2));
-                badge_frame.show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .strong()
-                            .size(8.0)
-                            .color(fg_color),
-                    );
-                });
+                let resp = badge_frame
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(status_text)
+                                .strong()
+                                .size(8.0)
+                                .color(fg_color),
+                        );
+                    })
+                    .response;
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                }
 
                 // Credits Badge (Windows 11 accent tint badge)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let codex_reset_credits = if provider_name == "codex" {
-                        windows.iter().find(|w| w.label == "Reset Credits").and_then(|w| {
-                            w.unit.as_deref().and_then(|json_str| {
-                                serde_json::from_str::<crate::provider::CodexResetCredits>(json_str).ok()
+                        windows
+                            .iter()
+                            .find(|w| w.label == "Reset Credits")
+                            .and_then(|w| {
+                                w.unit.as_deref().and_then(|json_str| {
+                                    serde_json::from_str::<crate::provider::CodexResetCredits>(
+                                        json_str,
+                                    )
+                                    .ok()
+                                })
                             })
-                        })
                     } else {
                         None
                     };
@@ -1410,36 +1460,80 @@ fn render_provider_card(
                             .stroke(egui::Stroke::new(1.0, credits_border))
                             .corner_radius(4)
                             .inner_margin(egui::Margin::symmetric(8, 3));
-                        let badge_resp = credits_frame.show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(credit_text)
-                                    .strong()
-                                    .size(10.0)
-                                    .color(credits_fg),
-                            );
-                        }).response;
+                        let badge_resp = credits_frame
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(credit_text)
+                                        .strong()
+                                        .size(10.0)
+                                        .color(credits_fg),
+                                );
+                            })
+                            .response;
+                        if badge_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                        }
 
                         badge_resp.on_hover_ui(|ui| {
                             ui.set_max_width(200.0);
-                            ui.label(egui::RichText::new("Codex Reset Credits").strong().size(11.0));
-                            ui.label(egui::RichText::new(format!("Available: {}", resets.available_count)).size(10.0).weak());
+                            ui.label(
+                                egui::RichText::new("Codex Reset Credits")
+                                    .strong()
+                                    .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Available: {}",
+                                    resets.available_count
+                                ))
+                                .size(10.0)
+                                .weak(),
+                            );
                             if resets.credits.is_empty() {
-                                ui.label(egui::RichText::new("No active reset credits.").size(9.0).weak());
+                                ui.label(
+                                    egui::RichText::new("No active reset credits.")
+                                        .size(9.0)
+                                        .weak(),
+                                );
                             } else {
                                 for (i, credit) in resets.credits.iter().enumerate() {
                                     ui.separator();
-                                    let status_tag = if credit.status == "available" { "Active" } else { &credit.status };
-                                    ui.label(egui::RichText::new(format!("Credit #{}: {}", i + 1, status_tag)).strong().size(9.5));
+                                    let status_tag = if credit.status == "available" {
+                                        "Active"
+                                    } else {
+                                        &credit.status
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Credit #{}: {}",
+                                            i + 1,
+                                            status_tag
+                                        ))
+                                        .strong()
+                                        .size(9.5),
+                                    );
                                     if let Some(expires) = credit.expires_at {
-                                        ui.label(egui::RichText::new(format!(
-                                            "Expires: {}",
-                                            expires.with_timezone(&chrono::Local).format("%m-%d %H:%M")
-                                        )).size(9.0).weak());
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Expires: {}",
+                                                expires
+                                                    .with_timezone(&chrono::Local)
+                                                    .format("%m-%d %H:%M")
+                                            ))
+                                            .size(9.0)
+                                            .weak(),
+                                        );
                                     } else if let Some(granted) = credit.granted_at {
-                                        ui.label(egui::RichText::new(format!(
-                                            "Granted: {}",
-                                            granted.with_timezone(&chrono::Local).format("%m-%d %H:%M")
-                                        )).size(9.0).weak());
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Granted: {}",
+                                                granted
+                                                    .with_timezone(&chrono::Local)
+                                                    .format("%m-%d %H:%M")
+                                            ))
+                                            .size(9.0)
+                                            .weak(),
+                                        );
                                     }
                                 }
                             }
@@ -1467,14 +1561,19 @@ fn render_provider_card(
                             .stroke(egui::Stroke::new(1.0, credits_border))
                             .corner_radius(4)
                             .inner_margin(egui::Margin::symmetric(8, 3));
-                        credits_frame.show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(credit_text)
-                                    .strong()
-                                    .size(10.0)
-                                    .color(credits_fg),
-                            );
-                        });
+                        let badge_resp = credits_frame
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(credit_text)
+                                        .strong()
+                                        .size(10.0)
+                                        .color(credits_fg),
+                                );
+                            })
+                            .response;
+                        if badge_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                        }
                     }
                 });
             },
@@ -1532,7 +1631,10 @@ fn render_provider_card(
                     });
                 }
                 ProviderStatus::Active => {
-                    let active_windows: Vec<_> = windows.iter().filter(|w| w.label != "Reset Credits").collect();
+                    let active_windows: Vec<_> = windows
+                        .iter()
+                        .filter(|w| w.label != "Reset Credits")
+                        .collect();
                     if active_windows.is_empty() {
                         if credits.is_none() {
                             ui.add_space(8.0);
@@ -1946,9 +2048,56 @@ fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {
 
         let fill_width = bar_width * (pct / 100.0);
         if fill_width > 0.0 {
-            let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, bar_height));
-            ui.painter()
-                .rect_filled(fill_rect, rounding, progress_color(pct, is_dark));
+            if fill_width < rounding {
+                // If the fill width is smaller than the corner radius, a standard rounded rectangle
+                // would have scaled-down corner radii, causing it to overflow the track's left end.
+                // We construct a custom convex polygon matching the exact mathematical intersection
+                // of the track's left semicircle and the vertical slice at `fill_width`.
+                let mut points = Vec::with_capacity(22);
+                let center_y = rect.min.y + rounding;
+                let steps = 10;
+
+                // Top arc from left to right: x goes from 0.0 to fill_width
+                for i in 0..=steps {
+                    let x_offset = fill_width * (i as f32 / steps as f32);
+                    let h_half = (2.0 * rounding * x_offset - x_offset * x_offset)
+                        .max(0.0)
+                        .sqrt();
+                    points.push(egui::pos2(rect.min.x + x_offset, center_y - h_half));
+                }
+
+                // Bottom arc from right to left: x goes from fill_width down to 0.0
+                for i in (0..=steps).rev() {
+                    let x_offset = fill_width * (i as f32 / steps as f32);
+                    let h_half = (2.0 * rounding * x_offset - x_offset * x_offset)
+                        .max(0.0)
+                        .sqrt();
+                    points.push(egui::pos2(rect.min.x + x_offset, center_y + h_half));
+                }
+
+                ui.painter().add(egui::Shape::convex_polygon(
+                    points,
+                    progress_color(pct, is_dark),
+                    egui::Stroke::NONE,
+                ));
+            } else {
+                // If fill_width >= rounding, we can safely draw it as a rounded rectangle.
+                // To prevent the left corners from being scaled down by the right corner's rounding,
+                // we set the right corner radius dynamically such that `left_rounding + right_rounding <= fill_width`.
+                let right_rounding = (fill_width - rounding).min(rounding);
+                let fill_rect =
+                    egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, bar_height));
+
+                let nw = rounding.round() as u8;
+                let sw = rounding.round() as u8;
+                let ne = right_rounding.round() as u8;
+                let se = right_rounding.round() as u8;
+
+                let corner_radius = egui::CornerRadius { nw, ne, sw, se };
+
+                ui.painter()
+                    .rect_filled(fill_rect, corner_radius, progress_color(pct, is_dark));
+            }
         }
     }
 
@@ -2431,10 +2580,32 @@ impl QuotifyApp {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("Provider Settings").strong().size(14.0));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let btn_text = if self.show_secrets { "Hide Secrets" } else { "Show Secrets" };
-                                    if ui.button(btn_text).clicked() {
-                                        self.show_secrets = !self.show_secrets;
-                                    }
+                                    let btn_icon = if self.show_secrets { "\u{ED1A}" } else { "\u{E7B3}" };
+                                    let btn_tooltip = if self.show_secrets { "Hide Secrets" } else { "Show Secrets" };
+
+                                    ui.scope(|ui| {
+                                        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+
+                                        let btn = ui.add_sized(
+                                            egui::vec2(24.0, 24.0),
+                                            egui::Button::new(
+                                                egui::RichText::new(btn_icon)
+                                                    .strong()
+                                                    .size(14.0)
+                                            )
+                                            .corner_radius(4)
+                                        ).on_hover_text(btn_tooltip);
+
+                                        if btn.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+
+                                        if btn.clicked() {
+                                            self.show_secrets = !self.show_secrets;
+                                        }
+                                    });
                                 });
                             });
                             ui.add_space(4.0);

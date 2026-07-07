@@ -1336,7 +1336,22 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                     loaded_any = true;
                 }
 
-                // Try to load Segoe MDL2 Assets for native WinUI system icon glyphs
+                // Try to load Segoe Fluent Icons for modern Windows 11 system icon glyphs
+                let fluent_icon_path = std::path::Path::new("C:\\Windows\\Fonts\\SegoeIcons.ttf");
+                if let Ok(fluent_icon_data) = std::fs::read(fluent_icon_path) {
+                    fonts.font_data.insert(
+                        "SegoeFluentIcons".to_owned(),
+                        std::sync::Arc::new(eframe::egui::FontData::from_owned(fluent_icon_data)),
+                    );
+                    fonts
+                        .families
+                        .get_mut(&eframe::egui::FontFamily::Proportional)
+                        .unwrap()
+                        .push("SegoeFluentIcons".to_owned());
+                    loaded_any = true;
+                }
+
+                // Try to load Segoe MDL2 Assets for older Windows system icon glyphs (fallback)
                 let icon_font_path = std::path::Path::new("C:\\Windows\\Fonts\\segmdl2.ttf");
                 if let Ok(icon_font_data) = std::fs::read(icon_font_path) {
                     fonts.font_data.insert(
