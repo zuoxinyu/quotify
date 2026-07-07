@@ -44,11 +44,10 @@ pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
 pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-pub const PROVIDER_ORDER: [&str; 43] = [
+pub const PROVIDER_ORDER: [&str; 42] = [
     "codex",
     "openai",
     "opencode",
-    "opencodego",
     "claude",
     "gemini",
     "antigravity",
@@ -961,37 +960,7 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 None
             }
         }
-        "opencodego" => {
-            let workspace_id = if config.opencode.workspace_id.is_empty() {
-                None
-            } else {
-                Some(config.opencode.workspace_id.clone())
-            };
-            let auth_cookie = if config.opencode.auth_cookie.is_empty() {
-                None
-            } else {
-                Some(config.opencode.auth_cookie.clone())
-            };
-
-            if config.opencode.enabled == Some(false) {
-                return None;
-            }
-            if config.opencode.enabled.unwrap_or(false)
-                || workspace_id.is_some()
-                || auth_cookie.is_some()
-                || OpenCodeProvider::has_workspace_hint()
-                || OpenCodeProvider::has_auth_cookie_hint()
-            {
-                Some(Box::new(OpenCodeProvider::new_with_name(
-                    "opencodego",
-                    workspace_id,
-                    auth_cookie,
-                    proxy,
-                )))
-            } else {
-                None
-            }
-        }
+        "opencodego" => create_provider("opencode", config),
         "mimo" => {
             let service_token = if config.mimo.service_token.is_empty() {
                 None

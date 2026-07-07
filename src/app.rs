@@ -991,7 +991,6 @@ fn provider_catalog() -> &'static [(&'static str, &'static str)] {
         ("codex", "Codex"),
         ("openai", "OpenAI"),
         ("opencode", "OpenCode"),
-        ("opencodego", "OpenCode Go"),
         ("claude", "Claude"),
         ("gemini", "Gemini"),
         ("antigravity", "Antigravity"),
@@ -1421,28 +1420,26 @@ fn render_provider_card(
                         }).response;
 
                         badge_resp.on_hover_ui(|ui| {
-                            ui.set_max_width(260.0);
-                            ui.heading("Codex Reset Credits");
-                            ui.add_space(4.0);
-                            ui.label(format!("Available resets: {}", resets.available_count));
+                            ui.set_max_width(200.0);
+                            ui.label(egui::RichText::new("Codex Reset Credits").strong().size(11.0));
+                            ui.label(egui::RichText::new(format!("Available: {}", resets.available_count)).size(10.0).weak());
                             if resets.credits.is_empty() {
-                                ui.label("No active reset credits.");
+                                ui.label(egui::RichText::new("No active reset credits.").size(9.0).weak());
                             } else {
                                 for (i, credit) in resets.credits.iter().enumerate() {
                                     ui.separator();
-                                    ui.strong(format!("Credit #{}", i + 1));
-                                    ui.label(format!("Status: {}", credit.status));
-                                    if let Some(granted) = credit.granted_at {
-                                        ui.label(format!(
-                                            "Granted: {}",
-                                            granted.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
-                                        ));
-                                    }
+                                    let status_tag = if credit.status == "available" { "Active" } else { &credit.status };
+                                    ui.label(egui::RichText::new(format!("Credit #{}: {}", i + 1, status_tag)).strong().size(9.5));
                                     if let Some(expires) = credit.expires_at {
-                                        ui.label(format!(
+                                        ui.label(egui::RichText::new(format!(
                                             "Expires: {}",
-                                            expires.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
-                                        ));
+                                            expires.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+                                        )).size(9.0).weak());
+                                    } else if let Some(granted) = credit.granted_at {
+                                        ui.label(egui::RichText::new(format!(
+                                            "Granted: {}",
+                                            granted.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+                                        )).size(9.0).weak());
                                     }
                                 }
                             }
@@ -2689,7 +2686,7 @@ impl QuotifyApp {
                             // Link/button to open file in Notepad directly
                             ui.horizontal(|ui| {
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    if ui.link("Open config file in text editor").clicked() {
+                                    if ui.link("Open config file").clicked() {
                                         let _ = open_config_file(self.config_path.as_ref());
                                     }
                                     ui.separator();

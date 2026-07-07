@@ -240,8 +240,17 @@ impl AppConfig {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;
 
-        let config: AppConfig = toml::from_str(&content)
+        let mut config: AppConfig = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config from {:?}", path))?;
+
+        if config.general.active_provider.eq_ignore_ascii_case("opencodego") {
+            config.general.active_provider = "opencode".to_string();
+        }
+        for item in &mut config.general.provider_order {
+            if item.eq_ignore_ascii_case("opencodego") {
+                *item = "opencode".to_string();
+            }
+        }
 
         Ok(config)
     }
