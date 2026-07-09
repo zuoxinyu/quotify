@@ -266,6 +266,15 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
                 .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
                 .with_url(url)
                 .with_devtools(true)
+                .with_new_window_req_handler(|new_url, _| {
+                    tracing::info!("WebView requested new window for URL: {}", new_url);
+                    WEBVIEW.with(|wv| {
+                        if let Some(wv_ref) = wv.borrow().as_ref() {
+                            let _ = wv_ref.load_url(&new_url);
+                        }
+                    });
+                    wry::NewWindowResponse::Deny
+                })
                 .build(&window)
                 .expect("Failed to build webview");
 

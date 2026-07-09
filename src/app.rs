@@ -746,6 +746,48 @@ impl QuotifyApp {
             if testing_this {
                 ui.spinner();
             }
+
+            let supports_web_login = matches!(provider_id, "mimo" | "opencode" | "ollama");
+            if supports_web_login {
+                ui.add_space(8.0);
+                let btn = egui::Button::new("Web Login").min_size(egui::vec2(80.0, 26.0));
+                let btn_resp = ui.add(btn);
+                if btn_resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if btn_resp.clicked() {
+                    let name_str = provider_id.to_string();
+                    let ctx_clone = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let fresh_cookie = match name_str.as_str() {
+                            "mimo" => crate::webview_login::login_and_get_cookie(),
+                            "opencode" => crate::webview_login::opencode_login_and_get_cookie(),
+                            "ollama" => crate::webview_login::ollama_login_and_get_cookie(),
+                            _ => return,
+                        };
+                        match fresh_cookie {
+                            Ok(cookie) => {
+                                let secret_key = match name_str.as_str() {
+                                    "mimo" => "cookie_header",
+                                    "opencode" => "auth_cookie",
+                                    "ollama" => "auth_cookie",
+                                    _ => return,
+                                };
+                                if let Err(err) = crate::secrets::set(&name_str, secret_key, &cookie) {
+                                    tracing::error!("Failed to store {name_str} cookie: {err}");
+                                } else {
+                                    tracing::info!("Successfully stored {name_str} cookie from web login.");
+                                    crate::tray::request_refresh();
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!("Web login for {name_str} failed: {err}");
+                            }
+                        }
+                        ctx_clone.request_repaint();
+                    });
+                }
+            }
         });
 
         match status {
@@ -1611,22 +1653,71 @@ fn render_provider_card(
                         .corner_radius(6)
                         .inner_margin(8);
                     error_frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(warning_symbol_color, "⚠");
-                            ui.add_space(4.0);
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center)
-                                    .with_main_wrap(true),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(
-                                            error_msg.unwrap_or("Unknown error occurred"),
-                                        )
-                                        .small()
-                                        .color(err_fg),
-                                    );
-                                },
-                            );
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(warning_symbol_color, "⚠");
+                                ui.add_space(4.0);
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center)
+                                        .with_main_wrap(true),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                error_msg.unwrap_or("Unknown error occurred"),
+                                            )
+                                            .small()
+                                            .color(err_fg),
+                                        );
+                                    },
+                                );
+                            });
+
+                            let supports_web_login = matches!(provider_name, "mimo" | "opencode" | "ollama");
+                            if supports_web_login {
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new("Web Login")
+                                            .small()
+                                    )
+                                    .min_size(egui::vec2(72.0, 20.0));
+                                    
+                                    let btn_resp = ui.add(btn);
+                                    if btn_resp.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if btn_resp.clicked() {
+                                        let name_str = provider_name.to_string();
+                                        std::thread::spawn(move || {
+                                            let fresh_cookie = match name_str.as_str() {
+                                                "mimo" => crate::webview_login::login_and_get_cookie(),
+                                                "opencode" => crate::webview_login::opencode_login_and_get_cookie(),
+                                                "ollama" => crate::webview_login::ollama_login_and_get_cookie(),
+                                                _ => return,
+                                            };
+                                            match fresh_cookie {
+                                                Ok(cookie) => {
+                                                    let secret_key = match name_str.as_str() {
+                                                        "mimo" => "cookie_header",
+                                                        "opencode" => "auth_cookie",
+                                                        "ollama" => "auth_cookie",
+                                                        _ => return,
+                                                    };
+                                                    if let Err(err) = crate::secrets::set(&name_str, secret_key, &cookie) {
+                                                        tracing::error!("Failed to store {name_str} cookie: {err}");
+                                                    } else {
+                                                        tracing::info!("Successfully stored {name_str} cookie from web login.");
+                                                        crate::tray::request_refresh();
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    tracing::error!("Web login for {name_str} failed: {err}");
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            }
                         });
                     });
                 }
