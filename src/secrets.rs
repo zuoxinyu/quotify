@@ -13,7 +13,7 @@ fn target(provider: &str, field: &str) -> String {
     format!("quotify/{provider}/{field}")
 }
 
-pub fn get(provider: &str, field: &str) -> Result<Option<String>> {
+fn get_raw(provider: &str, field: &str) -> Result<Option<String>> {
     let target = wide_null(&target(provider, field));
     let mut credential = std::ptr::null_mut();
     let ok = unsafe {
@@ -42,7 +42,24 @@ pub fn get(provider: &str, field: &str) -> Result<Option<String>> {
     Ok(Some(value))
 }
 
-pub fn set(provider: &str, field: &str, value: &str) -> Result<()> {
+pub fn get(provider: &str, field: &str) -> Result<Option<String>> {
+    // 1. Try to read as chunked parts
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while let Some(part) = get_raw(provider, &format!("{field}/part{i}"))? {
+        parts.push(part);
+        i += 1;
+    }
+
+    if !parts.is_empty() {
+        return Ok(Some(parts.join("")));
+    }
+
+    // 2. Fallback to reading the single key
+    get_raw(provider, field)
+}
+
+fn set_raw(provider: &str, field: &str, value: &str) -> Result<()> {
     let target_name = wide_null(&target(provider, field));
     let user_name = wide_null("quotify");
     let mut blob = value.as_bytes().to_vec();
@@ -61,9 +78,44 @@ pub fn set(provider: &str, field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn delete(provider: &str, field: &str) -> Result<()> {
+pub fn set(provider: &str, field: &str, value: &str) -> Result<()> {
+    if value.len() <= 400 {
+        // Legacy single key format
+        set_raw(provider, field, value)?;
+        // Clean up any old parts if present
+        for i in 0..20 {
+            let _ = delete_raw(provider, &format!("{field}/part{i}"));
+        }
+    } else {
+        // Chunked format
+        let _ = delete_raw(provider, field);
+        let chars: Vec<char> = value.chars().collect();
+        let chunk_size = 400;
+        let mut i = 0;
+        for chunk in chars.chunks(chunk_size) {
+            let chunk_str: String = chunk.iter().collect();
+            set_raw(provider, &format!("{field}/part{i}"), &chunk_str)?;
+            i += 1;
+        }
+        // Clean up any remaining/older parts
+        for part_idx in i..20 {
+            let _ = delete_raw(provider, &format!("{field}/part{part_idx}"));
+        }
+    }
+    Ok(())
+}
+
+fn delete_raw(provider: &str, field: &str) -> Result<()> {
     let target = wide_null(&target(provider, field));
     let _ = unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, Some(0)) };
+    Ok(())
+}
+
+pub fn delete(provider: &str, field: &str) -> Result<()> {
+    let _ = delete_raw(provider, field);
+    for i in 0..20 {
+        let _ = delete_raw(provider, &format!("{field}/part{i}"));
+    }
     Ok(())
 }
 
@@ -171,7 +223,11 @@ pub fn hydrate_config(config: &mut crate::config::AppConfig) {
         "azureopenai",
         &["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_KEY"],
     );
-    hydrate_api_key(&mut config.ollama, "ollama", &["OLLAMA_API_KEY"]);
+    hydrate_api_key(
+        &mut config.ollama,
+        "ollama",
+        &["OLLAMA_API_KEY", "OLLAMA_COOKIE", "OLLAMA_SESSION_COOKIE"],
+    );
     hydrate_api_key(&mut config.minimax, "minimax", &["MINIMAX_API_KEY"]);
     hydrate_api_key(&mut config.kimi, "kimi", &["KIMI_AUTH_TOKEN"]);
     hydrate_api_key(&mut config.kilo, "kilo", &["KILO_API_KEY"]);
@@ -293,4 +349,29 @@ fn hydrate_api_key(config: &mut crate::config::ApiKeyProviderConfig, provider: &
 
 fn store_api_key(config: &mut crate::config::ApiKeyProviderConfig, provider: &str) {
     set_secret_from_input(provider, "api_key", &mut config.api_key);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_credential() {
+        // Test short write
+        let res = set("test_provider", "test_key", "test_value");
+        assert!(res.is_ok());
+        let read = get("test_provider", "test_key").unwrap();
+        assert_eq!(read, Some("test_value".to_string()));
+        let del = delete("test_provider", "test_key");
+        assert!(del.is_ok());
+
+        // Test long chunked write (1000 characters)
+        let long_val = "a".repeat(1000);
+        let res = set("test_provider", "test_key_long", &long_val);
+        assert!(res.is_ok());
+        let read = get("test_provider", "test_key_long").unwrap();
+        assert_eq!(read, Some(long_val));
+        let del = delete("test_provider", "test_key_long");
+        assert!(del.is_ok());
+    }
 }

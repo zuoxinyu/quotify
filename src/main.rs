@@ -481,6 +481,12 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 || std::env::var("OLLAMA_API_KEY")
                     .ok()
                     .is_some_and(|v| !v.is_empty())
+                || std::env::var("OLLAMA_COOKIE")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+                || std::env::var("OLLAMA_SESSION_COOKIE")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
             {
                 Some(Box::new(OllamaProvider::new(
                     config.ollama.api_key.clone(),

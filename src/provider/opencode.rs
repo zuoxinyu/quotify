@@ -86,16 +86,7 @@ impl OpenCodeProvider {
             return Ok(cookie);
         }
 
-        tracing::info!("No OpenCode credentials found. Attempting WebView2 login...");
-        let full_cookie =
-            tokio::task::spawn_blocking(crate::webview_login::opencode_login_and_get_cookie)
-                .await??;
-
-        if let Err(err) = crate::secrets::set("opencode", "auth_cookie", &full_cookie) {
-            tracing::error!("Failed to store OpenCode cookie in Windows Credential Manager: {err}");
-        }
-
-        Ok(full_cookie)
+        anyhow::bail!("OpenCode auth cookie not found. Please configure it in your config file or set the OPENCODE_AUTH_COOKIE env var.")
     }
 }
 
@@ -106,32 +97,12 @@ impl Provider for OpenCodeProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let mut cookie_header = self.resolve_cookie_header().await?;
+        let cookie_header = self.resolve_cookie_header().await?;
 
-        let (windows, credits) = match self.fetch_via_server_cookie(&cookie_header).await {
-            Ok(res) => res,
-            Err(err) => {
-                tracing::warn!(
-                    "OpenCode fetch failed ({err:#}). Retrying with fresh WebView2 login..."
-                );
-
-                let fresh_cookie = tokio::task::spawn_blocking(
-                    crate::webview_login::opencode_login_and_get_cookie,
-                )
-                .await??;
-
-                if let Err(err) = crate::secrets::set("opencode", "auth_cookie", &fresh_cookie) {
-                    tracing::error!(
-                        "Failed to store OpenCode cookie in Windows Credential Manager: {err}"
-                    );
-                }
-
-                cookie_header = fresh_cookie;
-                self.fetch_via_server_cookie(&cookie_header)
-                    .await
-                    .context("Failed to fetch OpenCode Go usage after retrying WebView2 login")?
-            }
-        };
+        let (windows, credits) = self
+            .fetch_via_server_cookie(&cookie_header)
+            .await
+            .context("Failed to fetch OpenCode Go usage")?;
 
         Ok(UsageData {
             provider: self.name().to_string(),
@@ -250,8 +221,12 @@ impl OpenCodeProvider {
         };
 
         let attempts = [
-            ServerPayload::Form(form_body),
+            // 1. Modern Vinxi/SolidStart format: just the JSON array of arguments
+            ServerPayload::Json(serde_json::Value::Array(args.to_vec())),
+            // 2. Legacy format: {"id": ..., "args": ...}
             ServerPayload::Json(json_body(function_id, args)),
+            // 3. Form format (legacy)
+            ServerPayload::Form(form_body),
         ];
 
         let mut last_error = None;
@@ -259,6 +234,7 @@ impl OpenCodeProvider {
             let mut request = self
                 .client
                 .post(OPENCODE_SERVER_URL)
+                .header("x-server-id", function_id)
                 .header("Cookie", cookie_header)
                 .header("Origin", "https://opencode.ai")
                 .header("Referer", "https://opencode.ai/")
@@ -335,8 +311,20 @@ fn normalize_auth_cookie(value: &str) -> Option<String> {
         .trim();
 
     if cookie.is_empty() {
-        None
-    } else if cookie.contains('=') || cookie.contains(';') {
+        return None;
+    }
+
+    // If it contains multiple cookies, extract only the 'auth' cookie
+    if cookie.contains(';') {
+        for part in cookie.split(';') {
+            let part = part.trim();
+            if part.starts_with("auth=") {
+                return Some(part.to_string());
+            }
+        }
+    }
+
+    if cookie.contains('=') {
         Some(cookie.to_string())
     } else {
         Some(format!("auth={cookie}"))

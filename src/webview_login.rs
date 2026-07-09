@@ -21,6 +21,7 @@ use wry::WebViewBuilder;
 pub enum LoginMode {
     Mimo,
     OpenCode,
+    Ollama,
 }
 
 thread_local! {
@@ -115,6 +116,14 @@ unsafe extern "system" fn window_proc(
                                         token_found = true;
                                     }
                                 }
+                                LoginMode::Ollama => {
+                                    // Ollama uses cookie named "__Host-next-auth.session-token" or similar session tokens
+                                    let name_lower = name.to_lowercase();
+                                    if (name_lower.contains("session") || name_lower.contains("auth")) && !value.is_empty() {
+                                        tracing::info!("Ollama: Detected session/auth cookie: {}", name);
+                                        token_found = true;
+                                    }
+                                }
                             }
                         }
 
@@ -143,6 +152,12 @@ unsafe extern "system" fn window_proc(
                                             cookie_names
                                         );
                                     }
+                                    LoginMode::Ollama => {
+                                        tracing::debug!(
+                                            "Ollama: Waiting for session/auth cookie. Current cookies: {:?}",
+                                            cookie_names
+                                        );
+                                    }
                                 }
                             }
 
@@ -154,6 +169,9 @@ unsafe extern "system" fn window_proc(
                                     }
                                     LoginMode::OpenCode => {
                                         tracing::info!("OpenCode: Manual login required, showing window...");
+                                    }
+                                    LoginMode::Ollama => {
+                                        tracing::info!("Ollama: Manual login required, showing window...");
                                     }
                                 }
                                 unsafe {
@@ -182,6 +200,10 @@ pub fn opencode_login_and_get_cookie() -> Result<String> {
     run_login_flow(LoginMode::OpenCode)
 }
 
+pub fn ollama_login_and_get_cookie() -> Result<String> {
+    run_login_flow(LoginMode::Ollama)
+}
+
 fn run_login_flow(mode: LoginMode) -> Result<String> {
     let (tx, rx) = mpsc::channel();
 
@@ -191,10 +213,12 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
             let class_name = match mode {
                 LoginMode::Mimo => w!("QuotifyMimoLoginClass"),
                 LoginMode::OpenCode => w!("QuotifyOpenCodeLoginClass"),
+                LoginMode::Ollama => w!("QuotifyOllamaLoginClass"),
             };
             let title = match mode {
                 LoginMode::Mimo => w!("Xiaomi Mimo Login (Please login to continue)"),
                 LoginMode::OpenCode => w!("OpenCode Login (Please login to continue)"),
+                LoginMode::Ollama => w!("Ollama Login (Please login to continue)"),
             };
 
             let wc = WNDCLASSW {
@@ -228,12 +252,14 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
             match mode {
                 LoginMode::Mimo => data_dir.push("QuotifyMimoWebviewData"),
                 LoginMode::OpenCode => data_dir.push("QuotifyOpenCodeWebviewData"),
+                LoginMode::Ollama => data_dir.push("QuotifyOllamaWebviewData"),
             }
             let mut web_context = wry::WebContext::new(Some(data_dir));
 
             let url = match mode {
                 LoginMode::Mimo => "https://platform.xiaomimimo.com",
                 LoginMode::OpenCode => "https://opencode.ai",
+                LoginMode::Ollama => "https://ollama.com/signin",
             };
 
             let webview = WebViewBuilder::new_with_web_context(&mut web_context)
