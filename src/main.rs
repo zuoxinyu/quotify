@@ -1077,17 +1077,11 @@ fn main() -> Result<()> {
 }
 
 async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -> Result<()> {
-    let all_providers = PROVIDER_ORDER;
-
     let provider_names = providers.unwrap_or_else(|| {
-        let active: Vec<String> = all_providers
-            .iter()
-            .filter(|name| create_provider(name, config).is_some())
-            .map(|s| s.to_string())
-            .collect();
+        let active = configured_fetch_order(config);
 
         if active.is_empty() {
-            all_providers.iter().map(|s| s.to_string()).collect()
+            PROVIDER_ORDER.iter().map(|s| s.to_string()).collect()
         } else {
             active
         }
@@ -1099,6 +1093,33 @@ async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -
     println!("{json}");
 
     Ok(())
+}
+
+/// Provider order for machine-readable `fetch` output. Keep the configured
+/// order authoritative so downstream consumers (for example small external
+/// displays) render providers in the same order as the quotify tray UI.
+fn configured_fetch_order(config: &config::AppConfig) -> Vec<String> {
+    let mut names = Vec::new();
+
+    for configured in &config.general.provider_order {
+        let name = configured.trim().to_ascii_lowercase();
+        if name.is_empty() || names.iter().any(|existing| existing == &name) {
+            continue;
+        }
+        if create_provider(&name, config).is_some() {
+            names.push(name);
+        }
+    }
+
+    for name in PROVIDER_ORDER {
+        if !names.iter().any(|existing| existing == name)
+            && create_provider(name, config).is_some()
+        {
+            names.push(name.to_string());
+        }
+    }
+
+    names
 }
 
 async fn fetch_providers(
