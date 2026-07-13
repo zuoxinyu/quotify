@@ -104,6 +104,19 @@ impl UsageHistory {
         })
     }
 
+    pub fn latest_successful_for(&self, provider: &str) -> Option<crate::provider::UsageData> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                entry
+                    .providers
+                    .iter()
+                    .find(|data| data.provider.eq_ignore_ascii_case(provider) && data.error.is_none())
+                    .cloned()
+            })
+    }
+
     fn prune(&mut self, days: i64, max_entries: usize) {
         let cutoff = Utc::now() - chrono::Duration::days(days);
         self.entries.retain(|entry| entry.fetched_at >= cutoff);
@@ -175,5 +188,31 @@ mod tests {
         assert_eq!(trend.previous_percent, Some(20.0));
         assert_eq!(trend.peak_percent, 50.0);
         assert_eq!(trend.average_percent, 35.0);
+    }
+
+    #[test]
+    fn latest_successful_for_finds_correct_provider() {
+        let mut history = UsageHistory::default();
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: Utc::now() - chrono::Duration::days(2),
+            providers: vec![usage("openai", 20.0, None)],
+        });
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: Utc::now() - chrono::Duration::days(1),
+            providers: vec![usage("openai", 0.0, Some("failed"))],
+        });
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: Utc::now(),
+            providers: vec![usage("gemini", 10.0, None)],
+        });
+
+        let openai_cached = history.latest_successful_for("openai").unwrap();
+        assert_eq!(openai_cached.max_used_percent(), 20.0);
+
+        let gemini_cached = history.latest_successful_for("gemini").unwrap();
+        assert_eq!(gemini_cached.max_used_percent(), 10.0);
+
+        let non_existent = history.latest_successful_for("claude");
+        assert!(non_existent.is_none());
     }
 }

@@ -96,3 +96,53 @@ pub fn is_enabled() -> Result<bool> {
 
     Ok(result.is_ok())
 }
+
+pub fn verify_and_sync_path() -> Result<()> {
+    if is_enabled()? {
+        let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
+        let current_command = format!("\"{}\" tray", current_exe.display());
+
+        let name = wide_null(VALUE_NAME);
+        let key = open_run_key(KEY_READ.0)?;
+        let mut value_type = REG_SZ;
+        let mut buf = [0u8; 1024];
+        let mut size = buf.len() as u32;
+
+        let res = unsafe {
+            RegQueryValueExW(
+                key,
+                PCWSTR(name.as_ptr()),
+                None,
+                Some(&mut value_type),
+                Some(buf.as_mut_ptr()),
+                Some(&mut size),
+            )
+        };
+
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+
+        if res.is_ok() {
+            let len = (size as usize) / std::mem::size_of::<u16>();
+            let wide = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u16>(), len) };
+            // Strip null terminator if present
+            let wide_stripped = if !wide.is_empty() && wide[wide.len() - 1] == 0 {
+                &wide[..wide.len() - 1]
+            } else {
+                wide
+            };
+            if let Ok(existing_command) = String::from_utf16(wide_stripped) {
+                if existing_command != current_command {
+                    tracing::info!(
+                        "Startup path mismatch detected (existing: {}, current: {}). Updating path.",
+                        existing_command,
+                        current_command
+                    );
+                    set_enabled(true)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}

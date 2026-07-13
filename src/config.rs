@@ -231,28 +231,61 @@ impl AppConfig {
     }
 
     pub fn load_from(path: &PathBuf) -> Result<Self> {
+        let load_impl = |p: &PathBuf| -> Result<Self> {
+            let content = std::fs::read_to_string(p)
+                .with_context(|| format!("Failed to read config from {:?}", p))?;
+
+            let mut config: AppConfig = toml::from_str(&content)
+                .with_context(|| format!("Failed to parse config from {:?}", p))?;
+
+            if config.general.active_provider.eq_ignore_ascii_case("opencodego") {
+                config.general.active_provider = "opencode".to_string();
+            }
+            for item in &mut config.general.provider_order {
+                if item.eq_ignore_ascii_case("opencodego") {
+                    *item = "opencode".to_string();
+                }
+            }
+            Ok(config)
+        };
+
         if !path.exists() {
+            let backup_path = path.with_extension("toml.bak");
+            if backup_path.exists() {
+                if let Ok(config) = load_impl(&backup_path) {
+                    let _ = config.save_to(path);
+                    return Ok(config);
+                }
+            }
             let config = Self::default();
             config.save_to(path)?;
             return Ok(config);
         }
 
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config from {:?}", path))?;
-
-        let mut config: AppConfig = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config from {:?}", path))?;
-
-        if config.general.active_provider.eq_ignore_ascii_case("opencodego") {
-            config.general.active_provider = "opencode".to_string();
-        }
-        for item in &mut config.general.provider_order {
-            if item.eq_ignore_ascii_case("opencodego") {
-                *item = "opencode".to_string();
+        match load_impl(path) {
+            Ok(config) => Ok(config),
+            Err(err) => {
+                let backup_path = path.with_extension("toml.bak");
+                if backup_path.exists() {
+                    tracing::warn!(
+                        "Failed to load config from {:?}, attempting to load from backup {:?}: {:?}",
+                        path,
+                        backup_path,
+                        err
+                    );
+                    match load_impl(&backup_path) {
+                        Ok(config) => {
+                            let _ = config.save_to(path);
+                            return Ok(config);
+                        }
+                        Err(backup_err) => {
+                            tracing::error!("Failed to load config from backup as well: {:?}", backup_err);
+                        }
+                    }
+                }
+                Err(err)
             }
         }
-
-        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -265,8 +298,26 @@ impl AppConfig {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write config to {:?}", path))?;
+
+        if path.exists() {
+            let backup_path = path.with_extension("toml.bak");
+            let _ = std::fs::copy(path, &backup_path);
+        }
+
+        let tmp_path = path.with_extension("toml.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temporary config file {:?}", tmp_path))?;
+            file.write_all(content.as_bytes())
+                .with_context(|| format!("Failed to write content to temporary config file {:?}", tmp_path))?;
+            file.sync_all()
+                .with_context(|| format!("Failed to sync temporary config file {:?}", tmp_path))?;
+        }
+
+        std::fs::rename(&tmp_path, path)
+            .with_context(|| format!("Failed to rename temporary config file to {:?}", path))?;
+
         Ok(())
     }
 }
@@ -293,5 +344,33 @@ mod tests {
         "#;
         let gen_config2: GeneralConfig = toml::from_str(toml_str_with_theme).unwrap();
         assert_eq!(gen_config2.theme, "dark");
+    }
+
+    #[test]
+    fn test_config_safe_write_and_recovery() {
+        let temp_dir = std::env::temp_dir().join("quotify_test_config");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_file = temp_dir.join("quotify.toml");
+        let backup_file = temp_dir.join("quotify.toml.bak");
+
+        let _ = std::fs::remove_file(&config_file);
+        let _ = std::fs::remove_file(&backup_file);
+
+        let mut config = AppConfig::default();
+        config.general.refresh_interval = 4242;
+
+        config.save_to(&config_file).unwrap();
+        assert!(config_file.exists());
+
+        config.general.refresh_interval = 4343;
+        config.save_to(&config_file).unwrap();
+        assert!(backup_file.exists());
+
+        std::fs::write(&config_file, "INVALID TOML CONTENT").unwrap();
+
+        let loaded = AppConfig::load_from(&config_file).unwrap();
+        assert_eq!(loaded.general.refresh_interval, 4242);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

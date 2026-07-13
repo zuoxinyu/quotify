@@ -43,6 +43,8 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
 pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+pub static SYSTEM_SLEEPING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 pub const PROVIDER_ORDER: [&str; 42] = [
     "codex",
@@ -115,6 +117,10 @@ enum Commands {
     },
     Init,
     Tray,
+    Uninstall {
+        #[arg(long, help = "Keep configuration and history files")]
+        keep_data: bool,
+    },
 }
 
 pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Provider>> {
@@ -1044,6 +1050,7 @@ async fn fetch_all_providers(
 
 fn main() -> Result<()> {
     let _log_guard = diagnostics::init_file_logging();
+    diagnostics::setup_panic_hook();
 
     let cli = Cli::parse();
 
@@ -1068,11 +1075,53 @@ fn main() -> Result<()> {
             println!("Config written to: {}", path.display());
         }
         Commands::Tray => {
-            let _single_instance = single_instance::SingleInstanceGuard::acquire()?;
-            run_tray(config, config_path)?;
+            match single_instance::SingleInstanceGuard::acquire() {
+                Ok(_guard) => {
+                    run_tray(config, config_path)?;
+                }
+                Err(err) => {
+                    if single_instance::activate_existing_instance() {
+                        tracing::info!("Activated existing Quotify instance.");
+                    } else {
+                        tracing::error!("Quotify is already running, but could not activate the existing instance: {err}");
+                        return Err(err);
+                    }
+                }
+            }
+        }
+        Commands::Uninstall { keep_data } => {
+            run_uninstall(keep_data)?;
         }
     }
 
+    Ok(())
+}
+
+fn run_uninstall(keep_data: bool) -> Result<()> {
+    println!("Uninstalling Quotify...");
+
+    match startup::set_enabled(false) {
+        Ok(_) => println!("- Removed Windows startup registry key"),
+        Err(e) => println!("- Failed to remove startup registry key: {e}"),
+    }
+
+    if !keep_data {
+        let app_dir = diagnostics::app_dir();
+        if app_dir.exists() {
+            println!("- Deleting data directory: {}", app_dir.display());
+            if let Err(e) = std::fs::remove_dir_all(&app_dir) {
+                println!("  Failed to delete data directory: {e}");
+            } else {
+                println!("  Successfully deleted data directory");
+            }
+        } else {
+            println!("- Data directory does not exist or was already removed.");
+        }
+    } else {
+        println!("- Keeping user configuration and usage history files.");
+    }
+
+    println!("Uninstall completed.");
     Ok(())
 }
 
@@ -1203,6 +1252,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     if let Err(err) = startup::set_enabled(config.general.start_with_windows) {
         tracing::error!("Failed to sync startup setting: {err}");
     }
+    let _ = startup::verify_and_sync_path();
 
     let history = Arc::new(RwLock::new(usage_history::UsageHistory::load()));
     let cached_data = history.read().latest_successful();
@@ -1223,17 +1273,25 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
 
     // Set initial loading icon before data is fetched
-    let initial_icon = {
+    let (initial_icon, tooltip) = {
         let d = data.read();
+        let d_resolved: Vec<UsageData> = d.iter().map(|item| {
+            if item.error.is_some() {
+                if let Some(cached) = history.read().latest_successful_for(&item.provider) {
+                    cached
+                } else {
+                    item.clone()
+                }
+            } else {
+                item.clone()
+            }
+        }).collect();
         let active_provider = active_provider.read();
-        icon::generate_icon(&d, active_provider_option(&active_provider))
+        let icon = icon::generate_icon(&d_resolved, active_provider_option(&active_provider));
+        let tooltip = icon::tray_tooltip(&d_resolved, active_provider_option(&active_provider));
+        (icon, tooltip)
     };
     if let Ok(hicon) = initial_icon.to_hicon() {
-        let tooltip = {
-            let d = data.read();
-            let active_provider = active_provider.read();
-            icon::tray_tooltip(&d, active_provider_option(&active_provider))
-        };
         tray_controller.update_icon_with_tooltip(hicon, &tooltip);
     }
 
@@ -1253,6 +1311,10 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         let refresh_interval_duration = std::time::Duration::from_secs(min_refresh_interval);
         let mut last_fetch: Option<std::time::Instant> = None;
         loop {
+            if SYSTEM_SLEEPING.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
             let forced = tray::REFRESH_REQUESTED.swap(false, Ordering::SeqCst);
             let now = std::time::Instant::now();
             let elapsed = last_fetch.map(|last| now.saturating_duration_since(last));
@@ -1271,10 +1333,21 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
                 // Regenerate HICON
                 let d = data_bg.read();
+                let d_resolved: Vec<UsageData> = d.iter().map(|item| {
+                    if item.error.is_some() {
+                        if let Some(cached) = history_bg.read().latest_successful_for(&item.provider) {
+                            cached
+                        } else {
+                            item.clone()
+                        }
+                    } else {
+                        item.clone()
+                    }
+                }).collect();
                 let active_provider_bg = active_provider_bg.read();
                 let active_provider = active_provider_option(&active_provider_bg);
-                let new_icon = icon::generate_icon(&d, active_provider);
-                let tooltip = icon::tray_tooltip(&d, active_provider);
+                let new_icon = icon::generate_icon(&d_resolved, active_provider);
+                let tooltip = icon::tray_tooltip(&d_resolved, active_provider);
                 if let Ok(hicon) = new_icon.to_hicon() {
                     tc_bg.update_icon_with_tooltip(hicon, &tooltip);
                 }
@@ -1289,6 +1362,33 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
             let wait_for = refresh_interval_duration.saturating_sub(elapsed.unwrap_or_default());
             tray::wait_for_refresh_or_timeout(wait_for);
+        }
+    });
+
+    // Spawn network connection status change listener thread
+    std::thread::spawn(move || {
+        #[link(name = "iphlpapi")]
+        unsafe extern "system" {
+            fn NotifyAddrChange(
+                Handle: *mut windows::Win32::Foundation::HANDLE,
+                Overlapped: *const std::ffi::c_void,
+            ) -> u32;
+        }
+
+        let mut handle = windows::Win32::Foundation::HANDLE::default();
+        loop {
+            unsafe {
+                let res = NotifyAddrChange(&mut handle, std::ptr::null());
+                if res == 0 || res == 997 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    if !SYSTEM_SLEEPING.load(Ordering::SeqCst) {
+                        tracing::info!("Network change detected, requesting refresh.");
+                        tray::request_refresh();
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                }
+            }
         }
     });
 
@@ -1520,14 +1620,50 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
                     );
                     return [x, y];
                 } else {
-                    // Fallback: Default to bottom right if taskbar is hidden or not detected
-                    let mut x = pt.x as f32 - win_w / 2.0;
-                    x = x.clamp(
-                        work.left as f32 + margin,
-                        (work.right as f32 - win_w - margin).max(work.left as f32),
-                    );
-                    let y = work.bottom as f32 - win_h - margin;
-                    return [x, y];
+                    // Taskbar might be auto-hidden (work == monitor)
+                    // Determine the edge based on the tray icon position `pt` relative to `monitor`
+                    let mon_w = (monitor.right - monitor.left) as f32;
+                    let mon_h = (monitor.bottom - monitor.top) as f32;
+                    let pt_x_rel = (pt.x - monitor.left) as f32;
+                    let pt_y_rel = (pt.y - monitor.top) as f32;
+
+                    if pt_y_rel < mon_h / 4.0 {
+                        // Taskbar is at the top
+                        let mut x = pt.x as f32 - win_w / 2.0;
+                        x = x.clamp(
+                            monitor.left as f32 + margin,
+                            (monitor.right as f32 - win_w - margin).max(monitor.left as f32),
+                        );
+                        let y = monitor.top as f32 + margin;
+                        return [x, y];
+                    } else if pt_x_rel < mon_w / 4.0 {
+                        // Taskbar is on the left
+                        let x = monitor.left as f32 + margin;
+                        let mut y = pt.y as f32 - win_h / 2.0;
+                        y = y.clamp(
+                            monitor.top as f32 + margin,
+                            (monitor.bottom as f32 - win_h - margin).max(monitor.top as f32),
+                        );
+                        return [x, y];
+                    } else if pt_x_rel > mon_w * 0.75 {
+                        // Taskbar is on the right
+                        let x = monitor.right as f32 - win_w - margin;
+                        let mut y = pt.y as f32 - win_h / 2.0;
+                        y = y.clamp(
+                            monitor.top as f32 + margin,
+                            (monitor.bottom as f32 - win_h - margin).max(monitor.top as f32),
+                        );
+                        return [x, y];
+                    } else {
+                        // Taskbar is at the bottom (default fallback)
+                        let mut x = pt.x as f32 - win_w / 2.0;
+                        x = x.clamp(
+                            monitor.left as f32 + margin,
+                            (monitor.right as f32 - win_w - margin).max(monitor.left as f32),
+                        );
+                        let y = monitor.bottom as f32 - win_h - margin;
+                        return [x, y];
+                    }
                 }
             }
         }
@@ -1673,6 +1809,18 @@ unsafe extern "system" fn main_window_subclass(
                     ctx.request_repaint();
                 }
                 LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_POWERBROADCAST => {
+                let power_event = wparam.0 as u32;
+                if power_event == 4 { // PBT_APMSUSPEND
+                    tracing::info!("System is suspending (sleeping). Pausing refresh.");
+                    SYSTEM_SLEEPING.store(true, Ordering::SeqCst);
+                } else if power_event == 18 { // PBT_APMRESUMEAUTOMATIC
+                    tracing::info!("System resumed from sleep. Triggering refresh.");
+                    SYSTEM_SLEEPING.store(false, Ordering::SeqCst);
+                    tray::request_refresh();
+                }
+                DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             WM_SIZE => {
                 apply_rounded_window_region(hwnd);

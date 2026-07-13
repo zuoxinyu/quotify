@@ -105,6 +105,7 @@ enum ProviderDropTarget {
 enum ProviderStatus {
     Active,
     Error,
+    ErrorWithCache,
     Disabled,
 }
 
@@ -642,13 +643,34 @@ impl eframe::App for QuotifyApp {
                                         .unwrap_or(&dragging.provider)
                                         .to_string();
 
+                                    let current_error = provider_data.error.as_deref();
+                                    let cached_data = if current_error.is_some() {
+                                        self.history.read().latest_successful_for(&dragging.provider)
+                                    } else {
+                                        None
+                                    };
+
                                     let status = match provider_data.error.is_some() {
-                                        true => ProviderStatus::Error,
+                                        true => {
+                                            if cached_data.is_some() {
+                                                ProviderStatus::ErrorWithCache
+                                            } else {
+                                                ProviderStatus::Error
+                                            }
+                                        }
                                         false => ProviderStatus::Active,
                                     };
-                                    let credits = provider_data.credits.as_ref();
+                                    let credits = if let Some(ref cached_d) = cached_data {
+                                        cached_d.credits.as_ref()
+                                    } else {
+                                        provider_data.credits.as_ref()
+                                    };
                                     let error_msg = provider_data.error.as_deref();
-                                    let windows = &provider_data.windows;
+                                    let windows = if let Some(ref cached_d) = cached_data {
+                                        &cached_d.windows
+                                    } else {
+                                        &provider_data.windows
+                                    };
                                     let is_dark = ui.visuals().dark_mode;
 
                                     let card_frame = egui::Frame::NONE
@@ -1252,16 +1274,37 @@ fn render_provider(
     collapse: bool,
     is_dragged: bool,
 ) -> egui::Response {
+    let current_error = data.and_then(|d| d.error.as_deref());
+    let cached_data = if current_error.is_some() {
+        history.read().latest_successful_for(provider_name)
+    } else {
+        None
+    };
+
     let status = match data {
-        Some(d) if d.error.is_some() => ProviderStatus::Error,
+        Some(d) if d.error.is_some() => {
+            if cached_data.is_some() {
+                ProviderStatus::ErrorWithCache
+            } else {
+                ProviderStatus::Error
+            }
+        }
         Some(_) => ProviderStatus::Active,
         None => ProviderStatus::Disabled,
     };
 
-    let credits = data.and_then(|d| d.credits.as_ref());
+    let credits = if let Some(ref cached_d) = cached_data {
+        cached_d.credits.as_ref()
+    } else {
+        data.and_then(|d| d.credits.as_ref())
+    };
     let error_msg = data.and_then(|d| d.error.as_deref());
     let empty_vec = Vec::new();
-    let windows = data.map(|d| &d.windows).unwrap_or(&empty_vec);
+    let windows = if let Some(ref cached_d) = cached_data {
+        &cached_d.windows
+    } else {
+        data.map(|d| &d.windows).unwrap_or(&empty_vec)
+    };
 
     let is_dark = ui.visuals().dark_mode;
 
@@ -1398,68 +1441,91 @@ fn render_provider_card(
                     ui.add_space(4.0);
                 }
 
-                // Fluent-styled Badging (bordered plates with soft tints)
-                let (status_text, bg_color, border_color, fg_color) = if is_dark {
-                    match status {
-                        ProviderStatus::Active => (
-                            "ACTIVE",
-                            egui::Color32::from_rgb(29, 45, 36),
-                            egui::Color32::from_rgb(108, 203, 95),
-                            egui::Color32::from_rgb(108, 203, 95),
-                        ),
-                        ProviderStatus::Error => (
-                            "ERROR",
-                            egui::Color32::from_rgb(62, 30, 30),
-                            egui::Color32::from_rgb(255, 108, 108),
-                            egui::Color32::from_rgb(255, 108, 108),
-                        ),
-                        ProviderStatus::Disabled => (
-                            "OFFLINE",
-                            egui::Color32::from_rgb(40, 40, 40),
-                            egui::Color32::from_rgb(80, 80, 80),
-                            egui::Color32::from_rgb(161, 161, 161),
-                        ),
-                    }
-                } else {
-                    match status {
-                        ProviderStatus::Active => (
-                            "ACTIVE",
-                            egui::Color32::from_rgb(225, 244, 229),
-                            egui::Color32::from_rgb(16, 124, 65),
-                            egui::Color32::from_rgb(16, 124, 65),
-                        ),
-                        ProviderStatus::Error => (
-                            "ERROR",
-                            egui::Color32::from_rgb(253, 232, 232),
-                            egui::Color32::from_rgb(196, 43, 28),
-                            egui::Color32::from_rgb(196, 43, 28),
-                        ),
-                        ProviderStatus::Disabled => (
-                            "OFFLINE",
-                            egui::Color32::from_rgb(243, 243, 243),
-                            egui::Color32::from_rgb(204, 204, 204),
-                            egui::Color32::from_rgb(118, 118, 118),
-                        ),
-                    }
-                };
+                if status != ProviderStatus::Active {
+                    // Fluent-styled Badging (bordered plates with soft tints)
+                    let (status_text, bg_color, border_color, fg_color) = if is_dark {
+                        match status {
+                            ProviderStatus::Active => unreachable!(),
+                            ProviderStatus::Error => (
+                                "ERROR",
+                                egui::Color32::from_rgb(62, 30, 30),
+                                egui::Color32::from_rgb(255, 108, 108),
+                                egui::Color32::from_rgb(255, 108, 108),
+                            ),
+                            ProviderStatus::ErrorWithCache => (
+                                "ERROR",
+                                egui::Color32::from_rgb(60, 45, 20), // soft warning orange/brown
+                                egui::Color32::from_rgb(255, 185, 96), // soft orange
+                                egui::Color32::from_rgb(255, 185, 96),
+                            ),
+                            ProviderStatus::Disabled => (
+                                "OFFLINE",
+                                egui::Color32::from_rgb(40, 40, 40),
+                                egui::Color32::from_rgb(80, 80, 80),
+                                egui::Color32::from_rgb(161, 161, 161),
+                            ),
+                        }
+                    } else {
+                        match status {
+                            ProviderStatus::Active => unreachable!(),
+                            ProviderStatus::Error => (
+                                "ERROR",
+                                egui::Color32::from_rgb(253, 232, 232),
+                                egui::Color32::from_rgb(196, 43, 28),
+                                egui::Color32::from_rgb(196, 43, 28),
+                            ),
+                            ProviderStatus::ErrorWithCache => (
+                                "ERROR",
+                                egui::Color32::from_rgb(255, 244, 204), // soft yellow/orange
+                                egui::Color32::from_rgb(216, 131, 0),
+                                egui::Color32::from_rgb(216, 131, 0),
+                            ),
+                            ProviderStatus::Disabled => (
+                                "OFFLINE",
+                                egui::Color32::from_rgb(243, 243, 243),
+                                egui::Color32::from_rgb(204, 204, 204),
+                                egui::Color32::from_rgb(118, 118, 118),
+                            ),
+                        }
+                    };
 
-                let badge_frame = egui::Frame::NONE
-                    .fill(bg_color)
-                    .stroke(egui::Stroke::new(1.0, border_color))
-                    .corner_radius(4)
-                    .inner_margin(egui::Margin::symmetric(5, 2));
-                let resp = badge_frame
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(status_text)
-                                .strong()
-                                .size(8.0)
-                                .color(fg_color),
-                        );
-                    })
-                    .response;
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                    let badge_frame = egui::Frame::NONE
+                        .fill(bg_color)
+                        .stroke(egui::Stroke::new(1.0, border_color))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(5, 2));
+                    let resp = badge_frame
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(status_text)
+                                    .strong()
+                                    .size(8.0)
+                                    .color(fg_color),
+                            );
+                        })
+                        .response;
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                    }
+
+                    if status == ProviderStatus::ErrorWithCache {
+                        let last_fetch_time = history.read().latest_successful_for(provider_name).map(|d| d.fetched_at);
+                        resp.on_hover_ui(|ui| {
+                            ui.set_max_width(260.0);
+                            ui.label(egui::RichText::new("Fetch Failed (Showing Cached Data)").strong());
+                            ui.add_space(4.0);
+                            if let Some(t) = last_fetch_time {
+                                let local_time = t.with_timezone(&chrono::Local);
+                                ui.label(format!("Last fetched: {}", local_time.format("%Y-%m-%d %H:%M:%S")));
+                            }
+                            if let Some(err) = error_msg {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.colored_label(fg_color, err);
+                            }
+                        });
+                    }
                 }
 
                 // Credits Badge (Windows 11 accent tint badge)
@@ -1721,7 +1787,7 @@ fn render_provider_card(
                         });
                     });
                 }
-                ProviderStatus::Active => {
+                ProviderStatus::Active | ProviderStatus::ErrorWithCache => {
                     let active_windows: Vec<_> = windows
                         .iter()
                         .filter(|w| w.label != "Reset Credits")
