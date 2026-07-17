@@ -48,6 +48,7 @@ windows-core = "0.62"
 sha2 = "0.11"
 regex = "1"
 gpui = "0.2.2"
+gpui-component = "0.5.1"
 image = { version = "0.25", features = ["png"] }
 parking_lot = "0.12"
 raw-window-handle = "0.6"

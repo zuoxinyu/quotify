@@ -1317,6 +1317,23 @@ mod app_assets_tests {
                 .iter()
                 .any(|path| path.as_ref() == "assets/icons/quotify.svg")
         );
+
+        for path in [
+            "icons/chevron-down.svg",
+            "icons/circle-check.svg",
+            "icons/circle-x.svg",
+            "icons/eye.svg",
+            "icons/inbox.svg",
+            "icons/info.svg",
+            "icons/loader.svg",
+            "icons/search.svg",
+            "icons/triangle-alert.svg",
+        ] {
+            let asset = gpui::AssetSource::load(&AppAssets, path)
+                .unwrap_or_else(|err| panic!("failed to load {path}: {err}"))
+                .unwrap_or_else(|| panic!("missing gpui-component asset {path}"));
+            assert!(asset.starts_with(b"<svg"), "invalid SVG at {path}");
+        }
     }
 }
 
@@ -1494,6 +1511,9 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
     let app = gpui::Application::new().with_assets(AppAssets);
     app.run(move |cx| {
+        gpui_component::init(cx);
+        app::apply_component_theme(&config_window.general.theme, None, cx);
+
         let win_w = 400.0_f32;
         let win_h = 520.0_f32;
         let pos = hidden_popup_position();
@@ -1538,51 +1558,76 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             )
         });
 
-        let win_w = cx.open_window(window_options, move |window, _cx| {
-            // Get window handle and store it in OnceLock
-            use raw_window_handle::HasWindowHandle;
-            if let Ok(handle) = window.window_handle() {
-                if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
-                    let hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
-                    tracing::info!("Successfully resolved Win32 HWND: {:?}", hwnd.0);
-                    let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
+        let root_view = view.clone();
+        let win_w = cx
+            .open_window(window_options, move |window, cx| {
+                // Get window handle and store it in OnceLock
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = window.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw()
+                    {
+                        let hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
+                        tracing::info!("Successfully resolved Win32 HWND: {:?}", hwnd.0);
+                        let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
+                        unsafe {
+                            use windows::Win32::UI::Shell::SetWindowSubclass;
+                            let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+                        }
+                    } else {
+                        tracing::warn!("Resolved window handle but it is not Win32");
+                    }
                 } else {
-                    tracing::warn!("Resolved window handle but it is not Win32");
+                    tracing::warn!("Failed to obtain window handle from window context");
                 }
-            } else {
-                tracing::warn!("Failed to obtain window handle from window context");
-            }
-            view.clone()
-        }).expect("failed to open window");
+                cx.new(|cx| gpui_component::Root::new(root_view, window, cx))
+            })
+            .expect("failed to open window");
 
         win_w
             .update(cx, |_, window, cx| {
-                cx.observe_window_appearance(window, |app, window, cx| {
-                    if app.config.general.theme == "system" {
+                cx.observe_window_appearance(window, move |_, window, cx| {
+                    let theme_setting = app::current_component_theme_setting();
+                    if theme_setting == "system" {
                         let dark = matches!(
                             window.appearance(),
                             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
                         );
                         refresh_mica_backdrop(dark);
                     }
+                    app::apply_component_theme(&theme_setting, Some(window), cx);
                     cx.notify();
                 })
                 .detach();
             })
             .expect("failed to observe window appearance");
 
-        // Initialize Win32 attributes safely after GPUI window creation finishes to avoid RefCell reentrancy panics
-        if let Some(shwnd) = tray::MAIN_HWND.get() {
+        // Operations such as SetWindowPos synchronously emit GPUI callbacks. Run them
+        // after the current App borrow is released, and tolerate delayed HWND publication.
+        std::thread::spawn(move || {
+            let shwnd = (0..100).find_map(|_| {
+                let hwnd = tray::MAIN_HWND.get().copied();
+                if hwnd.is_none() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                hwnd
+            });
+
+            let Some(shwnd) = shwnd else {
+                tracing::error!("Timed out waiting for the GPUI HWND");
+                return;
+            };
+
             let hwnd = shwnd.raw();
             apply_mica_backdrop(hwnd, mica_dark);
             apply_rounded_window_region(hwnd);
             move_popup_offscreen(hwnd);
             set_dwm_cloak(hwnd, true);
-            unsafe {
-                use windows::Win32::UI::Shell::SetWindowSubclass;
-                let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+
+            #[cfg(debug_assertions)]
+            if std::env::var_os("QUOTIFY_SHOW_ON_START").is_some() {
+                let _ = shwnd.post_message(tray::WM_APP_SHOW, WPARAM(0), LPARAM(0));
             }
-        }
+        });
 
         // Spawn a listener task to handle repaint triggers from update channel
         cx.spawn(move |cx: &mut gpui::AsyncApp| {
@@ -1596,7 +1641,37 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                     }).ok();
                 }
             }
-        }).detach();
+        })
+        .detach();
+
+        // Time-derived labels (for example, "12s ago" and reset countdowns) need an
+        // explicit wake-up because GPUI otherwise redraws only in response to input or
+        // state notifications. Avoid repainting while the tray popup is hidden.
+        let clock_window = win_w.clone();
+        cx.spawn(move |cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+
+                    if !tray::WINDOW_VISIBLE.load(Ordering::SeqCst)
+                        || tray::ACTIVE_PAGE.load(Ordering::SeqCst) != 0
+                    {
+                        continue;
+                    }
+
+                    if cx
+                        .update(|cx| {
+                            clock_window.update(cx, |_, _, cx| cx.notify()).ok();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
     });
 
     Ok(())

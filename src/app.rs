@@ -1,14 +1,82 @@
 use gpui::prelude::{FluentBuilder, InteractiveElement, ParentElement, Styled};
 use gpui::*;
+use gpui_component::{
+    Disableable, IndexPath, Selectable, Sizable,
+    alert::Alert,
+    button::{Button, ButtonVariants},
+    divider::Divider,
+    group_box::{GroupBox, GroupBoxVariants},
+    input::{Input, InputEvent, InputState},
+    link::Link,
+    progress::Progress,
+    scroll::ScrollableElement,
+    select::{Select, SelectEvent, SelectState},
+    slider::{Slider, SliderEvent, SliderState},
+    switch::Switch,
+    tag::Tag,
+};
 use parking_lot::RwLock;
 use std::{
     path::PathBuf,
-    sync::Arc,
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
+    sync::{Arc, OnceLock, atomic::Ordering},
+    time::Duration,
 };
 
 use crate::provider::UsageData;
+
+static COMPONENT_THEME_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
+
+fn component_theme_setting() -> &'static RwLock<String> {
+    COMPONENT_THEME_SETTING.get_or_init(|| RwLock::new("system".to_string()))
+}
+
+pub fn current_component_theme_setting() -> String {
+    component_theme_setting().read().clone()
+}
+
+pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, cx: &mut App) {
+    *component_theme_setting().write() = theme_setting.to_string();
+
+    let mode = match theme_setting {
+        "dark" => gpui_component::ThemeMode::Dark,
+        "light" => gpui_component::ThemeMode::Light,
+        _ => window
+            .as_ref()
+            .map(|window| window.appearance())
+            .unwrap_or_else(|| cx.window_appearance())
+            .into(),
+    };
+
+    gpui_component::Theme::change(mode, window, cx);
+
+    let theme = gpui_component::Theme::global_mut(cx);
+    theme.font_family = "Segoe UI".into();
+    theme.font_size = px(14.0);
+    theme.radius = px(6.0);
+    theme.radius_lg = px(10.0);
+    theme.background = Hsla::transparent_black();
+    theme.primary = gpui::rgb(0x0067c0).into();
+    theme.primary_hover = gpui::rgb(0x1975c5).into();
+    theme.primary_active = gpui::rgb(0x005a9e).into();
+    theme.ring = gpui::rgb(0x0067c0).into();
+    theme.progress_bar = gpui::rgb(0x0067c0).into();
+
+    if mode.is_dark() {
+        theme.group_box = gpui::rgba(0x2b2b2baa).into();
+        theme.popover = gpui::rgba(0x2b2b2bf2).into();
+        theme.border = gpui::rgba(0xffffff26).into();
+        theme.input = gpui::rgba(0xffffff3d).into();
+        theme.muted = gpui::rgba(0xffffff24).into();
+        theme.switch = gpui::rgba(0xffffff33).into();
+    } else {
+        theme.group_box = gpui::rgba(0xffffffaa).into();
+        theme.popover = gpui::rgba(0xf9f9f9f2).into();
+        theme.border = gpui::rgba(0x0000001f).into();
+        theme.input = gpui::rgba(0x0000003d).into();
+        theme.muted = gpui::rgba(0x00000014).into();
+        theme.switch = gpui::rgba(0x0000002e).into();
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateStatus {
@@ -49,12 +117,20 @@ pub struct ProviderDragState {
     dragging: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderStatus {
-    Active,
-    Error,
-    ErrorWithCache,
-    Disabled,
+struct InputFieldState {
+    input: Entity<InputState>,
+    masked: bool,
+    _subscription: Subscription,
+}
+
+struct ProviderSelectFieldState {
+    select: Entity<SelectState<Vec<String>>>,
+    _subscription: Subscription,
+}
+
+struct RefreshSliderFieldState {
+    slider: Entity<SliderState>,
+    _subscription: Subscription,
 }
 
 pub struct QuotifyApp {
@@ -65,13 +141,10 @@ pub struct QuotifyApp {
     pub config_path: Option<PathBuf>,
     pub active_provider: Arc<RwLock<String>>,
     pub drag: ProviderDragState,
-    pub last_config_reload: Instant,
     pub update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
     pub provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
     pub selected_setting_provider: String,
     pub show_secrets: bool,
-    pub focus_handles: std::collections::HashMap<String, FocusHandle>,
-    pub show_provider_dropdown: bool,
 }
 
 impl QuotifyApp {
@@ -82,34 +155,8 @@ impl QuotifyApp {
         config_path: Option<PathBuf>,
         active_provider: Arc<RwLock<String>>,
         history: Arc<RwLock<crate::usage_history::UsageHistory>>,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Self {
-        let mut focus_handles = std::collections::HashMap::new();
-        // Pre-create focus handles for form inputs
-        let fields = vec![
-            "proxy",
-            "openai_key",
-            "openai_url",
-            "openai_dep",
-            "deepseek_key",
-            "claude_key",
-            "claude_session",
-            "claude_token",
-            "claude_auth",
-            "codex_auth",
-            "gemini_key",
-            "antigravity_key",
-            "opencode_key",
-            "opencode_workspace",
-            "opencode_auth",
-            "mimo_key",
-            "mimo_token",
-            "mimo_cookie",
-        ];
-        for f in fields {
-            focus_handles.insert(f.to_string(), cx.focus_handle());
-        }
-
         Self {
             data,
             last_refresh,
@@ -118,13 +165,10 @@ impl QuotifyApp {
             config_path,
             active_provider,
             drag: ProviderDragState::default(),
-            last_config_reload: Instant::now(),
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
             provider_test_status: Arc::new(parking_lot::Mutex::new(ProviderTestStatus::Idle)),
             selected_setting_provider: "openai".to_string(),
             show_secrets: false,
-            focus_handles,
-            show_provider_dropdown: false,
         }
     }
 
@@ -269,46 +313,6 @@ impl QuotifyApp {
         })
         .detach();
     }
-
-    // Handles key input into settings fields manually to support input replication 1:1
-    fn handle_input_key(&mut self, field: &str, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let val = match field {
-            "proxy" => &mut self.config.network.proxy,
-            "openai_key" => &mut self.config.openai.api_key,
-            "openai_url" => &mut self.config.openai.base_url,
-            "openai_dep" => &mut self.config.openai.deployment,
-            "deepseek_key" => &mut self.config.deepseek.api_key,
-            "claude_key" => &mut self.config.claude.api_key,
-            "claude_session" => &mut self.config.claude.session_key,
-            "claude_token" => &mut self.config.claude.access_token,
-            "claude_auth" => &mut self.config.claude.auth_file,
-            "codex_auth" => &mut self.config.codex.auth_file,
-            "gemini_key" => &mut self.config.gemini.api_key,
-            "antigravity_key" => &mut self.config.antigravity.api_key,
-            "opencode_key" => &mut self.config.opencode.api_key,
-            "opencode_workspace" => &mut self.config.opencode.workspace_id,
-            "opencode_auth" => &mut self.config.opencode.auth_cookie,
-            "mimo_key" => &mut self.config.mimo.api_key,
-            "mimo_token" => &mut self.config.mimo.service_token,
-            "mimo_cookie" => &mut self.config.mimo.cookie_header,
-            _ => return,
-        };
-
-        if event.keystroke.key == "backspace" {
-            val.pop();
-        } else if event.keystroke.modifiers.control && event.keystroke.key == "v" {
-            if let Some(item) = cx.read_from_clipboard() {
-                if let Some(text) = item.text() {
-                    val.push_str(&text);
-                }
-            }
-        } else if let Some(c) = &event.keystroke.key_char {
-            val.push_str(c);
-        }
-
-        self.save_config();
-        cx.notify();
-    }
 }
 
 impl Render for QuotifyApp {
@@ -354,14 +358,14 @@ impl Render for QuotifyApp {
             .p(px(12.0))
             .bg(bg_fill)
             .text_color(text_color)
-            .font_family("Segoe UI Variable")
+            .font_family("Segoe UI")
             .child(
                 // Header block
                 self.render_header(active_page, is_dark, cx),
             )
             .child(
                 // Line separator
-                div().h(px(1.0)).mt(px(4.0)).bg(border_color).w_full(),
+                Divider::horizontal().mt(px(4.0)).color(border_color),
             )
             .child(
                 // Body View
@@ -371,68 +375,19 @@ impl Render for QuotifyApp {
                     .px(px(12.0))
                     .py(px(10.0))
                     .child(match active_page {
-                        1 => self.render_about(is_dark, cx).into_any_element(),
+                        1 => self.render_about(cx).into_any_element(),
                         2 => self.render_settings(is_dark, window, cx).into_any_element(),
                         _ => self.render_dashboard(is_dark, cx).into_any_element(),
                     })
                     .id("body_view")
-                    .overflow_y_scroll()
-                    .scrollbar_width(px(0.0)),
+                    .overflow_y_scrollbar(),
             )
     }
 }
 
 impl QuotifyApp {
-    fn winui_toggle_switch(enabled: bool, is_dark: bool) -> Div {
-        let track = if enabled {
-            gpui::rgb(0x0067c0)
-        } else if is_dark {
-            gpui::rgba(0xffffff33)
-        } else {
-            gpui::rgba(0x00000033)
-        };
-        let border = if enabled {
-            gpui::rgb(0x0067c0)
-        } else if is_dark {
-            gpui::rgba(0xffffff66)
-        } else {
-            gpui::rgba(0x00000066)
-        };
-
-        div()
-            .flex()
-            .items_center()
-            .when(enabled, |switch| switch.justify_end())
-            .w(px(40.0))
-            .h(px(20.0))
-            .p(px(2.0))
-            .bg(track)
-            .border(px(1.0))
-            .border_color(border)
-            .rounded(px(10.0))
-            .cursor(CursorStyle::PointingHand)
-            .child(
-                div()
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .rounded(px(7.0))
-                    .bg(if enabled {
-                        gpui::rgb(0xffffff)
-                    } else if is_dark {
-                        gpui::rgb(0xd6d6d6)
-                    } else {
-                        gpui::rgb(0x5c5c5c)
-                    })
-                    .shadow_sm(),
-            )
-    }
-
     fn render_header(&self, active_page: u32, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
-        let hover_bg = if is_dark {
-            gpui::rgba(0xffffff1a)
-        } else {
-            gpui::rgba(0x0000000d)
-        };
+        let app = cx.entity().downgrade();
         let weak_text = if is_dark {
             gpui::rgba(0xffffff99)
         } else {
@@ -466,49 +421,44 @@ impl QuotifyApp {
                     .gap_2()
                     .child(if active_page != 0 {
                         // Back Button
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                        Button::new("back_btn")
+                            .ghost()
+                            .xsmall()
                             .w(px(26.0))
                             .h(px(26.0))
-                            .rounded(px(4.0))
-                            .hover(|style| style.bg(hover_bg))
-                            .font_family("Segoe MDL2 Assets")
+                            .font_family("Segoe Fluent Icons")
                             .font_weight(gpui::FontWeight::THIN)
                             .text_size(px(12.0))
-                            .child("\u{E72B}")
-                            .id("back_btn")
-                            .on_click(cx.listener(
-                                |_this: &mut Self,
-                                 _event: &gpui::ClickEvent,
-                                 _window: &mut gpui::Window,
-                                 cx: &mut gpui::Context<Self>| {
+                            .label("\u{E72B}")
+                            .tooltip("Back")
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
                                     crate::tray::ACTIVE_PAGE.store(0, Ordering::SeqCst);
-                                    cx.notify();
-                                },
-                            ))
+                                    app.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            })
                     } else {
                         // App Logo
-                        div()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .child(img("assets/icons/quotify.svg").w_full().h_full())
-                            .id("app_logo")
-                            .on_click(cx.listener(
-                                |_this: &mut Self,
-                                 _event: &gpui::ClickEvent,
-                                 _window: &mut gpui::Window,
-                                 cx: &mut gpui::Context<Self>| {
+                        Button::new("app_logo")
+                            .ghost()
+                            .xsmall()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .child(img("assets/icons/quotify.svg").w(px(18.0)).h(px(18.0)))
+                            .tooltip("About Quotify")
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
                                     crate::tray::ACTIVE_PAGE.store(1, Ordering::SeqCst);
-                                    cx.notify();
-                                },
-                            ))
+                                    app.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            })
                     })
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_size(px(14.5))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_size(px(16.0))
                             .child(match active_page {
                                 1 => "About",
                                 2 => "Settings",
@@ -529,47 +479,39 @@ impl QuotifyApp {
                     )
                     .child(
                         // Refresh button
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                        Button::new("refresh_btn")
+                            .ghost()
+                            .xsmall()
                             .w(px(26.0))
                             .h(px(26.0))
-                            .rounded(px(4.0))
-                            .hover(|style| style.bg(hover_bg))
-                            .font_family("Segoe MDL2 Assets")
+                            .font_family("Segoe Fluent Icons")
                             .font_weight(gpui::FontWeight::THIN)
                             .text_size(px(12.0))
-                            .child("\u{E72C}")
-                            .id("refresh_btn")
+                            .label("\u{E72C}")
+                            .tooltip("Refresh usage")
                             .on_click(move |_, _, _| {
                                 crate::tray::request_refresh();
                             }),
                     )
                     .child(
                         // Settings button
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                        Button::new("settings_btn")
+                            .ghost()
+                            .xsmall()
                             .w(px(26.0))
                             .h(px(26.0))
-                            .rounded(px(4.0))
-                            .hover(|style| style.bg(hover_bg))
-                            .font_family("Segoe MDL2 Assets")
+                            .font_family("Segoe Fluent Icons")
                             .font_weight(gpui::FontWeight::THIN)
                             .text_size(px(12.0))
-                            .child("\u{E713}")
-                            .id("settings_btn")
-                            .on_click(cx.listener(
-                                |_this: &mut Self,
-                                 _event: &gpui::ClickEvent,
-                                 _window: &mut gpui::Window,
-                                 cx: &mut gpui::Context<Self>| {
+                            .label("\u{E713}")
+                            .tooltip("Settings")
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
                                     crate::tray::ACTIVE_PAGE.store(2, Ordering::SeqCst);
-                                    cx.notify();
-                                },
-                            )),
+                                    app.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            }),
                     )
             } else {
                 div()
@@ -675,12 +617,6 @@ impl QuotifyApp {
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let card_bg = if is_dark {
-            gpui::rgba(0x2d2d2dc8)
-        } else {
-            gpui::rgba(0xffffffb2)
-        };
-
         let provider_name = name.to_string();
         let card_id = provider_name.clone();
         let card_elt_id = SharedString::from(format!("card_{name}"));
@@ -688,17 +624,14 @@ impl QuotifyApp {
         let trend = self.history.read().trend_for(name, 7);
 
         div()
-            .flex()
-            .flex_col()
             .w_full()
-            .bg(card_bg)
-            .rounded(px(8.0))
-            .px(px(10.0)) // Matches egui Margin::symmetric(10, 8)
-            .py(px(8.0))
-            .child(self.render_card_header(name, display_name, data, is_dark))
-            .child(div().h(px(12.0))) // Faint vertical margin instead of line separator
-            .child(self.render_card_body(data, trend, is_dark))
             .id(card_elt_id)
+            .child(
+                GroupBox::new()
+                    .fill()
+                    .child(self.render_card_header(name, display_name, data, is_dark))
+                    .child(self.render_card_body(data, trend, is_dark)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(
@@ -803,35 +736,18 @@ impl QuotifyApp {
                     })
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::LIGHT)
+                            .font_weight(gpui::FontWeight::NORMAL)
                             .text_size(px(12.0))
                             .child(display_name),
                     )
                     .child(if is_primary {
-                        div()
-                            .px_1()
-                            .rounded(px(4.0))
-                            .bg(if is_dark {
-                                gpui::rgb(0x222b42)
-                            } else {
-                                gpui::rgb(0xe5f2ff)
-                            })
-                            .border(px(1.0))
-                            .border_color(if is_dark {
-                                gpui::rgb(0x76b9ed)
-                            } else {
-                                gpui::rgb(0x0078d4)
-                            })
-                            .text_color(if is_dark {
-                                gpui::rgb(0x76b9ed)
-                            } else {
-                                gpui::rgb(0x005ba1)
-                            })
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::NORMAL)
+                        Tag::primary()
+                            .small()
+                            .outline()
                             .child("PRIMARY")
+                            .into_any_element()
                     } else {
-                        div()
+                        div().into_any_element()
                     }),
             )
             .child(if let Some(ref credits) = data.credits {
@@ -840,32 +756,9 @@ impl QuotifyApp {
                     format_credits_balance(credits.balance),
                     credits.currency
                 );
-                let border_color = if is_dark {
-                    gpui::rgb(0x60cdff)
-                } else {
-                    gpui::rgb(0x0078d4)
-                };
-                div()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(4.0))
-                    .border(px(1.0))
-                    .border_color(border_color)
-                    .bg(if is_dark {
-                        gpui::rgb(0x1c2e3c)
-                    } else {
-                        gpui::rgb(0xe0f4ff)
-                    })
-                    .text_color(if is_dark {
-                        gpui::rgb(0x60cdff)
-                    } else {
-                        gpui::rgb(0x0078d4)
-                    })
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .child(text)
+                Tag::info().small().outline().child(text).into_any_element()
             } else {
-                div()
+                div().into_any_element()
             })
             .into_any_element()
     }
@@ -877,25 +770,8 @@ impl QuotifyApp {
         is_dark: bool,
     ) -> AnyElement {
         if let Some(ref error) = data.error {
-            return div()
-                .flex()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .bg(if is_dark {
-                    gpui::rgb(0x3d2626)
-                } else {
-                    gpui::rgb(0xfde8e8)
-                })
-                .text_color(if is_dark {
-                    gpui::rgb(0xff9999)
-                } else {
-                    gpui::rgb(0x991b1b)
-                })
-                .text_size(px(11.0))
-                .child("⚠")
-                .child(error.clone())
+            return Alert::error("provider-error", error.clone())
+                .small()
                 .into_any_element();
         }
 
@@ -924,7 +800,7 @@ impl QuotifyApp {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0)) // 8px gap between progress rows matches egui's default spacing
+            .gap(px(12.0)) // 8px gap between progress rows matches egui's default spacing
             .children(children)
             .into_any_element()
     }
@@ -957,36 +833,27 @@ impl QuotifyApp {
             .gap_2()
             .child(
                 div()
+                    .flex()
                     .w(px(88.0))
-                    .font_family("Segoe UI Variable")
-                    .font_weight(gpui::FontWeight::LIGHT)
-                    .text_size(px(10.0))
+                    .justify_center()
+                    .font_family("Segoe UI")
+                    .font_weight(gpui::FontWeight::EXTRA_LIGHT)
+                    .text_size(px(11.0))
                     .child(w.label.clone()),
             )
             .child(
-                div()
+                Progress::new()
+                    .value(pct as f32)
+                    .bg(fill_color)
                     .flex_1()
-                    .h(px(8.0))
-                    .bg(if is_dark {
-                        gpui::rgb(0x202020)
-                    } else {
-                        gpui::rgb(0xe5e5e5)
-                    })
-                    .rounded(px(4.0))
-                    .child(
-                        div()
-                            .w(gpui::relative(pct as f32 / 100.0))
-                            .h_full()
-                            .bg(fill_color)
-                            .rounded(px(4.0)),
-                    ),
+                    .h(px(8.0)),
             )
             .child(
                 div()
                     .w(px(34.0))
                     .text_size(px(10.0))
                     .text_color(fill_color)
-                    .font_family("Segoe UI Variable")
+                    .font_family("Segoe UI")
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(format!("{pct:.0}%")),
             )
@@ -1006,33 +873,18 @@ impl QuotifyApp {
             .into_any_element()
     }
 
-    fn render_about(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_about(&self, cx: &mut Context<Self>) -> AnyElement {
         let ver = env!("GIT_TAG");
-        let card_bg = if is_dark {
-            gpui::rgba(0x2d2d2dc8)
-        } else {
-            gpui::rgba(0xffffffb2)
-        };
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .px(px(16.0)) // Matches egui symmetric(16, 12) settings/about frame
-            .py(px(12.0))
-            .bg(card_bg)
-            .rounded(px(8.0))
-            .child(self.render_about_header(ver, is_dark))
-            .child(div().h(px(1.0)).bg(if is_dark {
-                gpui::rgba(0xffffff14)
-            } else {
-                gpui::rgba(0x00000014)
-            }))
+        GroupBox::new()
+            .fill()
+            .child(self.render_about_header(ver))
+            .child(Divider::horizontal())
             .child(self.render_update_section(cx))
             .into_any_element()
     }
 
-    fn render_about_header(&self, ver: &str, is_dark: bool) -> AnyElement {
+    fn render_about_header(&self, ver: &str) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -1064,19 +916,18 @@ impl QuotifyApp {
             .child(div().text_size(px(12.0)).child("Author: zuoxinyu"))
             .child(
                 div().flex().gap_2().child("GitHub: ").child(
-                    div()
-                        .text_color(gpui::rgb(0x0078d4))
-                        .child("zuoxinyu/quotify")
-                        .id("github_link")
-                        .on_click(move |_, _, _| {
-                            open_browser("https://github.com/zuoxinyu/quotify");
-                        }),
+                    Link::new("github_link")
+                        .href("https://github.com/zuoxinyu/quotify")
+                        .child("zuoxinyu/quotify"),
                 ),
             )
             .into_any_element()
     }
 
     fn render_update_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
+        let status = self.update_status.lock().clone();
+        let checking = matches!(&status, UpdateStatus::Checking);
         div()
             .flex()
             .flex_col()
@@ -1088,33 +939,27 @@ impl QuotifyApp {
                     .child("Check for Updates"),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
+                Button::new("check_updates_btn")
+                    .primary()
+                    .small()
                     .w(px(130.0))
-                    .h(px(28.0))
-                    .bg(gpui::rgb(0x005fa8))
-                    .text_color(gpui::rgb(0xffffff))
-                    .text_size(px(11.0))
-                    .rounded(px(4.0))
-                    .child("Check now")
-                    .id("check_updates_btn")
-                    .on_click(cx.listener(
-                        |this: &mut Self,
-                         _event: &gpui::ClickEvent,
-                         _window: &mut gpui::Window,
-                         cx: &mut gpui::Context<Self>| {
-                            this.trigger_check_update(cx);
-                        },
-                    )),
+                    .label("Check now")
+                    .loading(checking)
+                    .disabled(checking)
+                    .on_click(move |_, _, cx| {
+                        app.update(cx, |this, cx| this.trigger_check_update(cx))
+                            .ok();
+                    }),
             )
-            .child(match self.update_status.lock().clone() {
-                UpdateStatus::Checking => div().text_size(px(11.0)).child("Checking..."),
-                UpdateStatus::UpToDate { .. } => div()
-                    .text_size(px(11.0))
-                    .text_color(gpui::rgb(0x2e7d32))
-                    .child("App is up to date."),
+            .child(match status {
+                UpdateStatus::Checking => Alert::info("update-checking", "Checking for updates...")
+                    .small()
+                    .into_any_element(),
+                UpdateStatus::UpToDate { .. } => {
+                    Alert::success("update-current", "App is up to date.")
+                        .small()
+                        .into_any_element()
+                }
                 UpdateStatus::NewVersionAvailable {
                     latest_version,
                     release_url,
@@ -1123,26 +968,25 @@ impl QuotifyApp {
                     .flex_col()
                     .gap_1()
                     .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(gpui::rgb(0xc62828))
-                            .child(format!("New version {latest_version} available!")),
+                        Alert::warning(
+                            "update-available",
+                            format!("New version {latest_version} available!"),
+                        )
+                        .small(),
                     )
                     .child(
-                        div()
-                            .text_color(gpui::rgb(0x0078d4))
+                        Link::new("view_release_page_link")
+                            .href(release_url)
                             .text_size(px(11.0))
-                            .child("View Release Page")
-                            .id("view_release_page_link")
-                            .on_click(move |_, _, _| {
-                                open_browser(&release_url);
-                            }),
-                    ),
-                UpdateStatus::Error(err) => div()
-                    .text_size(px(11.0))
-                    .text_color(gpui::rgb(0xc62828))
-                    .child(format!("Update check failed: {err}")),
-                _ => div(),
+                            .child("View Release Page"),
+                    )
+                    .into_any_element(),
+                UpdateStatus::Error(err) => {
+                    Alert::error("update-error", format!("Update check failed: {err}"))
+                        .small()
+                        .into_any_element()
+                }
+                _ => div().into_any_element(),
             })
             .into_any_element()
     }
@@ -1158,8 +1002,8 @@ impl QuotifyApp {
             .flex_col()
             .gap_4()
             .child(self.render_general_settings(is_dark, window, cx))
-            .child(self.render_provider_settings(is_dark, window, cx))
-            .child(self.render_settings_footer(is_dark, cx))
+            .child(self.render_provider_settings(window, cx))
+            .child(self.render_settings_footer())
             .child(div().h(px(20.0)))
             .into_any_element()
     }
@@ -1170,11 +1014,8 @@ impl QuotifyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let card_bg = if is_dark {
-            gpui::rgba(0x2d2d2dc8)
-        } else {
-            gpui::rgba(0xffffffb2)
-        };
+        let start_with_windows_app = cx.entity().downgrade();
+        let theme_app = cx.entity().downgrade();
         let secondary_text = if is_dark {
             gpui::rgba(0xffffff99)
         } else {
@@ -1187,12 +1028,39 @@ impl QuotifyApp {
             .min_by_key(|(_, value)| value.abs_diff(self.config.general.refresh_interval))
             .map(|(index, _)| index)
             .unwrap_or(0);
-        let refresh_progress = refresh_index as f32 / (refresh_intervals.len() - 1) as f32;
-        let slider_track = if is_dark {
-            gpui::rgba(0xffffff4d)
-        } else {
-            gpui::rgba(0x00000042)
-        };
+        let slider_app = cx.entity().downgrade();
+        let refresh_slider = window.use_keyed_state("refresh-interval-slider", cx, move |_, cx| {
+            let slider = cx.new(|_| {
+                SliderState::new()
+                    .min(0.0)
+                    .max((refresh_intervals.len() - 1) as f32)
+                    .step(1.0)
+                    .default_value(refresh_index as f32)
+            });
+            let _subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let index = value
+                    .end()
+                    .round()
+                    .clamp(0.0, (refresh_intervals.len() - 1) as f32)
+                    as usize;
+                let refresh_interval = refresh_intervals[index];
+                slider_app
+                    .update(cx, |this, cx| {
+                        if this.config.general.refresh_interval != refresh_interval {
+                            this.config.general.refresh_interval = refresh_interval;
+                            this.save_config();
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+            RefreshSliderFieldState {
+                slider,
+                _subscription,
+            }
+        });
+        let refresh_slider = refresh_slider.read(cx).slider.clone();
 
         div()
             .flex()
@@ -1200,14 +1068,8 @@ impl QuotifyApp {
             .gap_2()
             .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(13.0)).child("General Settings"))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .px(px(16.0)) // Matches egui Margin::symmetric(16, 12) settings card frame
-                    .py(px(12.0))
-                    .bg(card_bg)
-                    .rounded(px(8.0))
+                GroupBox::new()
+                    .fill()
                     .child(
                         // Theme Select
                         div()
@@ -1227,35 +1089,34 @@ impl QuotifyApp {
                                     .gap_1()
                                     .children(vec!["system", "dark", "light"].into_iter().enumerate().map(|(idx, t)| {
                                         let is_sel = self.config.general.theme == t;
-                                        div()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(px(4.0))
-                                            .bg(if is_sel { gpui::rgb(0x0078d4) } else { gpui::rgba(0x0000001a) })
-                                            .text_color(if is_sel { gpui::rgb(0xffffff) } else { if is_dark { gpui::rgb(0xffffff) } else { gpui::rgb(0x000000) } })
-                                            .text_size(px(10.0))
-                                            .child(t)
-                                            .id(("theme_btn", idx))
-                                            .on_click(cx.listener(move |this: &mut Self, _event: &gpui::ClickEvent, window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                                this.config.general.theme = t.to_string();
-                                                this.save_config();
-                                                let dark = match t {
-                                                    "dark" => true,
-                                                    "light" => false,
-                                                    _ => matches!(
-                                                        window.appearance(),
-                                                        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
-                                                    ),
-                                                };
-                                                crate::refresh_mica_backdrop(dark);
-                                                cx.notify();
-                                            }))
+                                        let theme_app = theme_app.clone();
+                                        Button::new(("theme_btn", idx))
+                                            .label(t)
+                                            .small()
+                                            .compact()
+                                            .selected(is_sel)
+                                            .when(is_sel, |button| button.primary())
+                                            .on_click(move |_, window, cx| {
+                                                theme_app.update(cx, |this, view_cx| {
+                                                    this.config.general.theme = t.to_string();
+                                                    this.save_config();
+                                                    let dark = match t {
+                                                        "dark" => true,
+                                                        "light" => false,
+                                                        _ => matches!(
+                                                            window.appearance(),
+                                                            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                                                        ),
+                                                    };
+                                                    crate::refresh_mica_backdrop(dark);
+                                                    apply_component_theme(t, Some(window), view_cx);
+                                                    view_cx.notify();
+                                                }).ok();
+                                            })
                                     }))
                             )
                     )
-                    .child(
-                        div().h(px(1.0)).bg(if is_dark { gpui::rgba(0xffffff14) } else { gpui::rgba(0x00000014) })
-                    )
+                    .child(Divider::horizontal())
                     .child(
                         // Start with Windows
                         div()
@@ -1270,24 +1131,23 @@ impl QuotifyApp {
                                     .child(div().text_size(px(10.0)).text_color(secondary_text).child("Launch Quotify when you sign in"))
                             )
                             .child(
-                                Self::winui_toggle_switch(
-                                    self.config.general.start_with_windows,
-                                    is_dark,
-                                )
-                                .id("start_with_windows")
-                                .on_click(cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                    let n = !this.config.general.start_with_windows;
-                                    if let Ok(()) = crate::startup::set_enabled(n) {
-                                        this.config.general.start_with_windows = n;
-                                        this.save_config();
-                                    }
-                                    cx.notify();
-                                }))
+                                Switch::new("start_with_windows")
+                                    .checked(self.config.general.start_with_windows)
+                                    .on_click(move |checked, _window, cx| {
+                                        let checked = *checked;
+                                        start_with_windows_app
+                                            .update(cx, |this, cx| {
+                                                if let Ok(()) = crate::startup::set_enabled(checked) {
+                                                    this.config.general.start_with_windows = checked;
+                                                    this.save_config();
+                                                }
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    })
                             )
                     )
-                    .child(
-                        div().h(px(1.0)).bg(if is_dark { gpui::rgba(0xffffff14) } else { gpui::rgba(0x00000014) })
-                    )
+                    .child(Divider::horizontal())
                     .child(
                         // Refresh Interval
                         div()
@@ -1303,78 +1163,10 @@ impl QuotifyApp {
                                     .child(div().text_size(px(11.0)).child(format!("{}s", self.config.general.refresh_interval)))
                             )
                             .child(
-                                div()
-                                    .relative()
-                                    .flex()
-                                    .items_center()
+                                Slider::new(&refresh_slider)
+                                    .horizontal()
                                     .w_full()
                                     .h(px(28.0))
-                                    .cursor(CursorStyle::PointingHand)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left(relative(0.1))
-                                            .top(px(12.0))
-                                            .w(relative(0.8))
-                                            .h(px(4.0))
-                                            .rounded(px(2.0))
-                                            .bg(slider_track),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left(relative(0.1))
-                                            .top(px(12.0))
-                                            .w(relative(refresh_progress * 0.8))
-                                            .h(px(4.0))
-                                            .rounded(px(2.0))
-                                            .bg(gpui::rgb(0x0067c0)),
-                                    )
-                                    .children(refresh_intervals.into_iter().enumerate().map(|(idx, val)| {
-                                        let selected = idx == refresh_index;
-                                        div()
-                                            .flex()
-                                            .flex_1()
-                                            .h_full()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                div()
-                                                    .w(px(if selected { 16.0 } else { 6.0 }))
-                                                    .h(px(if selected { 16.0 } else { 6.0 }))
-                                                    .rounded(px(if selected { 8.0 } else { 3.0 }))
-                                                    .border(px(if selected { 3.0 } else { 0.0 }))
-                                                    .border_color(if selected {
-                                                        if is_dark {
-                                                            gpui::rgb(0x202020)
-                                                        } else {
-                                                            gpui::rgb(0xffffff)
-                                                        }
-                                                    } else {
-                                                        slider_track
-                                                    })
-                                                    .bg(if selected {
-                                                        gpui::rgb(0x0067c0)
-                                                    } else {
-                                                        slider_track
-                                                    }),
-                                            )
-                                            .id(("interval_slider_stop", idx))
-                                            .on_click(cx.listener(move |this: &mut Self, _event: &gpui::ClickEvent, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                                this.config.general.refresh_interval = val;
-                                                this.save_config();
-                                                cx.notify();
-                                            }))
-                                            .on_mouse_move(cx.listener(move |this: &mut Self, event: &gpui::MouseMoveEvent, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                                if event.pressed_button == Some(MouseButton::Left)
-                                                    && this.config.general.refresh_interval != val
-                                                {
-                                                    this.config.general.refresh_interval = val;
-                                                    this.save_config();
-                                                    cx.notify();
-                                                }
-                                            }))
-                                    }))
                             )
                             .child(
                                 div()
@@ -1386,9 +1178,7 @@ impl QuotifyApp {
                                     .child("3600s")
                             )
                     )
-                    .child(
-                        div().h(px(1.0)).bg(if is_dark { gpui::rgba(0xffffff14) } else { gpui::rgba(0x00000014) })
-                    )
+                    .child(Divider::horizontal())
                     .child(
                         // Network Proxy input field
                         self.render_input_field("proxy".into(), "Network Proxy".into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
@@ -1397,38 +1187,55 @@ impl QuotifyApp {
             .into_any_element()
     }
 
-    fn render_provider_settings(
-        &self,
-        is_dark: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let card_bg = if is_dark {
-            gpui::rgba(0x2d2d2dc8)
-        } else {
-            gpui::rgba(0xffffffb2)
-        };
+    fn render_provider_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let toggle_secrets_app = cx.entity().downgrade();
+        let select_app = cx.entity().downgrade();
 
-        let dropdown_bg = if is_dark {
-            gpui::rgb(0x2b2b2b)
-        } else {
-            gpui::rgb(0xffffff)
-        };
-        let dropdown_border = if is_dark {
-            gpui::rgb(0x5c5c5c)
-        } else {
-            gpui::rgb(0x8a8a8a)
-        };
-        let dropdown_hover = if is_dark {
-            gpui::rgb(0x3a3a3a)
-        } else {
-            gpui::rgb(0xf0f0f0)
-        };
-        let dropdown_selected = if is_dark {
-            gpui::rgb(0x404b57)
-        } else {
-            gpui::rgb(0xe5f1fb)
-        };
+        let provider_names = provider_catalog()
+            .iter()
+            .map(|(_, display)| display.to_string())
+            .collect::<Vec<_>>();
+        let selected_index = provider_catalog()
+            .iter()
+            .position(|(id, _)| *id == self.selected_setting_provider)
+            .unwrap_or(0);
+        let provider_select =
+            window.use_keyed_state("provider-select-state", cx, move |window, cx| {
+                let select = cx.new(|cx| {
+                    SelectState::new(
+                        provider_names,
+                        Some(IndexPath::default().row(selected_index)),
+                        window,
+                        cx,
+                    )
+                    .searchable(true)
+                });
+                let _subscription = cx.subscribe(
+                    &select,
+                    move |_, _, event: &SelectEvent<Vec<String>>, cx| {
+                        let SelectEvent::Confirm(Some(display_name)) = event else {
+                            return;
+                        };
+                        if let Some((provider_id, _)) = provider_catalog()
+                            .iter()
+                            .find(|(_, display)| *display == display_name)
+                        {
+                            let provider_id = provider_id.to_string();
+                            select_app
+                                .update(cx, |this, cx| {
+                                    this.selected_setting_provider = provider_id;
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    },
+                );
+                ProviderSelectFieldState {
+                    select,
+                    _subscription,
+                }
+            });
+        let provider_select = provider_select.read(cx).select.clone();
 
         div()
             .flex()
@@ -1439,181 +1246,87 @@ impl QuotifyApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(13.0)).child("Provider Settings"))
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(13.0))
+                            .child("Provider Settings"),
+                    )
                     .child(
                         // Secrets masking toggler
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(gpui::rgb(0x0078d4))
-                            .child(if self.show_secrets { "Hide Secrets" } else { "Show Secrets" })
-                            .id("toggle_secrets_btn")
-                            .on_click(cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                this.show_secrets = !this.show_secrets;
-                                cx.notify();
-                            }))
-                    )
+                        Button::new("toggle_secrets_btn")
+                            .ghost()
+                            .xsmall()
+                            .label(if self.show_secrets {
+                                "Hide Secrets"
+                            } else {
+                                "Show Secrets"
+                            })
+                            .on_click(move |_, _, cx| {
+                                toggle_secrets_app
+                                    .update(cx, |this, cx| {
+                                        this.show_secrets = !this.show_secrets;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .px(px(16.0)) // Matches egui Margin::symmetric(16, 12) settings card frame
-                    .py(px(12.0))
-                    .bg(card_bg)
-                    .rounded(px(8.0))
+                GroupBox::new()
+                    .fill()
                     .child(
                         // Provider ComboBox
-                        div()
-                            .relative()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .w_full()
-                                    .h(px(32.0))
-                                    .px_3()
-                                    .bg(dropdown_bg)
-                                    .border(px(1.0))
-                                    .border_color(dropdown_border)
-                                    .rounded(px(4.0))
-                                    .text_size(px(11.0))
-                                    .cursor(CursorStyle::PointingHand)
-                                    .child(
-                                        provider_catalog()
-                                            .iter()
-                                            .find(|(id, _)| *id == self.selected_setting_provider)
-                                            .map(|(_, name)| *name)
-                                            .unwrap_or(self.selected_setting_provider.as_str())
-                                            .to_string()
-                                    )
-                                    .child(div().text_size(px(13.0)).child("⌄"))
-                                    .id("provider_select_btn")
-                                    .on_click(cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                        this.show_provider_dropdown = !this.show_provider_dropdown;
-                                        cx.notify();
-                                    }))
-                            )
-                            .child(
-                                if self.show_provider_dropdown {
-                                    deferred(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                        .top(px(36.0))
-                                        .w_full()
-                                        .h(px(156.0))
-                                        .bg(dropdown_bg)
-                                        .border(px(1.0))
-                                        .border_color(dropdown_border)
-                                        .rounded(px(6.0))
-                                        .shadow_lg()
-                                        .occlude()
-                                        .children(
-                                            provider_catalog().iter().enumerate().map(|(idx, (id, display))| {
-                                                let pid = id.to_string();
-                                                let selected = *id == self.selected_setting_provider;
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .h(px(28.0))
-                                                    .px_3()
-                                                    .bg(if selected { dropdown_selected } else { dropdown_bg })
-                                                    .hover(move |style| style.bg(dropdown_hover))
-                                                    .text_size(px(11.0))
-                                                    .cursor(CursorStyle::PointingHand)
-                                                    .child(*display)
-                                                    .child(if selected { "✓" } else { "" })
-                                                    .id(("dropdown_item", idx))
-                                                    .on_click(cx.listener(move |this: &mut Self, _event: &gpui::ClickEvent, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>| {
-                                                        this.selected_setting_provider = pid.clone();
-                                                        this.show_provider_dropdown = false;
-                                                        cx.notify();
-                                                    }))
-                                            })
-                                        )
-                                        .id("provider_dropdown_list")
-                                            .overflow_y_scroll(),
-                                    )
-                                    .with_priority(100)
-                                    .into_any_element()
-                                } else {
-                                    div()
-                                        .id("provider_dropdown_placeholder")
-                                        .into_any_element()
-                                }
-                            )
+                        Select::new(&provider_select)
+                            .small()
+                            .search_placeholder("Search providers")
+                            .w_full(),
                     )
-                    .child(
-                        div().h(px(1.0)).bg(if is_dark { gpui::rgba(0xffffff14) } else { gpui::rgba(0x00000014) })
-                    )
+                    .child(Divider::horizontal())
                     .child(
                         // Provider fields list based on selection
-                        self.render_selected_provider_fields(window, cx)
-                    )
+                        self.render_selected_provider_fields(window, cx),
+                    ),
             )
             .into_any_element()
     }
 
-    fn render_settings_footer(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_footer(&self) -> AnyElement {
+        let config_path = self.config_path.clone();
+        let report_config_path = self.config_path.clone();
+        let report_history = self.history.clone();
         div()
             .flex()
             .gap_3()
             .justify_center()
             .child(
-                div()
+                Link::new("open_config_file_link")
                     .text_size(px(11.0))
-                    .text_color(gpui::rgb(0x0078d4))
                     .child("Open config file")
-                    .id("open_config_file_link")
-                    .on_click(cx.listener(
-                        |this: &mut Self,
-                         _event: &gpui::ClickEvent,
-                         _window: &mut gpui::Window,
-                         _| {
-                            let _ = open_config_file(this.config_path.as_ref());
-                        },
-                    )),
+                    .on_click(move |_, _, _| {
+                        let _ = open_config_file(config_path.as_ref());
+                    }),
             )
-            .child(div().w(px(1.0)).h(px(12.0)).bg(if is_dark {
-                gpui::rgba(0xffffff33)
-            } else {
-                gpui::rgba(0x00000033)
-            }))
+            .child(Divider::vertical().h(px(12.0)))
             .child(
-                div()
+                Link::new("open_logs_link")
                     .text_size(px(11.0))
-                    .text_color(gpui::rgb(0x0078d4))
                     .child("Open logs")
-                    .id("open_logs_link")
                     .on_click(move |_, _, _| {
                         let _ = open_folder(&crate::diagnostics::log_dir());
                     }),
             )
-            .child(div().w(px(1.0)).h(px(12.0)).bg(if is_dark {
-                gpui::rgba(0xffffff33)
-            } else {
-                gpui::rgba(0x00000033)
-            }))
+            .child(Divider::vertical().h(px(12.0)))
             .child(
-                div()
+                Link::new("create_diagnostic_report_link")
                     .text_size(px(11.0))
-                    .text_color(gpui::rgb(0x0078d4))
                     .child("Create diagnostic report")
-                    .id("create_diagnostic_report_link")
-                    .on_click(cx.listener(
-                        |this: &mut Self,
-                         _event: &gpui::ClickEvent,
-                         _window: &mut gpui::Window,
-                         _| {
-                            let _ = crate::diagnostics::write_diagnostic_report(
-                                this.config_path.as_deref(),
-                                Some(&this.history.read()),
-                            );
-                        },
-                    )),
+                    .on_click(move |_, _, _| {
+                        let _ = crate::diagnostics::write_diagnostic_report(
+                            report_config_path.as_deref(),
+                            Some(&report_history.read()),
+                        );
+                    }),
             )
             .into_any_element()
     }
@@ -1624,80 +1337,58 @@ impl QuotifyApp {
         label: SharedString,
         placeholder: SharedString,
         is_password: bool,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_dark = match self.config.general.theme.as_str() {
-            "dark" => true,
-            "light" => false,
-            _ => matches!(
-                cx.window_appearance(),
-                WindowAppearance::Dark | WindowAppearance::VibrantDark
-            ),
-        };
+        let initial_value = config_field_value(&self.config, field_id.as_ref());
+        let masked = is_password && !self.show_secrets;
+        let app = cx.entity().downgrade();
+        let subscription_field = field_id.to_string();
+        let input_state = window.use_keyed_state(
+            SharedString::from(format!("input-field-state-{field_id}")),
+            cx,
+            move |window, cx| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .default_value(initial_value)
+                        .placeholder(placeholder)
+                        .masked(masked)
+                });
+                let _subscription =
+                    cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let value = input.read(cx).value().to_string();
+                            app.update(cx, |this, cx| {
+                                if set_config_field_value(
+                                    &mut this.config,
+                                    &subscription_field,
+                                    value.clone(),
+                                ) {
+                                    this.save_config();
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    });
 
-        let focus_handle = self.focus_handles.get(field_id.as_ref()).cloned().unwrap();
-        let is_focused = focus_handle.is_focused(window);
+                InputFieldState {
+                    input,
+                    masked,
+                    _subscription,
+                }
+            },
+        );
 
-        let input_bg = if is_dark {
-            gpui::rgb(0x202020)
-        } else {
-            gpui::rgb(0xf9f9f9)
-        };
-        let input_border = if is_focused {
-            gpui::rgb(0x0067c0)
-        } else if is_dark {
-            gpui::rgb(0x5c5c5c)
-        } else {
-            gpui::rgb(0x8a8a8a)
-        };
-        let placeholder_color = if is_dark {
-            gpui::rgba(0xffffff66)
-        } else {
-            gpui::rgba(0x00000066)
-        };
-
-        let val = match field_id.as_ref() {
-            "proxy" => &self.config.network.proxy,
-            "openai_key" => &self.config.openai.api_key,
-            "openai_url" => &self.config.openai.base_url,
-            "openai_dep" => &self.config.openai.deployment,
-            "deepseek_key" => &self.config.deepseek.api_key,
-            "claude_key" => &self.config.claude.api_key,
-            "claude_session" => &self.config.claude.session_key,
-            "claude_token" => &self.config.claude.access_token,
-            "claude_auth" => &self.config.claude.auth_file,
-            "codex_auth" => &self.config.codex.auth_file,
-            "gemini_key" => &self.config.gemini.api_key,
-            "antigravity_key" => &self.config.antigravity.api_key,
-            "opencode_key" => &self.config.opencode.api_key,
-            "opencode_workspace" => &self.config.opencode.workspace_id,
-            "opencode_auth" => &self.config.opencode.auth_cookie,
-            "mimo_key" => &self.config.mimo.api_key,
-            "mimo_token" => &self.config.mimo.service_token,
-            "mimo_cookie" => &self.config.mimo.cookie_header,
-            _ => "",
-        };
-
-        let display_text = if is_password && !self.show_secrets {
-            "•".repeat(val.len())
-        } else {
-            val.to_string()
-        };
-
-        let has_text = !display_text.is_empty();
-        let caret = |visible: bool| {
-            if visible {
-                div()
-                    .w(px(1.0))
-                    .h(px(15.0))
-                    .mx(px(1.0))
-                    .bg(gpui::rgb(0x0067c0))
-            } else {
-                div().w(px(0.0)).h(px(15.0))
-            }
-        };
-        let field_id_str = field_id.to_string();
+        let input = input_state.read(cx).input.clone();
+        if input_state.read(cx).masked != masked {
+            input_state.update(cx, |state, cx| {
+                state.masked = masked;
+                state
+                    .input
+                    .update(cx, |input, cx| input.set_masked(masked, window, cx));
+            });
+        }
 
         div()
             .flex()
@@ -1710,48 +1401,10 @@ impl QuotifyApp {
                     .child(label),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                Input::new(&input)
+                    .small()
                     .w_full()
-                    .h(px(32.0))
-                    .px_2()
-                    .bg(input_bg)
-                    .border(px(1.0))
-                    .border_color(input_border)
-                    .rounded(px(4.0))
-                    .track_focus(&focus_handle)
-                    .cursor(CursorStyle::IBeam)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .w_full()
-                            .overflow_hidden()
-                            .child(caret(is_focused && !has_text))
-                            .child(if has_text {
-                                div().text_size(px(11.0)).child(display_text)
-                            } else {
-                                div()
-                                    .text_color(placeholder_color)
-                                    .text_size(px(11.0))
-                                    .child(placeholder.to_string())
-                            })
-                            .child(caret(is_focused && has_text)),
-                    )
-                    .id(field_id)
-                    .on_click(move |_, window, _| {
-                        focus_handle.focus(window);
-                        window.refresh();
-                    })
-                    .on_key_down(cx.listener(
-                        move |this: &mut Self,
-                              event: &gpui::KeyDownEvent,
-                              _window: &mut gpui::Window,
-                              cx: &mut gpui::Context<Self>| {
-                            this.handle_input_key(&field_id_str, event, cx);
-                        },
-                    )),
+                    .when(is_password, |input| input.mask_toggle()),
             )
             .into_any_element()
     }
@@ -1761,15 +1414,6 @@ impl QuotifyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_dark = match self.config.general.theme.as_str() {
-            "dark" => true,
-            "light" => false,
-            _ => matches!(
-                cx.window_appearance(),
-                WindowAppearance::Dark | WindowAppearance::VibrantDark
-            ),
-        };
-
         let provider_id = self.selected_setting_provider.clone();
 
         let mut widgets: Vec<AnyElement> = Vec::new();
@@ -1793,6 +1437,7 @@ impl QuotifyApp {
         };
 
         let provider_id_checkbox = provider_id.clone();
+        let enable_provider_app = cx.entity().downgrade();
         widgets.push(
             div()
                 .flex()
@@ -1800,35 +1445,36 @@ impl QuotifyApp {
                 .justify_between()
                 .child(div().text_size(px(11.0)).child("Enable Provider"))
                 .child(
-                    Self::winui_toggle_switch(enabled, is_dark)
-                        .id("enable_provider_switch")
-                        .on_click(cx.listener(
-                            move |this: &mut Self,
-                                  _event: &gpui::ClickEvent,
-                                  _window: &mut gpui::Window,
-                                  cx: &mut gpui::Context<Self>| {
-                                let n = !enabled;
-                                match provider_id_checkbox.as_str() {
-                                    "deepseek" => this.config.deepseek.enabled = Some(n),
-                                    "claude" => this.config.claude.enabled = Some(n),
-                                    "codex" => this.config.codex.enabled = Some(n),
-                                    "gemini" => this.config.gemini.enabled = Some(n),
-                                    "antigravity" => this.config.antigravity.enabled = Some(n),
-                                    "opencode" => this.config.opencode.enabled = Some(n),
-                                    "mimo" => this.config.mimo.enabled = Some(n),
-                                    _ => {
-                                        if let Some(cfg) = api_key_provider_config_mut(
-                                            &mut this.config,
-                                            &provider_id_checkbox,
-                                        ) {
-                                            cfg.enabled = Some(n);
+                    Switch::new("enable_provider_switch")
+                        .checked(enabled)
+                        .on_click(move |checked, _window, cx| {
+                            let checked = *checked;
+                            enable_provider_app
+                                .update(cx, |this, cx| {
+                                    match provider_id_checkbox.as_str() {
+                                        "deepseek" => this.config.deepseek.enabled = Some(checked),
+                                        "claude" => this.config.claude.enabled = Some(checked),
+                                        "codex" => this.config.codex.enabled = Some(checked),
+                                        "gemini" => this.config.gemini.enabled = Some(checked),
+                                        "antigravity" => {
+                                            this.config.antigravity.enabled = Some(checked)
+                                        }
+                                        "opencode" => this.config.opencode.enabled = Some(checked),
+                                        "mimo" => this.config.mimo.enabled = Some(checked),
+                                        _ => {
+                                            if let Some(cfg) = api_key_provider_config_mut(
+                                                &mut this.config,
+                                                &provider_id_checkbox,
+                                            ) {
+                                                cfg.enabled = Some(checked);
+                                            }
                                         }
                                     }
-                                }
-                                this.save_config();
-                                cx.notify();
-                            },
-                        )),
+                                    this.save_config();
+                                    cx.notify();
+                                })
+                                .ok();
+                        }),
                 )
                 .into_any_element(),
         );
@@ -2061,65 +1707,61 @@ impl QuotifyApp {
         let testing_other = matches!(&status, ProviderTestStatus::Testing { .. }) && !testing_this;
 
         let provider_id_test = provider_id.clone();
+        let test_provider_app = cx.entity().downgrade();
         widgets.push(
             div()
                 .flex()
                 .flex_col()
                 .gap_2()
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
+                    Button::new("test_provider_btn")
+                        .primary()
+                        .small()
                         .w(px(110.0))
-                        .h(px(28.0))
-                        .bg(if testing_this || testing_other {
-                            gpui::rgb(0x555555)
-                        } else {
-                            gpui::rgb(0x005fa8)
-                        })
-                        .text_color(gpui::rgb(0xffffff))
-                        .text_size(px(11.0))
-                        .rounded(px(4.0))
-                        .child(if testing_this {
-                            "Testing..."
-                        } else {
-                            "Test Provider"
-                        })
-                        .id("test_provider_btn")
-                        .on_click(cx.listener(
-                            move |this: &mut Self,
-                                  _event: &gpui::ClickEvent,
-                                  _window: &mut gpui::Window,
-                                  cx: &mut gpui::Context<Self>| {
-                                if !testing_this && !testing_other {
-                                    this.trigger_provider_test(provider_id_test.clone(), cx);
-                                }
-                            },
-                        )),
+                        .label("Test Provider")
+                        .loading(testing_this)
+                        .disabled(testing_other)
+                        .on_click(move |_, _, cx| {
+                            if !testing_this && !testing_other {
+                                test_provider_app
+                                    .update(cx, |this, view_cx| {
+                                        this.trigger_provider_test(
+                                            provider_id_test.clone(),
+                                            view_cx,
+                                        );
+                                    })
+                                    .ok();
+                            }
+                        }),
                 )
                 .child(match status {
                     ProviderTestStatus::Success {
                         provider,
                         fetched_at,
                         summary,
-                    } if provider == provider_id => div()
-                        .text_size(px(10.0))
-                        .text_color(gpui::rgb(0x2e7d32))
-                        .child(format!(
+                    } if provider == provider_id => Alert::success(
+                        "provider-test-success",
+                        format!(
                             "Test passed at {}. {summary}",
                             fetched_at.with_timezone(&chrono::Local).format("%H:%M:%S")
-                        )),
+                        ),
+                    )
+                    .small()
+                    .into_any_element(),
                     ProviderTestStatus::Error { provider, message } if provider == provider_id => {
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(gpui::rgb(0xc62828))
-                            .child(format!("Test failed: {message}"))
+                        Alert::error("provider-test-error", format!("Test failed: {message}"))
+                            .small()
+                            .into_any_element()
                     }
-                    ProviderTestStatus::Testing { provider } if provider == provider_id => div()
-                        .text_size(px(10.0))
-                        .child("Fetching usage with current provider settings..."),
-                    _ => div(),
+                    ProviderTestStatus::Testing { provider } if provider == provider_id => {
+                        Alert::info(
+                            "provider-test-running",
+                            "Fetching usage with current provider settings...",
+                        )
+                        .small()
+                        .into_any_element()
+                    }
+                    _ => div().into_any_element(),
                 })
                 .into_any_element(),
         );
@@ -2238,8 +1880,94 @@ fn provider_icon(provider_name: &str, is_dark: bool) -> Option<&'static str> {
         ("warp", _) => Some("assets/provider-icons/warp.svg"),
         ("zai", true) => Some("assets/provider-icons/zai-dark.svg"),
         ("zai", false) => Some("assets/provider-icons/zai.svg"),
+        ("mimo", _) => Some("assets/provider-icons/mimo.svg"),
         _ => None,
     }
+}
+
+fn config_field_value(config: &crate::config::AppConfig, field: &str) -> String {
+    match field {
+        "proxy" => return config.network.proxy.clone(),
+        "deepseek_key" => return config.deepseek.api_key.clone(),
+        "claude_key" => return config.claude.api_key.clone(),
+        "claude_session" => return config.claude.session_key.clone(),
+        "claude_token" => return config.claude.access_token.clone(),
+        "claude_auth" => return config.claude.auth_file.clone(),
+        "codex_auth" => return config.codex.auth_file.clone(),
+        "gemini_key" => return config.gemini.api_key.clone(),
+        "antigravity_key" => return config.antigravity.api_key.clone(),
+        "opencode_key" => return config.opencode.api_key.clone(),
+        "opencode_workspace" => return config.opencode.workspace_id.clone(),
+        "opencode_auth" => return config.opencode.auth_cookie.clone(),
+        "mimo_key" => return config.mimo.api_key.clone(),
+        "mimo_token" => return config.mimo.service_token.clone(),
+        "mimo_cookie" => return config.mimo.cookie_header.clone(),
+        _ => {}
+    }
+
+    if let Some(provider) = field.strip_suffix("_key") {
+        if let Some(config) = api_key_provider_config(config, provider) {
+            return config.api_key.clone();
+        }
+    }
+    if let Some(provider) = field.strip_suffix("_url") {
+        if let Some(config) = api_key_provider_config(config, provider) {
+            return config.base_url.clone();
+        }
+    }
+    if let Some(provider) = field.strip_suffix("_dep") {
+        if let Some(config) = api_key_provider_config(config, provider) {
+            return config.deployment.clone();
+        }
+    }
+
+    String::new()
+}
+
+fn set_config_field_value(
+    config: &mut crate::config::AppConfig,
+    field: &str,
+    value: String,
+) -> bool {
+    let target = match field {
+        "proxy" => Some(&mut config.network.proxy),
+        "deepseek_key" => Some(&mut config.deepseek.api_key),
+        "claude_key" => Some(&mut config.claude.api_key),
+        "claude_session" => Some(&mut config.claude.session_key),
+        "claude_token" => Some(&mut config.claude.access_token),
+        "claude_auth" => Some(&mut config.claude.auth_file),
+        "codex_auth" => Some(&mut config.codex.auth_file),
+        "gemini_key" => Some(&mut config.gemini.api_key),
+        "antigravity_key" => Some(&mut config.antigravity.api_key),
+        "opencode_key" => Some(&mut config.opencode.api_key),
+        "opencode_workspace" => Some(&mut config.opencode.workspace_id),
+        "opencode_auth" => Some(&mut config.opencode.auth_cookie),
+        "mimo_key" => Some(&mut config.mimo.api_key),
+        "mimo_token" => Some(&mut config.mimo.service_token),
+        "mimo_cookie" => Some(&mut config.mimo.cookie_header),
+        _ => None,
+    };
+
+    if let Some(target) = target {
+        *target = value;
+        return true;
+    }
+
+    for suffix in ["_key", "_url", "_dep"] {
+        if let Some(provider) = field.strip_suffix(suffix) {
+            if let Some(provider_config) = api_key_provider_config_mut(config, provider) {
+                match suffix {
+                    "_key" => provider_config.api_key = value,
+                    "_url" => provider_config.base_url = value,
+                    "_dep" => provider_config.deployment = value,
+                    _ => unreachable!(),
+                }
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn api_key_provider_config<'a>(
@@ -2400,13 +2128,7 @@ fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
     }
 }
 
-use crate::version::{is_newer, normalize_version};
-
-fn open_browser(url: &str) {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
-}
+use crate::version::is_newer;
 
 fn open_config_file(config_path: Option<&PathBuf>) -> anyhow::Result<()> {
     let path = if let Some(p) = config_path {
