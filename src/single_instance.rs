@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, SetLastError, WIN32_ERROR, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::w;
 
@@ -9,6 +9,9 @@ pub struct SingleInstanceGuard {
 
 impl SingleInstanceGuard {
     pub fn acquire() -> Result<Self> {
+        unsafe {
+            SetLastError(WIN32_ERROR(0));
+        }
         let handle = unsafe { CreateMutexW(None, true, w!("Local\\QuotifySingleInstance")) }
             .context("Failed to create single-instance mutex")?;
 
