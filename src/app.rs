@@ -1,9 +1,11 @@
 use gpui::prelude::{FluentBuilder, InteractiveElement, ParentElement, Styled};
 use gpui::*;
+use gpui_component::StyledExt;
 use gpui_component::{
     Disableable, IndexPath, Selectable, Sizable,
     alert::Alert,
     button::{Button, ButtonVariants},
+    collapsible::Collapsible,
     divider::Divider,
     group_box::{GroupBox, GroupBoxVariants},
     input::{Input, InputEvent, InputState},
@@ -54,7 +56,6 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
     theme.font_size = px(14.0);
     theme.radius = px(6.0);
     theme.radius_lg = px(10.0);
-    theme.background = Hsla::transparent_black();
     theme.primary = gpui::rgb(0x0067c0).into();
     theme.primary_hover = gpui::rgb(0x1975c5).into();
     theme.primary_active = gpui::rgb(0x005a9e).into();
@@ -62,15 +63,19 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
     theme.progress_bar = gpui::rgb(0x0067c0).into();
 
     if mode.is_dark() {
-        theme.group_box = gpui::rgba(0x2b2b2baa).into();
-        theme.popover = gpui::rgba(0x2b2b2bf2).into();
+        // gpui-component 0.5.1 uses `background` for both Root and the Select menu.
+        // Keep enough tint for Select readability without hiding the DWM Mica layer.
+        theme.background = gpui::rgba(0x20202000).into();
+        theme.group_box = gpui::rgba(0x2b2b2b78).into();
+        theme.popover = gpui::rgba(0x2b2b2bff).into();
         theme.border = gpui::rgba(0xffffff26).into();
         theme.input = gpui::rgba(0xffffff3d).into();
         theme.muted = gpui::rgba(0xffffff24).into();
         theme.switch = gpui::rgba(0xffffff33).into();
     } else {
-        theme.group_box = gpui::rgba(0xffffffaa).into();
-        theme.popover = gpui::rgba(0xf9f9f9f2).into();
+        theme.background = gpui::rgba(0xf3f3f300).into();
+        theme.group_box = gpui::rgba(0xffffff85).into();
+        theme.popover = gpui::rgba(0xf9f9f9ff).into();
         theme.border = gpui::rgba(0x0000001f).into();
         theme.input = gpui::rgba(0x0000003d).into();
         theme.muted = gpui::rgba(0x00000014).into();
@@ -113,8 +118,8 @@ pub enum ProviderTestStatus {
 pub struct ProviderDragState {
     held_provider: Option<String>,
     drag_start_pos: Option<Point<Pixels>>,
-    current_mouse_pos: Option<Point<Pixels>>,
-    dragging: Option<String>,
+    dragging: bool,
+    order_changed: bool,
 }
 
 struct InputFieldState {
@@ -144,7 +149,7 @@ pub struct QuotifyApp {
     pub update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
     pub provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
     pub selected_setting_provider: String,
-    pub show_secrets: bool,
+    pub show_codex_reset_credits: bool,
 }
 
 impl QuotifyApp {
@@ -168,7 +173,7 @@ impl QuotifyApp {
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
             provider_test_status: Arc::new(parking_lot::Mutex::new(ProviderTestStatus::Idle)),
             selected_setting_provider: "openai".to_string(),
-            show_secrets: false,
+            show_codex_reset_credits: false,
         }
     }
 
@@ -183,6 +188,61 @@ impl QuotifyApp {
         if let Err(err) = res {
             tracing::error!("Failed to save config: {err}");
         }
+    }
+
+    fn set_primary_provider(&mut self, provider_name: &str) {
+        *self.active_provider.write() = provider_name.to_string();
+        self.config.general.active_provider = provider_name.to_string();
+        self.save_config();
+
+        update_tray_icon_for_active_provider(provider_name, &self.data);
+        crate::tray::request_refresh();
+    }
+
+    fn move_dragged_provider_to(&mut self, provider_name: &str, target_index: usize) -> bool {
+        let visible_provider_names = self
+            .data
+            .read()
+            .iter()
+            .map(|data| data.provider.clone())
+            .collect::<Vec<_>>();
+        let mut full_order = provider_display_order(&self.config)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let visible_slots = full_order
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| {
+                visible_provider_names
+                    .iter()
+                    .any(|visible| visible.eq_ignore_ascii_case(name))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let mut visible_order = visible_slots
+            .iter()
+            .map(|index| full_order[*index].clone())
+            .collect::<Vec<_>>();
+
+        let Some(source_index) = visible_order
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(provider_name))
+        else {
+            return false;
+        };
+        let target_index = target_index.min(visible_order.len().saturating_sub(1));
+        if source_index == target_index {
+            return false;
+        }
+
+        let provider = visible_order.remove(source_index);
+        visible_order.insert(target_index, provider);
+        for (slot, provider) in visible_slots.into_iter().zip(visible_order) {
+            full_order[slot] = provider;
+        }
+        self.config.general.provider_order = full_order;
+        true
     }
 
     fn trigger_provider_test(&self, provider_id: String, cx: &mut Context<Self>) {
@@ -382,6 +442,23 @@ impl Render for QuotifyApp {
                     .id("body_view")
                     .overflow_y_scrollbar(),
             )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(
+                    |this: &mut Self,
+                     _event: &MouseUpEvent,
+                     _window: &mut Window,
+                     cx: &mut Context<Self>| {
+                        if this.drag.order_changed {
+                            this.save_config();
+                        }
+                        if this.drag.held_provider.is_some() {
+                            this.drag = ProviderDragState::default();
+                            cx.notify();
+                        }
+                    },
+                ),
+            )
     }
 }
 
@@ -426,10 +503,7 @@ impl QuotifyApp {
                             .xsmall()
                             .w(px(26.0))
                             .h(px(26.0))
-                            .font_family("Segoe Fluent Icons")
-                            .font_weight(gpui::FontWeight::THIN)
-                            .text_size(px(12.0))
-                            .label("\u{E72B}")
+                            .child(fluent_icon("\u{E72B}", 12.0))
                             .tooltip("Back")
                             .on_click({
                                 let app = app.clone();
@@ -484,10 +558,7 @@ impl QuotifyApp {
                             .xsmall()
                             .w(px(26.0))
                             .h(px(26.0))
-                            .font_family("Segoe Fluent Icons")
-                            .font_weight(gpui::FontWeight::THIN)
-                            .text_size(px(12.0))
-                            .label("\u{E72C}")
+                            .child(fluent_icon("\u{E72C}", 12.0))
                             .tooltip("Refresh usage")
                             .on_click(move |_, _, _| {
                                 crate::tray::request_refresh();
@@ -500,10 +571,7 @@ impl QuotifyApp {
                             .xsmall()
                             .w(px(26.0))
                             .h(px(26.0))
-                            .font_family("Segoe Fluent Icons")
-                            .font_weight(gpui::FontWeight::THIN)
-                            .text_size(px(12.0))
-                            .label("\u{E713}")
+                            .child(fluent_icon("\u{E713}", 12.0))
                             .tooltip("Settings")
                             .on_click({
                                 let app = app.clone();
@@ -561,50 +629,13 @@ impl QuotifyApp {
             }
         }
 
-        // Render card preview floating at cursor position if dragged
-        let drag_preview = if let Some(ref dragged_prov) = self.drag.dragging {
-            if let Some(mouse_pos) = self.drag.current_mouse_pos {
-                if let Some(pdata) = data.iter().find(|d| d.provider == *dragged_prov) {
-                    let display_name = provider_catalog()
-                        .iter()
-                        .find(|(id, _)| id.eq_ignore_ascii_case(dragged_prov))
-                        .map(|(_, name)| SharedString::from(*name))
-                        .unwrap_or_else(|| SharedString::from(dragged_prov.clone()));
-                    let dx = mouse_pos.x / px(1.0);
-                    let dy = mouse_pos.y / px(1.0);
-                    Some(
-                        div()
-                            .absolute()
-                            .left(px(dx - 150.0)) // center preview horizontally around cursor
-                            .top(px(dy - 25.0))
-                            .child(self.render_provider_card(
-                                dragged_prov,
-                                display_name,
-                                pdata,
-                                999,
-                                is_dark,
-                                cx,
-                            )),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         div()
-            .relative()
             .flex()
             .flex_col()
+            .justify_between()
             .w_full()
             .gap_5()
-            .py(px(8.0))
             .children(cards)
-            .children(drag_preview)
             .into_any_element()
     }
 
@@ -618,10 +649,13 @@ impl QuotifyApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let provider_name = name.to_string();
-        let card_id = provider_name.clone();
+        let mouse_down_provider = provider_name.clone();
+        let mouse_move_provider = provider_name.clone();
         let card_elt_id = SharedString::from(format!("card_{name}"));
 
         let trend = self.history.read().trend_for(name, 7);
+        let reset_credits = crate::provider::codex::reset_credits(data);
+        let show_reset_credits = reset_credits.is_some() && self.show_codex_reset_credits;
 
         div()
             .w_full()
@@ -629,8 +663,24 @@ impl QuotifyApp {
             .child(
                 GroupBox::new()
                     .fill()
-                    .child(self.render_card_header(name, display_name, data, is_dark))
-                    .child(self.render_card_body(data, trend, is_dark)),
+                    .child(self.render_card_header(
+                        name,
+                        display_name,
+                        data,
+                        reset_credits.as_ref(),
+                        show_reset_credits,
+                        row_idx,
+                        is_dark,
+                        cx,
+                    ))
+                    .child(self.render_card_body(data, trend, is_dark))
+                    .when_some(reset_credits, |card, resets| {
+                        card.child(
+                            Collapsible::new()
+                                .open(show_reset_credits)
+                                .content(Self::render_codex_reset_details(&resets, is_dark)),
+                        )
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -639,8 +689,11 @@ impl QuotifyApp {
                           event: &MouseDownEvent,
                           _window: &mut gpui::Window,
                           cx: &mut gpui::Context<Self>| {
-                        this.drag.held_provider = Some(card_id.clone());
-                        this.drag.drag_start_pos = Some(event.position);
+                        this.drag = ProviderDragState {
+                            held_provider: Some(mouse_down_provider.clone()),
+                            drag_start_pos: Some(event.position),
+                            ..ProviderDragState::default()
+                        };
                         cx.notify();
                     },
                 ),
@@ -650,42 +703,29 @@ impl QuotifyApp {
                       event: &MouseMoveEvent,
                       _window: &mut gpui::Window,
                       cx: &mut gpui::Context<Self>| {
-                    if let Some(ref held) = this.drag.held_provider {
-                        if let Some(start_pos) = this.drag.drag_start_pos {
-                            let dx = (event.position.x - start_pos.x) / px(1.0);
-                            let dy = (event.position.y - start_pos.y) / px(1.0);
-                            let dist = dx.abs() + dy.abs();
-                            if dist > 6.0 {
-                                this.drag.dragging = Some(held.clone());
-                            }
+                    let Some(held_provider) = this.drag.held_provider.clone() else {
+                        return;
+                    };
+
+                    if !this.drag.dragging
+                        && let Some(start_pos) = this.drag.drag_start_pos
+                    {
+                        let dx = (event.position.x - start_pos.x) / px(1.0);
+                        let dy = (event.position.y - start_pos.y) / px(1.0);
+                        if dx.abs() + dy.abs() > 6.0 {
+                            this.drag.dragging = true;
                         }
-                        this.drag.current_mouse_pos = Some(event.position);
+                    }
+
+                    if this.drag.dragging
+                        && !held_provider.eq_ignore_ascii_case(&mouse_move_provider)
+                        && this.move_dragged_provider_to(&held_provider, row_idx)
+                    {
+                        this.drag.order_changed = true;
                         cx.notify();
                     }
                 },
             ))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(
-                    move |this: &mut Self,
-                          _event: &MouseUpEvent,
-                          _window: &mut gpui::Window,
-                          cx: &mut gpui::Context<Self>| {
-                        if let Some(ref dragged) = this.drag.dragging {
-                            let mut order = this.config.general.provider_order.clone();
-                            if let Some(pos) = order.iter().position(|p| p == dragged) {
-                                order.remove(pos);
-                            }
-                            let drop_idx = row_idx.min(order.len());
-                            order.insert(drop_idx, dragged.clone());
-                            this.config.general.provider_order = order;
-                            this.save_config();
-                        }
-                        this.drag = ProviderDragState::default();
-                        cx.notify();
-                    },
-                ),
-            )
             .into_any_element()
     }
 
@@ -694,9 +734,105 @@ impl QuotifyApp {
         name: &str,
         display_name: SharedString,
         data: &UsageData,
+        reset_credits: Option<&crate::provider::CodexResetCredits>,
+        show_reset_credits: bool,
+        row_idx: usize,
         is_dark: bool,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_primary = self.active_provider.read().eq_ignore_ascii_case(name);
+        let provider_name = name.to_string();
+        let provider_icon_element = if let Some(icon_path) = provider_icon(name, is_dark) {
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .child(img(icon_path).w_full().h_full())
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_full()
+                .bg(if is_dark {
+                    gpui::rgb(0x364559)
+                } else {
+                    gpui::rgb(0xe8f0ff)
+                })
+                .text_color(if is_dark {
+                    gpui::rgb(0xd2e1ff)
+                } else {
+                    gpui::rgb(0x254682)
+                })
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                .child("M")
+                .into_any_element()
+        };
+        let provider_icon_hitbox = div()
+            .id(SharedString::from(format!(
+                "provider-icon-{name}-{row_idx}"
+            )))
+            .w(px(18.0))
+            .h(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          _window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.set_primary_provider(&provider_name);
+                            cx.notify();
+                        }
+                    },
+                ),
+            )
+            .child(provider_icon_element);
+        let reset_tag = reset_credits.map(|resets| {
+            let app = cx.entity().downgrade();
+            div()
+                .id(SharedString::from(format!(
+                    "codex-reset-credits-hitbox-{row_idx}"
+                )))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new(SharedString::from(format!("codex-reset-credits-{row_idx}")))
+                        .ghost()
+                        .xsmall()
+                        .p_0()
+                        .h_auto()
+                        .child(
+                            Tag::info()
+                                .small()
+                                .outline()
+                                .gap_1()
+                                .child(format!("{} Resets", resets.available_count))
+                                .child(if show_reset_credits { "▴" } else { "▾" }),
+                        )
+                        .tooltip(if show_reset_credits {
+                            "Hide reset credit expiration details"
+                        } else {
+                            "Show reset credit expiration details"
+                        })
+                        .on_click(move |_, _, cx| {
+                            app.update(cx, |this, cx| {
+                                this.show_codex_reset_credits = !this.show_codex_reset_credits;
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                )
+                .into_any_element()
+        });
 
         div()
             .flex()
@@ -707,33 +843,7 @@ impl QuotifyApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(if let Some(icon_path) = provider_icon(name, is_dark) {
-                        div()
-                            .w(px(16.0))
-                            .h(px(16.0))
-                            .child(img(icon_path).w_full().h_full())
-                    } else {
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(16.0))
-                            .h(px(16.0))
-                            .rounded_full()
-                            .bg(if is_dark {
-                                gpui::rgb(0x364559)
-                            } else {
-                                gpui::rgb(0xe8f0ff)
-                            })
-                            .text_color(if is_dark {
-                                gpui::rgb(0xd2e1ff)
-                            } else {
-                                gpui::rgb(0x254682)
-                            })
-                            .text_size(px(10.0))
-                            .font_weight(gpui::FontWeight::EXTRA_BOLD)
-                            .child("M")
-                    })
+                    .child(provider_icon_hitbox)
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::NORMAL)
@@ -741,16 +851,21 @@ impl QuotifyApp {
                             .child(display_name),
                     )
                     .child(if is_primary {
-                        Tag::primary()
-                            .small()
-                            .outline()
-                            .child("PRIMARY")
+                        div()
+                            .text_color(if is_dark {
+                                gpui::rgb(0x60cdff)
+                            } else {
+                                gpui::rgb(0x0067c0)
+                            })
+                            .child(fluent_icon("\u{E735}", 12.0))
                             .into_any_element()
                     } else {
                         div().into_any_element()
                     }),
             )
-            .child(if let Some(ref credits) = data.credits {
+            .child(if let Some(reset_tag) = reset_tag {
+                reset_tag
+            } else if let Some(ref credits) = data.credits {
                 let text = format!(
                     "{} {}",
                     format_credits_balance(credits.balance),
@@ -778,6 +893,10 @@ impl QuotifyApp {
         let mut children = data
             .windows
             .iter()
+            .filter(|window| {
+                !data.provider.eq_ignore_ascii_case("codex")
+                    || !crate::provider::codex::is_reset_credits_window(window)
+            })
             .map(|w| Self::render_progress_row(w, is_dark))
             .collect::<Vec<_>>();
 
@@ -802,6 +921,103 @@ impl QuotifyApp {
             .flex_col()
             .gap(px(12.0)) // 8px gap between progress rows matches egui's default spacing
             .children(children)
+            .into_any_element()
+    }
+
+    fn render_codex_reset_details(
+        resets: &crate::provider::CodexResetCredits,
+        is_dark: bool,
+    ) -> AnyElement {
+        let weak_text = if is_dark {
+            gpui::rgba(0xffffff7f)
+        } else {
+            gpui::rgba(0x0000007f)
+        };
+
+        let rows = resets
+            .credits
+            .iter()
+            .enumerate()
+            .map(|(index, credit)| {
+                let status = credit.status.trim();
+                let status_text = if status.is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    let mut chars = status.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_else(|| "Unknown".to_string())
+                };
+                let status_tag = if status.eq_ignore_ascii_case("available") {
+                    Tag::success()
+                        .small()
+                        .outline()
+                        .child(status_text)
+                        .into_any_element()
+                } else {
+                    Tag::secondary()
+                        .small()
+                        .outline()
+                        .child(status_text)
+                        .into_any_element()
+                };
+
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(20.0))
+                                    .text_size(px(10.0))
+                                    .text_color(weak_text)
+                                    .child(format!("#{}", index + 1)),
+                            )
+                            .child(status_tag),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(weak_text)
+                            .child(format_reset_credit_expiry(credit.expires_at)),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_1()
+            .child(Divider::horizontal())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(10.0))
+                    .text_color(weak_text)
+                    .child("Reset credit")
+                    .child("Expires"),
+            )
+            .when(rows.is_empty(), |details| {
+                details.child(
+                    div()
+                        .py_2()
+                        .text_size(px(10.0))
+                        .text_color(weak_text)
+                        .child("No reset credit details returned."),
+                )
+            })
+            .children(rows)
             .into_any_element()
     }
 
@@ -842,11 +1058,23 @@ impl QuotifyApp {
                     .child(w.label.clone()),
             )
             .child(
-                Progress::new()
-                    .value(pct as f32)
-                    .bg(fill_color)
+                div()
+                    .relative()
                     .flex_1()
-                    .h(px(8.0)),
+                    .h(px(8.0))
+                    .child(Progress::new().value(0.0).bg(fill_color).w_full().h_full())
+                    .when(pct > 0.0, |track| {
+                        track.child(
+                            Progress::new()
+                                .value(100.0)
+                                .bg(fill_color)
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(relative((pct / 100.0) as f32))
+                                .h_full(),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1002,7 +1230,7 @@ impl QuotifyApp {
             .flex_col()
             .gap_4()
             .child(self.render_general_settings(is_dark, window, cx))
-            .child(self.render_provider_settings(window, cx))
+            .child(self.render_provider_settings(is_dark, window, cx))
             .child(self.render_settings_footer())
             .child(div().h(px(20.0)))
             .into_any_element()
@@ -1181,14 +1409,18 @@ impl QuotifyApp {
                     .child(Divider::horizontal())
                     .child(
                         // Network Proxy input field
-                        self.render_input_field("proxy".into(), "Network Proxy".into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
+                        self.render_input_field(is_dark, "proxy".into(), "Network Proxy".into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
                     )
             )
             .into_any_element()
     }
 
-    fn render_provider_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let toggle_secrets_app = cx.entity().downgrade();
+    fn render_provider_settings(
+        &self,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let select_app = cx.entity().downgrade();
 
         let provider_names = provider_catalog()
@@ -1236,41 +1468,20 @@ impl QuotifyApp {
                 }
             });
         let provider_select = provider_select.read(cx).select.clone();
-
+        let bg_fill = if is_dark {
+            gpui::rgb(0x202020)
+        } else {
+            gpui::rgb(0xf3f3f3)
+        };
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_size(px(13.0))
-                            .child("Provider Settings"),
-                    )
-                    .child(
-                        // Secrets masking toggler
-                        Button::new("toggle_secrets_btn")
-                            .ghost()
-                            .xsmall()
-                            .label(if self.show_secrets {
-                                "Hide Secrets"
-                            } else {
-                                "Show Secrets"
-                            })
-                            .on_click(move |_, _, cx| {
-                                toggle_secrets_app
-                                    .update(cx, |this, cx| {
-                                        this.show_secrets = !this.show_secrets;
-                                        cx.notify();
-                                    })
-                                    .ok();
-                            }),
-                    ),
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(13.0))
+                    .child("Provider Settings"),
             )
             .child(
                 GroupBox::new()
@@ -1278,14 +1489,14 @@ impl QuotifyApp {
                     .child(
                         // Provider ComboBox
                         Select::new(&provider_select)
-                            .small()
+                            .bg(bg_fill)
                             .search_placeholder("Search providers")
                             .w_full(),
                     )
                     .child(Divider::horizontal())
                     .child(
                         // Provider fields list based on selection
-                        self.render_selected_provider_fields(window, cx),
+                        self.render_selected_provider_fields(is_dark, window, cx),
                     ),
             )
             .into_any_element()
@@ -1333,6 +1544,7 @@ impl QuotifyApp {
 
     fn render_input_field(
         &self,
+        is_dark: bool,
         field_id: SharedString,
         label: SharedString,
         placeholder: SharedString,
@@ -1341,7 +1553,7 @@ impl QuotifyApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let initial_value = config_field_value(&self.config, field_id.as_ref());
-        let masked = is_password && !self.show_secrets;
+        let masked = is_password;
         let app = cx.entity().downgrade();
         let subscription_field = field_id.to_string();
         let input_state = window.use_keyed_state(
@@ -1389,6 +1601,11 @@ impl QuotifyApp {
                     .update(cx, |input, cx| input.set_masked(masked, window, cx));
             });
         }
+        let bg_fill = if is_dark {
+            gpui::rgb(0x202020)
+        } else {
+            gpui::rgb(0xf3f3f3)
+        };
 
         div()
             .flex()
@@ -1402,7 +1619,7 @@ impl QuotifyApp {
             )
             .child(
                 Input::new(&input)
-                    .small()
+                    .bg(bg_fill)
                     .w_full()
                     .when(is_password, |input| input.mask_toggle()),
             )
@@ -1411,6 +1628,7 @@ impl QuotifyApp {
 
     fn render_selected_provider_fields(
         &self,
+        is_dark: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1418,7 +1636,43 @@ impl QuotifyApp {
 
         let mut widgets: Vec<AnyElement> = Vec::new();
 
-        // 1. Enable toggle switch
+        // 1. Primary provider action
+        let is_primary = self
+            .active_provider
+            .read()
+            .eq_ignore_ascii_case(&provider_id);
+        let primary_provider_id = provider_id.clone();
+        let primary_provider_app = cx.entity().downgrade();
+        widgets.push(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_size(px(11.0)).child("Primary Provider"))
+                .child(
+                    Button::new("set_primary_provider_btn")
+                        .primary()
+                        .small()
+                        .disabled(is_primary)
+                        .child(fluent_icon("\u{E735}", 11.0))
+                        .child(if is_primary {
+                            "Primary"
+                        } else {
+                            "Set as Primary"
+                        })
+                        .on_click(move |_, _, cx| {
+                            primary_provider_app
+                                .update(cx, |this, cx| {
+                                    this.set_primary_provider(&primary_provider_id);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }),
+                )
+                .into_any_element(),
+        );
+
+        // 2. Enable toggle switch
         let enabled = match provider_id.as_str() {
             "deepseek" => self.config.deepseek.enabled.unwrap_or(false),
             "claude" => self.config.claude.enabled.unwrap_or(false),
@@ -1479,11 +1733,12 @@ impl QuotifyApp {
                 .into_any_element(),
         );
 
-        // 2. Specific field editors
+        // 3. Specific field editors
         match provider_id.as_str() {
             "deepseek" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "deepseek_key".into(),
                         "API Key".into(),
                         "Paste DeepSeek Key".into(),
@@ -1497,6 +1752,7 @@ impl QuotifyApp {
             "claude" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "claude_key".into(),
                         "API Key".into(),
                         "Claude Admin Key".into(),
@@ -1508,6 +1764,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "claude_session".into(),
                         "Session Key".into(),
                         "Claude Session Key".into(),
@@ -1519,6 +1776,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "claude_token".into(),
                         "Access Token".into(),
                         "Claude Access Token".into(),
@@ -1530,6 +1788,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "claude_auth".into(),
                         "Auth File Path".into(),
                         "e.g. C:\\Users\\Admin\\.claude\\session.toml".into(),
@@ -1543,6 +1802,7 @@ impl QuotifyApp {
             "codex" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "codex_auth".into(),
                         "Auth File Path".into(),
                         "e.g. C:\\Users\\Admin\\.codex\\token.json".into(),
@@ -1556,6 +1816,7 @@ impl QuotifyApp {
             "gemini" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "gemini_key".into(),
                         "API Key".into(),
                         "Paste Gemini Key".into(),
@@ -1569,6 +1830,7 @@ impl QuotifyApp {
             "antigravity" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "antigravity_key".into(),
                         "API Key".into(),
                         "Paste Antigravity Key".into(),
@@ -1582,6 +1844,7 @@ impl QuotifyApp {
             "opencode" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "opencode_key".into(),
                         "API Key".into(),
                         "OpenCode Workspaces Key".into(),
@@ -1593,6 +1856,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "opencode_workspace".into(),
                         "Workspace ID".into(),
                         "Paste Workspace ID".into(),
@@ -1604,6 +1868,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "opencode_auth".into(),
                         "Auth Cookie".into(),
                         "OpenCode Auth Cookie".into(),
@@ -1617,6 +1882,7 @@ impl QuotifyApp {
             "mimo" => {
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "mimo_key".into(),
                         "API Key".into(),
                         "MiMo Token Key".into(),
@@ -1628,6 +1894,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "mimo_token".into(),
                         "Service Token".into(),
                         "MiMo Service Token".into(),
@@ -1639,6 +1906,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         "mimo_cookie".into(),
                         "Cookie Header".into(),
                         "MiMo Cookie Header".into(),
@@ -1664,6 +1932,7 @@ impl QuotifyApp {
                 let dep_field = SharedString::from(format!("{}_dep", provider_id));
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         key_field,
                         "API Key / Token".into(),
                         "Paste provider credential".into(),
@@ -1675,6 +1944,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         url_field,
                         "Base URL".into(),
                         "e.g. http://127.0.0.1:8000/v1".into(),
@@ -1686,6 +1956,7 @@ impl QuotifyApp {
                 );
                 widgets.push(
                     self.render_input_field(
+                        is_dark,
                         dep_field,
                         "Deployment / Model Name".into(),
                         "e.g. gpui-4o-mini".into(),
@@ -1772,6 +2043,33 @@ impl QuotifyApp {
             .gap_3()
             .children(widgets)
             .into_any_element()
+    }
+}
+
+fn fluent_icon(glyph: &'static str, size: f32) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family("Segoe Fluent Icons")
+        .font_weight(gpui::FontWeight::THIN)
+        .text_size(px(size))
+        .line_height(relative(1.0))
+        .child(glyph)
+        .into_any_element()
+}
+
+fn update_tray_icon_for_active_provider(provider_name: &str, data: &Arc<RwLock<Vec<UsageData>>>) {
+    let data = data.read();
+    let active_provider = Some(provider_name);
+    let icon = crate::icon::generate_icon(&data, active_provider);
+    let tooltip = crate::icon::tray_tooltip(&data, active_provider);
+
+    if let Ok(hicon) = icon.to_hicon()
+        && let Some(&tray_hwnd) = crate::tray::TRAY_HWND.get()
+    {
+        let controller = crate::tray::TrayController::from_hwnd(tray_hwnd.raw());
+        controller.update_icon_with_tooltip(hicon, &tooltip);
     }
 }
 
@@ -2103,6 +2401,17 @@ fn format_credits_balance(balance: f64) -> String {
     } else {
         format!("{:.2}", balance)
     }
+}
+
+fn format_reset_credit_expiry(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    expires_at
+        .map(|expires| {
+            expires
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "No expiration".to_string())
 }
 
 fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {

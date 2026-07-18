@@ -1619,6 +1619,9 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
             let hwnd = shwnd.raw();
             apply_mica_backdrop(hwnd, mica_dark);
+            // Mica becomes active after the first GPUI frame. Repaint immediately so
+            // Quotify drops its opaque fallback fill and reveals the DWM backdrop.
+            trigger_gui_update();
             apply_rounded_window_region(hwnd);
             move_popup_offscreen(hwnd);
             set_dwm_cloak(hwnd, true);
