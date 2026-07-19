@@ -4,6 +4,24 @@ use serde::Deserialize;
 
 use super::{Provider, UsageData, UsageWindow, http_client};
 
+pub const RESET_CREDITS_LABEL: &str = "Reset Credits";
+
+pub fn is_reset_credits_window(window: &UsageWindow) -> bool {
+    window.label == RESET_CREDITS_LABEL
+}
+
+pub fn reset_credits(data: &UsageData) -> Option<super::CodexResetCredits> {
+    if !data.provider.eq_ignore_ascii_case("codex") {
+        return None;
+    }
+
+    data.windows
+        .iter()
+        .find(|window| is_reset_credits_window(window))
+        .and_then(|window| window.unit.as_deref())
+        .and_then(|json| serde_json::from_str(json).ok())
+}
+
 pub struct CodexProvider {
     auth_file: Option<String>,
     client: reqwest::Client,
@@ -209,13 +227,11 @@ impl Provider for CodexProvider {
                 .send()
                 .await;
 
-            if let Ok(r) = reset_resp {
-                if r.status().is_success() {
-                    if let Ok(parsed) = r.json::<super::CodexResetCredits>().await {
+            if let Ok(r) = reset_resp
+                && r.status().is_success()
+                    && let Ok(parsed) = r.json::<super::CodexResetCredits>().await {
                         codex_reset_credits = Some(parsed);
                     }
-                }
-            }
 
             let resp = self
                 .client
@@ -357,10 +373,10 @@ impl Provider for CodexProvider {
             }
         }
 
-        if let Some(resets) = codex_reset_credits {
-            if let Ok(json_str) = serde_json::to_string(&resets) {
+        if let Some(resets) = codex_reset_credits
+            && let Ok(json_str) = serde_json::to_string(&resets) {
                 windows.push(UsageWindow {
-                    label: "Reset Credits".to_string(),
+                    label: RESET_CREDITS_LABEL.to_string(),
                     used_percent: 0.0,
                     limit: None,
                     used: None,
@@ -368,7 +384,6 @@ impl Provider for CodexProvider {
                     resets_at: None,
                 });
             }
-        }
 
         if windows.is_empty() {
             windows.push(UsageWindow {
@@ -420,5 +435,38 @@ mod tests {
         assert!(parsed.credits[0].expires_at.is_some());
         assert_eq!(parsed.credits[1].status, "redeemed");
         assert!(parsed.credits[1].expires_at.is_none());
+    }
+
+    #[test]
+    fn reset_credits_are_decoded_from_codex_usage_metadata() {
+        let resets = crate::provider::CodexResetCredits {
+            available_count: 1,
+            credits: vec![crate::provider::CodexResetCredit {
+                status: "available".to_string(),
+                granted_at: None,
+                expires_at: chrono::DateTime::parse_from_rfc3339("2026-07-17T17:38:38Z")
+                    .ok()
+                    .map(|date| date.to_utc()),
+            }],
+        };
+        let data = crate::provider::UsageData {
+            provider: "codex".to_string(),
+            windows: vec![crate::provider::UsageWindow {
+                label: super::RESET_CREDITS_LABEL.to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: None,
+                unit: Some(serde_json::to_string(&resets).unwrap()),
+                resets_at: None,
+            }],
+            credits: None,
+            fetched_at: chrono::Utc::now(),
+            error: None,
+        };
+
+        let decoded = super::reset_credits(&data).unwrap();
+        assert_eq!(decoded.available_count, 1);
+        assert_eq!(decoded.credits.len(), 1);
+        assert_eq!(decoded.credits[0].status, "available");
     }
 }

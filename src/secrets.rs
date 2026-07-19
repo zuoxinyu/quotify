@@ -111,6 +111,7 @@ fn delete_raw(provider: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn delete(provider: &str, field: &str) -> Result<()> {
     let _ = delete_raw(provider, field);
     for i in 0..20 {
@@ -148,6 +149,7 @@ pub fn set_secret_from_input(provider: &str, field: &str, value: &mut String) {
     value.clear();
 }
 
+#[allow(dead_code)]
 pub fn configured(provider: &str, field: &str, env_names: &[&str]) -> bool {
     get(provider, field)
         .ok()

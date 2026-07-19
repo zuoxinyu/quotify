@@ -311,12 +311,10 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
 
             // Clean up
             let _ = KillTimer(Some(hwnd), 1);
-            WEBVIEW.with(|wv| {
-                *wv.borrow_mut() = None;
-            });
-            TX.with(|t| {
-                *t.borrow_mut() = None;
-            });
+            let _webview = WEBVIEW.with(|wv| wv.borrow_mut().take());
+            let _tx = TX.with(|t| t.borrow_mut().take());
+            drop(_webview);
+            drop(_tx);
             TICKS.with(|t| {
                 *t.borrow_mut() = 0;
             });

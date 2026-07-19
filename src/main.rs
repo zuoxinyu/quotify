@@ -1,5 +1,8 @@
+#![recursion_limit = "1024"]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(test, allow(dead_code, unused_variables, unused_imports))]
 
+#[cfg(not(test))]
 mod app;
 mod config;
 mod diagnostics;
@@ -10,7 +13,9 @@ mod single_instance;
 mod startup;
 mod tray;
 mod usage_history;
+mod version;
 
+use gpui::prelude::*;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use parking_lot::{Mutex, RwLock};
@@ -38,10 +43,17 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, TranslateMessage,
 };
-use winit::platform::windows::EventLoopBuilderExtWindows;
+pub static UPDATE_CHANNEL: OnceLock<tokio::sync::mpsc::Sender<()>> = OnceLock::new();
 
-pub static EGUI_CONTEXT: OnceLock<eframe::egui::Context> = OnceLock::new();
+pub fn trigger_gui_update() {
+    if let Some(tx) = UPDATE_CHANNEL.get() {
+        let _ = tx.try_send(());
+    }
+}
+
 pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static MICA_DARK_MODE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 pub static SYSTEM_SLEEPING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1075,16 +1087,19 @@ fn main() -> Result<()> {
             println!("Config written to: {}", path.display());
         }
         Commands::Tray => {
-            match single_instance::SingleInstanceGuard::acquire() {
-                Ok(_guard) => {
-                    run_tray(config, config_path)?;
-                }
-                Err(err) => {
-                    if single_instance::activate_existing_instance() {
-                        tracing::info!("Activated existing Quotify instance.");
-                    } else {
-                        tracing::error!("Quotify is already running, but could not activate the existing instance: {err}");
-                        return Err(err);
+            #[cfg(not(test))]
+            {
+                match single_instance::SingleInstanceGuard::acquire() {
+                    Ok(_guard) => {
+                        run_tray(config, config_path)?;
+                    }
+                    Err(err) => {
+                        if single_instance::activate_existing_instance() {
+                            tracing::info!("Activated existing Quotify instance.");
+                        } else {
+                            tracing::error!("Quotify is already running, but could not activate the existing instance: {err}");
+                            return Err(err);
+                        }
                     }
                 }
             }
@@ -1248,6 +1263,82 @@ fn load_runtime_config(
     config
 }
 
+#[derive(rust_embed::Embed)]
+#[folder = "assets/"]
+struct AppAssets;
+
+impl AppAssets {
+    fn key(path: &str) -> &str {
+        let path = path.trim_start_matches('/');
+        path.strip_prefix("assets/").unwrap_or(path)
+    }
+}
+
+impl gpui::AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let path = path.replace('\\', "/");
+        Ok(Self::get(Self::key(&path)).map(|asset| asset.data))
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        let path = path.replace('\\', "/");
+        let prefix = Self::key(&path).trim_end_matches('/');
+        let prefix = if prefix.is_empty() {
+            None
+        } else {
+            Some(format!("{prefix}/"))
+        };
+
+        Ok(Self::iter()
+            .filter(|asset| {
+                prefix
+                    .as_ref()
+                    .is_none_or(|prefix| asset.starts_with(prefix.as_str()))
+            })
+            .map(|asset| gpui::SharedString::from(format!("assets/{asset}")))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod app_assets_tests {
+    use super::*;
+
+    #[test]
+    fn gpui_assets_are_embedded_and_keep_their_logical_paths() {
+        let asset = gpui::AssetSource::load(&AppAssets, "assets/icons/quotify.svg")
+            .unwrap()
+            .expect("embedded Quotify icon");
+
+        assert!(matches!(&asset, std::borrow::Cow::Borrowed(_)));
+        assert!(asset.starts_with(b"<svg"));
+        assert!(
+            gpui::AssetSource::list(&AppAssets, "assets/icons")
+                .unwrap()
+                .iter()
+                .any(|path| path.as_ref() == "assets/icons/quotify.svg")
+        );
+
+        for path in [
+            "icons/chevron-down.svg",
+            "icons/circle-check.svg",
+            "icons/circle-x.svg",
+            "icons/eye.svg",
+            "icons/inbox.svg",
+            "icons/info.svg",
+            "icons/loader.svg",
+            "icons/search.svg",
+            "icons/triangle-alert.svg",
+        ] {
+            let asset = gpui::AssetSource::load(&AppAssets, path)
+                .unwrap_or_else(|err| panic!("failed to load {path}: {err}"))
+                .unwrap_or_else(|| panic!("missing gpui-component asset {path}"));
+            assert!(asset.starts_with(b"<svg"), "invalid SVG at {path}");
+        }
+    }
+}
+
+#[cfg(not(test))]
 fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) -> Result<()> {
     if let Err(err) = startup::set_enabled(config.general.start_with_windows) {
         tracing::error!("Failed to sync startup setting: {err}");
@@ -1269,31 +1360,48 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         config.general.active_provider.trim().to_string(),
     ));
 
-    let tray_controller =
-        Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
+    // Spawn tray controller on a background thread so its Win32 message loop can block there.
+    let (tray_tx, tray_rx) = std::sync::mpsc::channel();
+    let data_bg_tray = data.clone();
+    let active_provider_bg_tray = active_provider.clone();
+    let history_bg_tray = history.clone();
+    std::thread::spawn(move || {
+        let tray_controller = Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
+        tray_tx.send(tray_controller.clone()).unwrap();
 
-    // Set initial loading icon before data is fetched
-    let (initial_icon, tooltip) = {
-        let d = data.read();
-        let d_resolved: Vec<UsageData> = d.iter().map(|item| {
-            if item.error.is_some() {
-                if let Some(cached) = history.read().latest_successful_for(&item.provider) {
-                    cached
+        // Set initial loading icon before data is fetched
+        let (initial_icon, tooltip) = {
+            let d = data_bg_tray.read();
+            let d_resolved: Vec<UsageData> = d.iter().map(|item| {
+                if item.error.is_some() {
+                    if let Some(cached) = history_bg_tray.read().latest_successful_for(&item.provider) {
+                        cached
+                    } else {
+                        item.clone()
+                    }
                 } else {
                     item.clone()
                 }
-            } else {
-                item.clone()
+            }).collect();
+            let active_provider = active_provider_bg_tray.read();
+            let icon = icon::generate_icon(&d_resolved, active_provider_option(&active_provider));
+            let tooltip = icon::tray_tooltip(&d_resolved, active_provider_option(&active_provider));
+            (icon, tooltip)
+        };
+        if let Ok(hicon) = initial_icon.to_hicon() {
+            tray_controller.update_icon_with_tooltip(hicon, &tooltip);
+        }
+
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
-        }).collect();
-        let active_provider = active_provider.read();
-        let icon = icon::generate_icon(&d_resolved, active_provider_option(&active_provider));
-        let tooltip = icon::tray_tooltip(&d_resolved, active_provider_option(&active_provider));
-        (icon, tooltip)
-    };
-    if let Ok(hicon) = initial_icon.to_hicon() {
-        tray_controller.update_icon_with_tooltip(hicon, &tooltip);
-    }
+        }
+    });
+
+    let tray_controller = tray_rx.recv().unwrap();
 
     let refresh_interval = config.general.refresh_interval;
     let data_bg = data.clone();
@@ -1352,10 +1460,9 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                     tc_bg.update_icon_with_tooltip(hicon, &tooltip);
                 }
 
-                // Notify the main window to redraw with new data
-                if let Some(&main_hwnd) = tray::MAIN_HWND.get() {
-                    let _ = main_hwnd.post_message(tray::WM_APP_UPDATE_DATA, WPARAM(0), LPARAM(0));
-                }
+                // Notify GPUI to redraw
+                trigger_gui_update();
+
                 last_fetch = Some(std::time::Instant::now());
                 continue;
             }
@@ -1392,7 +1499,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         }
     });
 
-    // Spawn the eframe UI window on a separate thread
+    // Run GPUI App on the main thread
     let data_window = data.clone();
     let last_refresh_window = last_refresh.clone();
     let history_window = history.clone();
@@ -1400,141 +1507,176 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let config_path_window = config_path.clone();
     let active_provider_window = active_provider.clone();
 
-    std::thread::spawn(move || {
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<()>(100);
+    let _ = UPDATE_CHANNEL.set(update_tx);
+
+    let app = gpui::Application::new().with_assets(AppAssets);
+    app.run(move |cx| {
+        gpui_component::init(cx);
+        app::apply_component_theme(&config_window.general.theme, None, cx);
+
         let win_w = 400.0_f32;
         let win_h = 520.0_f32;
         let pos = hidden_popup_position();
 
-        let app = app::QuotifyApp::new(
-            data_window,
-            last_refresh_window,
-            config_window,
-            config_path_window,
-            active_provider_window,
-            history_window,
-        );
-
-        let native_options = eframe::NativeOptions {
-            renderer: eframe::Renderer::Glow,
-            viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([win_w, win_h])
-                .with_position(eframe::egui::pos2(pos[0] as f32, pos[1] as f32))
-                .with_title("Quotify - AI Quota Monitor")
-                .with_resizable(true)
-                .with_decorations(false)
-                .with_taskbar(false)
-                .with_transparent(true)
-                .with_visible(true),
-            event_loop_builder: Some(Box::new(|builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    builder.with_any_thread(true);
-                }
+        let window_options = gpui::WindowOptions {
+            window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+                origin: gpui::Point { x: gpui::px(pos[0] as f32), y: gpui::px(pos[1] as f32) },
+                size: gpui::size(gpui::px(win_w), gpui::px(win_h)),
             })),
+            titlebar: None,
+            focus: true,
+            show: true,
+            kind: gpui::WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            // GPUI's Transparent mode installs ACCENT_ENABLE_TRANSPARENTGRADIENT on Windows.
+            // Keep that legacy effect disabled so transparent DirectComposition pixels reveal
+            // the DWM system backdrop instead.
+            window_background: gpui::WindowBackgroundAppearance::Opaque,
             ..Default::default()
         };
 
-        if let Err(err) = eframe::run_native(
-            "Quotify",
-            native_options,
-            Box::new(move |cc| {
-                let _ = EGUI_CONTEXT.set(cc.egui_ctx.clone());
+        let mica_dark = match config_window.general.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => matches!(
+                cx.window_appearance(),
+                gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+            ),
+        };
 
-                let mut fonts = eframe::egui::FontDefinitions::default();
-                let mut loaded_any = false;
+        let view = cx.new(|cx| {
+            app::QuotifyApp::new(
+                data_window,
+                last_refresh_window,
+                config_window,
+                config_path_window,
+                active_provider_window,
+                history_window,
+                cx,
+            )
+        });
 
-                // Try to load Segoe UI Variable for true Windows 11 Fluent typography
-                let font_path = std::path::Path::new("C:\\Windows\\Fonts\\SegUIVar.ttf");
-                if let Ok(font_data) = std::fs::read(font_path) {
-                    fonts.font_data.insert(
-                        "SegoeUIVariable".to_owned(),
-                        std::sync::Arc::new(eframe::egui::FontData::from_owned(font_data).tweak(
-                            eframe::egui::FontTweak {
-                                scale: 1.05, // Slightly upscale to match expected reading size
-                                ..Default::default()
-                            },
-                        )),
-                    );
-                    fonts
-                        .families
-                        .get_mut(&eframe::egui::FontFamily::Proportional)
-                        .unwrap()
-                        .insert(0, "SegoeUIVariable".to_owned());
-                    loaded_any = true;
-                }
-
-                // Try to load Segoe Fluent Icons for modern Windows 11 system icon glyphs
-                let fluent_icon_path = std::path::Path::new("C:\\Windows\\Fonts\\SegoeIcons.ttf");
-                if let Ok(fluent_icon_data) = std::fs::read(fluent_icon_path) {
-                    fonts.font_data.insert(
-                        "SegoeFluentIcons".to_owned(),
-                        std::sync::Arc::new(eframe::egui::FontData::from_owned(fluent_icon_data)),
-                    );
-                    fonts
-                        .families
-                        .get_mut(&eframe::egui::FontFamily::Proportional)
-                        .unwrap()
-                        .push("SegoeFluentIcons".to_owned());
-                    loaded_any = true;
-                }
-
-                // Try to load Segoe MDL2 Assets for older Windows system icon glyphs (fallback)
-                let icon_font_path = std::path::Path::new("C:\\Windows\\Fonts\\segmdl2.ttf");
-                if let Ok(icon_font_data) = std::fs::read(icon_font_path) {
-                    fonts.font_data.insert(
-                        "SegoeMDL2".to_owned(),
-                        std::sync::Arc::new(eframe::egui::FontData::from_owned(icon_font_data)),
-                    );
-                    fonts
-                        .families
-                        .get_mut(&eframe::egui::FontFamily::Proportional)
-                        .unwrap()
-                        .push("SegoeMDL2".to_owned());
-                    loaded_any = true;
-                }
-
-                if loaded_any {
-                    cc.egui_ctx.set_fonts(fonts);
-                }
-
-                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                use windows::Win32::UI::Shell::SetWindowSubclass;
-
-                let mut hwnd = HWND(std::ptr::null_mut());
-                if let Ok(RawWindowHandle::Win32(win32_handle)) =
-                    cc.window_handle().map(|h| h.as_raw())
-                {
-                    hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
-                }
-
-                if !hwnd.0.is_null() {
-                    let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
-                    apply_mica_backdrop(hwnd);
-                    apply_rounded_window_region(hwnd);
-                    move_popup_offscreen(hwnd);
-                    set_dwm_cloak(hwnd, true);
-                    unsafe {
-                        let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+        let root_view = view.clone();
+        let win_w = cx
+            .open_window(window_options, move |window, cx| {
+                // Get window handle and store it in OnceLock
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = window.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw()
+                    {
+                        let hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
+                        tracing::info!("Successfully resolved Win32 HWND: {:?}", hwnd.0);
+                        let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
+                        unsafe {
+                            use windows::Win32::UI::Shell::SetWindowSubclass;
+                            let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
+                        }
+                    } else {
+                        tracing::warn!("Resolved window handle but it is not Win32");
                     }
                 } else {
-                    tracing::error!("Could not find Quotify main window HWND");
+                    tracing::warn!("Failed to obtain window handle from window context");
                 }
+                cx.new(|cx| gpui_component::Root::new(root_view, window, cx))
+            })
+            .expect("failed to open window");
 
-                Ok(Box::new(app))
-            }),
-        ) {
-            tracing::error!("Detail window failed: {err}");
-        }
+        win_w
+            .update(cx, |_, window, cx| {
+                cx.observe_window_appearance(window, move |_, window, cx| {
+                    let theme_setting = app::current_component_theme_setting();
+                    if theme_setting == "system" {
+                        let dark = matches!(
+                            window.appearance(),
+                            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                        );
+                        refresh_mica_backdrop(dark);
+                    }
+                    app::apply_component_theme(&theme_setting, Some(window), cx);
+                    cx.notify();
+                })
+                .detach();
+            })
+            .expect("failed to observe window appearance");
+
+        // Operations such as SetWindowPos synchronously emit GPUI callbacks. Run them
+        // after the current App borrow is released, and tolerate delayed HWND publication.
+        std::thread::spawn(move || {
+            let shwnd = (0..100).find_map(|_| {
+                let hwnd = tray::MAIN_HWND.get().copied();
+                if hwnd.is_none() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                hwnd
+            });
+
+            let Some(shwnd) = shwnd else {
+                tracing::error!("Timed out waiting for the GPUI HWND");
+                return;
+            };
+
+            let hwnd = shwnd.raw();
+            apply_mica_backdrop(hwnd, mica_dark);
+            // Mica becomes active after the first GPUI frame. Repaint immediately so
+            // Quotify drops its opaque fallback fill and reveals the DWM backdrop.
+            trigger_gui_update();
+            apply_rounded_window_region(hwnd);
+            move_popup_offscreen(hwnd);
+            set_dwm_cloak(hwnd, true);
+
+            #[cfg(debug_assertions)]
+            if std::env::var_os("QUOTIFY_SHOW_ON_START").is_some() {
+                let _ = shwnd.post_message(tray::WM_APP_SHOW, WPARAM(0), LPARAM(0));
+            }
+        });
+
+        // Spawn a listener task to handle repaint triggers from update channel
+        cx.spawn(move |cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                while update_rx.recv().await.is_some() {
+                    cx.update(|cx| {
+                        win_w.update(cx, |_, _, cx| {
+                            cx.notify();
+                        }).ok();
+                    }).ok();
+                }
+            }
+        })
+        .detach();
+
+        // Time-derived labels (for example, "12s ago" and reset countdowns) need an
+        // explicit wake-up because GPUI otherwise redraws only in response to input or
+        // state notifications. Avoid repainting while the tray popup is hidden.
+        let clock_window = win_w;
+        cx.spawn(move |cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+
+                    if !tray::WINDOW_VISIBLE.load(Ordering::SeqCst)
+                        || tray::ACTIVE_PAGE.load(Ordering::SeqCst) != 0
+                    {
+                        continue;
+                    }
+
+                    if cx
+                        .update(|cx| {
+                            clock_window.update(cx, |_, _, cx| cx.notify()).ok();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
     });
-
-    // Run the main Win32 tray message loop (proper blocking pump)
-    unsafe {
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
 
     Ok(())
 }
@@ -1680,30 +1822,84 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
     }
 }
 
-fn apply_mica_backdrop(hwnd: HWND) {
+fn apply_mica_backdrop(hwnd: HWND, dark: bool) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Graphics::Dwm::{
-            DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
+            DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+        };
+        use windows::Win32::UI::Controls::MARGINS;
+
+        MICA_DARK_MODE.store(dark, std::sync::atomic::Ordering::SeqCst);
+        IS_MICA_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        if hwnd.0.is_null() {
+            tracing::warn!("apply_mica_backdrop called with null HWND");
+            return;
+        }
+
+        let dark_mode = if dark { 1_i32 } else { 0_i32 };
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
         };
 
-        if !hwnd.0.is_null() {
+        unsafe {
+            let dark_result = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark_mode as *const _ as *const _,
+                std::mem::size_of_val(&dark_mode) as u32,
+            );
+            if let Err(err) = dark_result {
+                tracing::warn!("Failed to set Mica theme: {err}");
+            }
+
+            let frame_result = DwmExtendFrameIntoClientArea(hwnd, &margins);
             let backdrop_type = DWMSBT_MAINWINDOW.0;
-            unsafe {
-                let res = DwmSetWindowAttribute(
+            let backdrop_result = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdrop_type as *const _ as *const _,
+                std::mem::size_of_val(&backdrop_type) as u32,
+            );
+
+            // Windows 11 build 22000 predates DWMWA_SYSTEMBACKDROP_TYPE. Use the
+            // former private Mica attribute only when the supported API is rejected.
+            let effect_result = backdrop_result.or_else(|_| {
+                let mica_attribute = windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(1029);
+                let enabled = 1_i32;
+                DwmSetWindowAttribute(
                     hwnd,
-                    DWMWA_SYSTEMBACKDROP_TYPE,
-                    &backdrop_type as *const _ as *const _,
-                    std::mem::size_of::<i32>() as u32,
-                );
-                if res.is_ok() {
+                    mica_attribute,
+                    &enabled as *const _ as *const _,
+                    std::mem::size_of_val(&enabled) as u32,
+                )
+            });
+
+            match (frame_result, effect_result) {
+                (Ok(()), Ok(())) => {
                     IS_MICA_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tracing::info!("Mica backdrop enabled for HWND {:?}", hwnd.0);
+                }
+                (frame, effect) => {
+                    tracing::warn!(
+                        "Mica backdrop unavailable (extend frame: {frame:?}, backdrop: {effect:?})"
+                    );
                 }
             }
         }
     }
 }
 
+pub(crate) fn refresh_mica_backdrop(dark: bool) {
+    if let Some(hwnd) = tray::MAIN_HWND.get() {
+        apply_mica_backdrop(hwnd.raw(), dark);
+        trigger_gui_update();
+    }
+}
 fn apply_rounded_window_region(hwnd: HWND) {
     #[cfg(target_os = "windows")]
     {
@@ -1742,7 +1938,7 @@ unsafe extern "system" fn main_window_subclass(
         use windows::Win32::UI::Shell::DefSubclassProc;
         use windows::Win32::UI::WindowsAndMessaging::{
             SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
-            WM_DESTROY, WM_SIZE,
+            WM_DESTROY, WM_DWMCOMPOSITIONCHANGED, WM_SIZE,
         };
 
         match msg {
@@ -1756,9 +1952,7 @@ unsafe extern "system" fn main_window_subclass(
                         return LRESULT(0);
                     } else {
                         tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
-                        if let Some(ctx) = EGUI_CONTEXT.get() {
-                            ctx.request_repaint();
-                        }
+                        trigger_gui_update();
                         let _ = SetForegroundWindow(hwnd);
                         use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
                         let _ = SetFocus(Some(hwnd));
@@ -1768,7 +1962,21 @@ unsafe extern "system" fn main_window_subclass(
 
                 tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
 
-                let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
+                let scale = window_scale_factor();
+                let physical_w = (400.0 * scale) as i32;
+                let physical_h = (520.0 * scale) as i32;
+                use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    physical_w,
+                    physical_h,
+                    SWP_NOMOVE | SWP_NOZORDER,
+                );
+
+                let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
                 let pos = compute_popup_position(win_w, win_h);
                 *inactive_guard().lock() = Some(Instant::now() + Duration::from_millis(350));
                 apply_rounded_window_region(hwnd);
@@ -1779,10 +1987,7 @@ unsafe extern "system" fn main_window_subclass(
                 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
                 let _ = SetFocus(Some(hwnd));
 
-                if let Some(ctx) = EGUI_CONTEXT.get() {
-                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
-                    ctx.request_repaint();
-                }
+                trigger_gui_update();
 
                 LRESULT(0)
             }
@@ -1803,10 +2008,8 @@ unsafe extern "system" fn main_window_subclass(
                 LRESULT(0)
             }
             tray::WM_APP_UPDATE_DATA => {
-                if tray::WINDOW_VISIBLE.load(Ordering::SeqCst)
-                    && let Some(ctx) = EGUI_CONTEXT.get()
-                {
-                    ctx.request_repaint();
+                if tray::WINDOW_VISIBLE.load(Ordering::SeqCst) {
+                    trigger_gui_update();
                 }
                 LRESULT(0)
             }
@@ -1820,6 +2023,10 @@ unsafe extern "system" fn main_window_subclass(
                     SYSTEM_SLEEPING.store(false, Ordering::SeqCst);
                     tray::request_refresh();
                 }
+                DefSubclassProc(hwnd, msg, wparam, lparam)
+            }
+            WM_DWMCOMPOSITIONCHANGED => {
+                apply_mica_backdrop(hwnd, MICA_DARK_MODE.load(Ordering::SeqCst));
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             WM_SIZE => {
@@ -1842,6 +2049,22 @@ unsafe extern "system" fn main_window_subclass(
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
     }
+}
+
+fn window_scale_factor() -> f32 {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, GetDeviceCaps, LOGPIXELSX};
+        unsafe {
+            let hdc = GetDC(None);
+            if !hdc.0.is_null() {
+                let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSX);
+                let _ = ReleaseDC(None, hdc);
+                return (dpi as f32 / 96.0).max(1.0);
+            }
+        }
+    }
+    1.0
 }
 
 fn actual_window_size(hwnd: HWND) -> Option<(f32, f32)> {
@@ -1883,7 +2106,11 @@ fn show_popup_window(hwnd: HWND, final_pos: [f32; 2]) {
         };
 
         tray::WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-        let (_win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
+        let scale = window_scale_factor();
+        let physical_w = (400.0 * scale) as i32;
+        let physical_h = (520.0 * scale) as i32;
+
+        let (_win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
         let anchor_y = popup_anchor_y().unwrap_or(final_pos[1] + 1.0);
         let start_y = if anchor_y < final_pos[1] {
             final_pos[1] - win_h
@@ -1896,9 +2123,9 @@ fn show_popup_window(hwnd: HWND, final_pos: [f32; 2]) {
                 None,
                 final_pos[0] as i32,
                 start_y as i32,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER,
+                physical_w,
+                physical_h,
+                SWP_NOZORDER,
             );
             let _ = ShowWindow(hwnd, SW_SHOW);
         }

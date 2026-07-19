@@ -94,7 +94,7 @@ impl AntigravityProvider {
         path: Option<PathBuf>,
         content: &str,
     ) -> Option<AntigravityCredentials> {
-        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let json: serde_json::Value = serde_json::from_str(content).ok()?;
         parse_antigravity_credentials_json(path, json)
     }
 
@@ -321,17 +321,13 @@ impl AntigravityProvider {
                 .json(&body)
                 .send()
                 .await
-            {
-                if resp.status().is_success() {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if json.get("response").and_then(|r| r.get("groups")).is_some()
-                            || json.get("groups").is_some()
+                && resp.status().is_success()
+                    && let Ok(json) = resp.json::<serde_json::Value>().await
+                        && (json.get("response").and_then(|r| r.get("groups")).is_some()
+                            || json.get("groups").is_some())
                         {
                             return Ok(QuotaOrSummary::Summary(json));
                         }
-                    }
-                }
-            }
         }
 
         // Fallback to retrieveUserQuota
@@ -387,16 +383,13 @@ impl AntigravityProvider {
             .json(&json!({}))
             .send()
             .await
-        {
-            if resp.status().is_success() {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
+            && resp.status().is_success()
+                && let Ok(json) = resp.json::<serde_json::Value>().await {
                     let parsed = parse_antigravity_quota_summary(&json);
                     if !parsed.is_empty() {
                         return Ok(parsed);
                     }
                 }
-            }
-        }
 
         // 2. Fall back to GetAvailableModels if summary fails
         let url = format!("{base_url}{ANTIGRAVITY_GET_AVAILABLE_MODELS_PATH}");
@@ -1136,8 +1129,8 @@ fn collect_quota_entries(
                 .or_else(|| map.get("remaining_percent"))
                 .and_then(number_value);
 
-            if let Some(remaining) = remaining {
-                if let Some(ref model_id) = current_model_id {
+            if let Some(remaining) = remaining
+                && let Some(ref model_id) = current_model_id {
                     let remaining_percent = if remaining <= 1.0 {
                         remaining * 100.0
                     } else {
@@ -1162,7 +1155,6 @@ fn collect_quota_entries(
                         window_type: final_window,
                     });
                 }
-            }
 
             for (key, child) in map {
                 let mut child_window = current_window;

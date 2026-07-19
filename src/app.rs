@@ -1,12 +1,86 @@
-use eframe::egui;
+use gpui::prelude::{FluentBuilder, InteractiveElement, ParentElement, Styled};
+use gpui::*;
+use gpui_component::{
+    Disableable, IndexPath, Selectable, Sizable,
+    alert::Alert,
+    button::{Button, ButtonVariants},
+    collapsible::Collapsible,
+    divider::Divider,
+    group_box::{GroupBox, GroupBoxVariants},
+    input::{Input, InputEvent, InputState},
+    link::Link,
+    progress::Progress,
+    scroll::ScrollableElement,
+    select::{Select, SelectEvent, SelectState},
+    slider::{Slider, SliderEvent, SliderState},
+    switch::Switch,
+    tag::Tag,
+};
 use parking_lot::RwLock;
 use std::{
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{Arc, OnceLock, atomic::Ordering},
+    time::Duration,
 };
 
 use crate::provider::UsageData;
+
+static COMPONENT_THEME_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
+
+fn component_theme_setting() -> &'static RwLock<String> {
+    COMPONENT_THEME_SETTING.get_or_init(|| RwLock::new("system".to_string()))
+}
+
+pub fn current_component_theme_setting() -> String {
+    component_theme_setting().read().clone()
+}
+
+pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, cx: &mut App) {
+    *component_theme_setting().write() = theme_setting.to_string();
+
+    let mode = match theme_setting {
+        "dark" => gpui_component::ThemeMode::Dark,
+        "light" => gpui_component::ThemeMode::Light,
+        _ => window
+            .as_ref()
+            .map(|window| window.appearance())
+            .unwrap_or_else(|| cx.window_appearance())
+            .into(),
+    };
+
+    gpui_component::Theme::change(mode, window, cx);
+
+    let theme = gpui_component::Theme::global_mut(cx);
+    theme.font_family = "Segoe UI".into();
+    theme.font_size = px(14.0);
+    theme.radius = px(6.0);
+    theme.radius_lg = px(10.0);
+    theme.primary = gpui::rgb(0x0067c0).into();
+    theme.primary_hover = gpui::rgb(0x1975c5).into();
+    theme.primary_active = gpui::rgb(0x005a9e).into();
+    theme.ring = gpui::rgb(0x0067c0).into();
+    theme.progress_bar = gpui::rgb(0x0067c0).into();
+
+    if mode.is_dark() {
+        // gpui-component 0.5.1 uses `background` for both Root and the Select menu.
+        // Keep enough tint for Select readability without hiding the DWM Mica layer.
+        theme.background = gpui::rgba(0x20202000).into();
+        theme.group_box = gpui::rgba(0x2b2b2b78).into();
+        theme.popover = gpui::rgba(0x2b2b2bff).into();
+        theme.border = gpui::rgba(0xffffff26).into();
+        theme.input = gpui::rgba(0xffffff3d).into();
+        theme.muted = gpui::rgba(0xffffff24).into();
+        theme.switch = gpui::rgba(0xffffff33).into();
+    } else {
+        theme.background = gpui::rgba(0xf3f3f300).into();
+        theme.group_box = gpui::rgba(0xffffff85).into();
+        theme.popover = gpui::rgba(0xf9f9f9ff).into();
+        theme.border = gpui::rgba(0x0000001f).into();
+        theme.input = gpui::rgba(0x0000003d).into();
+        theme.muted = gpui::rgba(0x00000014).into();
+        theme.switch = gpui::rgba(0x0000002e).into();
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateStatus {
@@ -23,7 +97,7 @@ pub enum UpdateStatus {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum ProviderTestStatus {
+pub enum ProviderTestStatus {
     Idle,
     Testing {
         provider: String,
@@ -39,6 +113,30 @@ enum ProviderTestStatus {
     },
 }
 
+#[derive(Default, Clone)]
+pub struct ProviderDragState {
+    held_provider: Option<String>,
+    drag_start_pos: Option<Point<Pixels>>,
+    dragging: bool,
+    order_changed: bool,
+}
+
+struct InputFieldState {
+    input: Entity<InputState>,
+    masked: bool,
+    _subscription: Subscription,
+}
+
+struct ProviderSelectFieldState {
+    select: Entity<SelectState<Vec<String>>>,
+    _subscription: Subscription,
+}
+
+struct RefreshSliderFieldState {
+    slider: Entity<SliderState>,
+    _subscription: Subscription,
+}
+
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
@@ -46,12 +144,11 @@ pub struct QuotifyApp {
     pub config: crate::config::AppConfig,
     pub config_path: Option<PathBuf>,
     pub active_provider: Arc<RwLock<String>>,
-    drag: ProviderDragState,
-    last_config_reload: Instant,
-    update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
-    provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
-    selected_setting_provider: String,
-    show_secrets: bool,
+    pub drag: ProviderDragState,
+    pub update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
+    pub provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
+    pub selected_setting_provider: String,
+    pub show_codex_reset_credits: bool,
 }
 
 impl QuotifyApp {
@@ -62,6 +159,7 @@ impl QuotifyApp {
         config_path: Option<PathBuf>,
         active_provider: Arc<RwLock<String>>,
         history: Arc<RwLock<crate::usage_history::UsageHistory>>,
+        _cx: &mut Context<Self>,
     ) -> Self {
         Self {
             data,
@@ -71,784 +169,82 @@ impl QuotifyApp {
             config_path,
             active_provider,
             drag: ProviderDragState::default(),
-            last_config_reload: Instant::now(),
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
             provider_test_status: Arc::new(parking_lot::Mutex::new(ProviderTestStatus::Idle)),
             selected_setting_provider: "openai".to_string(),
-            show_secrets: false,
-        }
-    }
-}
-
-#[derive(Default)]
-struct ProviderDragState {
-    held_provider: Option<String>,
-    hold_started: Option<Instant>,
-    dragging: Option<ProviderDragPayload>,
-    pointer_offset: Option<egui::Vec2>,
-    card_size: Option<egui::Vec2>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ProviderDragPayload {
-    provider: String,
-    row: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ProviderDropTarget {
-    Item { provider: String, row: usize },
-    End,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderStatus {
-    Active,
-    Error,
-    ErrorWithCache,
-    Disabled,
-}
-
-impl eframe::App for QuotifyApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        // Fully transparent so the DWM Mica backdrop shows through
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        egui_extras::install_image_loaders(&ctx);
-
-        let active_page = crate::tray::ACTIVE_PAGE.load(std::sync::atomic::Ordering::SeqCst);
-        if active_page != 2 {
-            self.reload_config_if_due();
-        }
-
-        // Redraw every second to update the "Refreshed X seconds ago" counter,
-        // but ONLY if the window is active/focused. When the window loses focus,
-        // it hides itself. If we request repaint while hidden, winit's swapchain
-        // will instantly fail and cause a 100% CPU busy loop trying to VSync.
-        let is_visible = crate::tray::WINDOW_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
-        if is_visible && ctx.input(|i| i.focused) {
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
-        }
-
-        // Query the OS/system theme to support dynamic light/dark mode switching
-        let is_dark = match self.config.general.theme.as_str() {
-            "dark" => true,
-            "light" => false,
-            _ => match ctx.system_theme() {
-                Some(egui::Theme::Dark) => true,
-                Some(egui::Theme::Light) => false,
-                None => ctx.global_style().visuals.dark_mode,
-            },
-        };
-
-        // Update Windows DWM immersive dark mode attribute to match the calculated theme
-        if let Some(send_hwnd) = crate::tray::MAIN_HWND.get() {
-            let hwnd = send_hwnd.raw();
-            use windows::Win32::Graphics::Dwm::{
-                DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
-            };
-            let dark = if is_dark { 1_i32 } else { 0_i32 };
-            unsafe {
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_USE_IMMERSIVE_DARK_MODE,
-                    &dark as *const _ as *const _,
-                    std::mem::size_of::<i32>() as u32,
-                );
-            }
-        }
-
-        let is_mica = crate::IS_MICA_ACTIVE.load(std::sync::atomic::Ordering::SeqCst);
-        let mut visuals = if is_dark {
-            let mut v = egui::Visuals::dark();
-            // Solid window fill for dropdown menus and popups to ensure they are opaque
-            v.window_fill = egui::Color32::from_rgb(45, 45, 45);
-            v.panel_fill = if is_mica {
-                egui::Color32::TRANSPARENT
-            } else {
-                egui::Color32::from_rgb(32, 32, 32)
-            };
-            v.extreme_bg_color = if is_mica {
-                egui::Color32::from_rgba_premultiplied(32, 32, 32, 180)
-            } else {
-                egui::Color32::from_rgb(32, 32, 32)
-            };
-
-            // Semi-transparent Acrylic Plate card backgrounds (Dark mode).
-            // Cards stay fairly opaque for text contrast, while the panel
-            // background between them is transparent to show the Mica backdrop.
-            v.widgets.noninteractive.bg_fill =
-                egui::Color32::from_rgba_premultiplied(45, 45, 45, 200);
-            v.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(50, 50, 50, 200);
-            v.widgets.hovered.bg_fill = egui::Color32::from_rgba_premultiplied(56, 56, 56, 220);
-            v.widgets.active.bg_fill = egui::Color32::from_rgba_premultiplied(62, 62, 62, 230);
-
-            // Windows 11 Card plate borders (Dark mode)
-            v.widgets.noninteractive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(60, 60, 60, 160));
-            v.widgets.inactive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(70, 70, 70, 160));
-            v
-        } else {
-            let mut v = egui::Visuals::light();
-            // Solid window fill for dropdown menus and popups to ensure they are opaque
-            v.window_fill = egui::Color32::from_rgb(255, 255, 255);
-            v.panel_fill = if is_mica {
-                egui::Color32::TRANSPARENT
-            } else {
-                egui::Color32::from_rgb(243, 243, 243)
-            };
-            v.extreme_bg_color = if is_mica {
-                egui::Color32::from_rgba_premultiplied(229, 229, 229, 200)
-            } else {
-                egui::Color32::from_rgb(229, 229, 229)
-            };
-
-            // Semi-transparent Acrylic Plate card backgrounds (Light mode).
-            // Cards stay fairly opaque for text contrast, while the panel
-            // background between them is transparent to show the Mica backdrop.
-            v.widgets.noninteractive.bg_fill =
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 180);
-            v.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(229, 229, 229, 255);
-            v.widgets.hovered.bg_fill = egui::Color32::from_rgba_premultiplied(243, 243, 243, 200);
-            v.widgets.active.bg_fill = egui::Color32::from_rgba_premultiplied(235, 235, 235, 220);
-
-            // Windows 11 Card plate borders (Light mode)
-            v.widgets.noninteractive.bg_stroke = egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_premultiplied(229, 229, 229, 180),
-            );
-            v.widgets.inactive.bg_stroke = egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_premultiplied(240, 240, 240, 180),
-            );
-            v
-        };
-
-        // Remove default white/light borders from interactive widgets (buttons, dropdowns, etc.)
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
-
-        // Standard Windows 11 layout corner roundings
-        visuals.window_corner_radius = 12.into(); // standard Win11 window rounding
-        visuals.widgets.noninteractive.corner_radius = 8.into(); // standard Win11 card rounding
-        visuals.widgets.inactive.corner_radius = 6.into(); // standard Win11 control rounding
-        visuals.widgets.hovered.corner_radius = 6.into();
-        visuals.widgets.active.corner_radius = 6.into();
-        visuals.popup_shadow = egui::Shadow::NONE;
-        visuals.window_shadow = egui::Shadow::NONE;
-
-        // Set WinUI 3 typography metrics
-        let mut style = (*ctx.global_style()).clone();
-        style.text_styles = [
-            (
-                egui::TextStyle::Heading,
-                egui::FontId::new(20.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Name("Title".into()),
-                egui::FontId::new(28.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Body,
-                egui::FontId::new(14.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Monospace,
-                egui::FontId::new(14.0, egui::FontFamily::Monospace),
-            ),
-            (
-                egui::TextStyle::Button,
-                egui::FontId::new(14.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Small,
-                egui::FontId::new(12.0, egui::FontFamily::Proportional),
-            ),
-        ]
-        .into();
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        // Disable the top/bottom fade-out gradients on the card scroll area.
-        style.spacing.scroll.fade.strength = 0.0;
-        ctx.set_global_style(style);
-
-        ctx.set_visuals(visuals);
-
-        // Semi-transparent popup panel to let native Mica show through.
-        // We let Windows DWM handle the window rounded corners and native border/shadow,
-        // avoiding drawing a second rounded border in egui to prevent mismatched curvatures.
-        // Native Win11 flyout: cards stay opaque for contrast, the panel
-        // background is fully transparent so the Mica backdrop shows through
-        // the gaps between cards. Without Mica we fall back to a solid fill.
-        let panel_bg = if is_dark {
-            if is_mica {
-                egui::Color32::TRANSPARENT
-            } else {
-                egui::Color32::from_rgb(32, 32, 32)
-            }
-        } else {
-            if is_mica {
-                egui::Color32::TRANSPARENT
-            } else {
-                egui::Color32::from_rgb(243, 243, 243)
-            }
-        };
-
-        let popup_frame = egui::Frame::NONE
-            .fill(panel_bg)
-            .corner_radius(12)
-            .inner_margin(12)
-            .outer_margin(0);
-
-        egui::CentralPanel::default()
-            .frame(popup_frame)
-            .show_inside(ui, |ui| {
-                let content_width = ui.available_width();
-                let card_width = (content_width - 2.0).clamp(0.0, 352.0);
-                let card_left_indent = ((content_width - card_width) / 2.0).max(0.0);
-                let last = *self.last_refresh.read();
-                let elapsed = (chrono::Utc::now() - last).num_seconds();
-                let refresh_age = if elapsed < 60 {
-                    format!("{}s ago", elapsed.max(0))
-                } else {
-                    format!("{}m ago", elapsed / 60)
-                };
-
-                let active_page = crate::tray::ACTIVE_PAGE.load(std::sync::atomic::Ordering::SeqCst);
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), 28.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.add_space(card_left_indent);
-
-                        if active_page == 1 {
-                            ui.horizontal_centered(|ui| {
-                                ui.scope(|ui| {
-                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                                    let back_btn = ui.add_sized(
-                                        egui::vec2(24.0, 24.0),
-                                        egui::Button::new(
-                                            egui::RichText::new("\u{E72B}")
-                                                .size(12.0)
-                                        )
-                                        .corner_radius(4)
-                                    );
-                                    if back_btn.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-                                    if back_btn.clicked() {
-                                        crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
-                                        ctx.request_repaint();
-                                    }
-                                });
-                                ui.add_space(8.0);
-                                ui.label(
-                                    egui::RichText::new("About")
-                                        .strong()
-                                        .size(16.0)
-                                        .line_height(Some(24.0)),
-                                );
-                            });
-                        } else if active_page == 2 {
-                            ui.horizontal_centered(|ui| {
-                                ui.scope(|ui| {
-                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                                    let back_btn = ui.add_sized(
-                                        egui::vec2(24.0, 24.0),
-                                        egui::Button::new(
-                                            egui::RichText::new("\u{E72B}")
-                                                .size(12.0)
-                                        )
-                                        .corner_radius(4)
-                                    );
-                                    if back_btn.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-                                    if back_btn.clicked() {
-                                        crate::tray::ACTIVE_PAGE.store(0, std::sync::atomic::Ordering::SeqCst);
-                                        ctx.request_repaint();
-                                    }
-                                });
-                                ui.add_space(8.0);
-                                ui.label(
-                                    egui::RichText::new("Settings")
-                                        .strong()
-                                        .size(16.0)
-                                        .line_height(Some(24.0)),
-                                );
-                            });
-                        } else {
-                            let header_response = ui.horizontal_centered(|ui| {
-                                let logo = egui::Image::new(egui::include_image!(
-                                    "../assets/icons/quotify.svg"
-                                ))
-                                .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                                .maintain_aspect_ratio(true);
-                                ui.add(logo).on_hover_text("About");
-
-                                ui.add_space(6.0);
-
-                                ui.label(
-                                    egui::RichText::new("Quotify")
-                                        .strong()
-                                        .size(16.0)
-                                        .line_height(Some(24.0)),
-                                );
-                            });
-
-                            let header_interact = ui.interact(
-                                header_response.response.rect,
-                                header_response.response.id,
-                                egui::Sense::click(),
-                            );
-                            if header_interact.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if header_interact.clicked() {
-                                crate::tray::ACTIVE_PAGE.store(1, std::sync::atomic::Ordering::SeqCst);
-                                ctx.request_repaint();
-                            }
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.scope(|ui| {
-                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                                    let settings = ui.add_sized(
-                                        egui::vec2(24.0, 24.0),
-                                        egui::Button::new(
-                                            egui::RichText::new("\u{E713}")
-                                                .strong()
-                                                .size(12.0)
-                                        )
-                                        .corner_radius(4)
-                                    ).on_hover_text("Settings");
-
-                                    if settings.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-
-                                    if settings.clicked() {
-                                        crate::tray::ACTIVE_PAGE.store(2, std::sync::atomic::Ordering::SeqCst);
-                                        ctx.request_repaint();
-                                    }
-                                });
-
-                                ui.add_space(2.0);
-
-                                ui.scope(|ui| {
-                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                                    let refresh = ui.add_sized(
-                                        egui::vec2(24.0, 24.0),
-                                        egui::Button::new(
-                                            egui::RichText::new("\u{E72C}")
-                                                .strong()
-                                                .size(12.0)
-                                        )
-                                        .corner_radius(4)
-                                    ).on_hover_text("Refresh usage now");
-
-                                    if refresh.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-
-                                    if refresh.clicked() {
-                                        crate::tray::request_refresh();
-                                        ctx.request_repaint();
-                                    }
-                                });
-
-                                ui.add_space(4.0);
-
-                                ui.add_sized(
-                                    [60.0, 24.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(refresh_age)
-                                            .small()
-                                            .color(ui.visuals().weak_text_color()),
-                                    )
-                                    .truncate(),
-                                );
-                            });
-                        }
-                    },
-                );
-
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                if active_page == 1 {
-                    self.render_about_page(ui, &ctx, card_width, card_left_indent);
-                } else if active_page == 2 {
-                    self.render_settings_page(ui, &ctx, card_width, card_left_indent);
-                } else {
-                    let provider_drag_active =
-                        self.drag.held_provider.is_some() || self.drag.dragging.is_some();
-                    let scroll_source = egui::containers::scroll_area::ScrollSource {
-                        drag: !provider_drag_active,
-                        ..egui::containers::scroll_area::ScrollSource::ALL
-                    };
-                    let _scroll_output = egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .hscroll(false)
-                        .scroll_source(scroll_source)
-                        .show(ui, |ui| {
-                            let data = self.data.read().clone();
-                            let all_providers = provider_display_order(&self.config);
-                            let visible_providers = all_providers
-                                .into_iter()
-                                .filter(|(name, _)| data.iter().any(|d| d.provider == *name))
-                                .collect::<Vec<_>>();
-
-                            // Compute the scrollbar's interactive rect — matches egui's own
-                            // `max_bar_rect` for the floating vertical scrollbar. When the
-                            // pointer is inside this area the scrollbar owns the interaction,
-                            // so we must not arm or continue any card drag.
-                            let scrollbar_left = provider_scrollbar_left(ui);
-                            let pointer_in_scrollbar = ctx.input(|i| {
-                                i.pointer
-                                    .hover_pos()
-                                    .is_some_and(|pos| pos.x >= scrollbar_left)
-                            });
-
-                            if pointer_in_scrollbar {
-                                // Scrollbar owns the interaction — cancel any pending card hold
-                                // so a long-press that drifts onto the bar doesn't arm a drag.
-                                self.drag.held_provider = None;
-                                self.drag.hold_started = None;
-                            }
-
-                            let mut drop_target = None;
-                            let mut last_card_bottom = None;
-                            for (row_idx, (name, display_name)) in
-                                visible_providers.iter().enumerate()
-                            {
-                                let Some(provider_data) = data.iter().find(|d| d.provider == *name) else {
-                                    continue;
-                                };
-                                // Keep all cards at full height while dragging so positions stay
-                                // stable and autoscroll moves smoothly. Only the dragged card is
-                                // dimmed via set_opacity in render_provider.
-                                let is_dragged = self
-                                    .drag
-                                    .dragging
-                                    .as_ref()
-                                    .is_some_and(|payload| payload.provider == *name);
-                                let response = render_provider(
-                                    ui,
-                                    name,
-                                    display_name,
-                                    Some(provider_data),
-                                    card_width,
-                                    &self.active_provider,
-                                    &mut self.config,
-                                    self.config_path.as_ref(),
-                                    &self.data,
-                                    &self.history,
-                                    false,
-                                    is_dragged,
-                                );
-                                if !pointer_in_scrollbar {
-                                    drop_target = drop_target.or_else(|| {
-                                        self.handle_provider_drag(&ctx, ui, &response, name, row_idx)
-                                    });
-                                }
-                                last_card_bottom = Some(response.rect.bottom());
-                                ui.add_space(6.0);
-                            }
-
-                            self.autoscroll_provider_drag(ui, &ctx, card_width);
-
-                            if drop_target.is_none()
-                                && self.drag.dragging.is_some()
-                                && !ctx.input(|i| i.pointer.primary_down())
-                                && ctx.input(|i| {
-                                    i.pointer.hover_pos().is_some_and(|pos| {
-                                        ui.clip_rect().contains(pos)
-                                            && last_card_bottom.is_some_and(|bottom| pos.y > bottom)
-                                    })
-                                })
-                            {
-                                drop_target = Some(ProviderDropTarget::End);
-                            }
-
-                            let visible_provider_names = visible_providers
-                                .iter()
-                                .map(|(name, _)| name.as_str())
-                                .collect::<Vec<_>>();
-                            self.finish_provider_drag_if_released(
-                                &ctx,
-                                drop_target,
-                                &visible_provider_names,
-                            );
-
-                            if visible_providers.is_empty() {
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(48.0);
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "No enabled providers. Configure credentials to enable cards.",
-                                        )
-                                        .color(ui.visuals().weak_text_color()),
-                                    );
-                                });
-                            }
-                        });
-                }
-
-                // If a card is being dragged, render a floating preview of the card that follows the mouse cursor
-                if let Some(dragging) = &self.drag.dragging {
-                    if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                        let preview_rect = self.dragged_provider_rect(pointer_pos, card_width);
-
-                        egui::Area::new(egui::Id::new("provider_drag_preview"))
-                            .fixed_pos(preview_rect.min)
-                            .order(egui::Order::Tooltip)
-                            .interactable(false)
-                            .show(&ctx, |ui| {
-                                ui.style_mut().visuals.widgets.noninteractive.bg_fill = ui
-                                    .style_mut()
-                                    .visuals
-                                    .widgets
-                                    .noninteractive
-                                    .bg_fill
-                                    .linear_multiply(0.85);
-
-                                let data = self.data.read().clone();
-                                if let Some(provider_data) =
-                                    data.iter().find(|d| d.provider == dragging.provider)
-                                {
-                                    let display_name = provider_catalog()
-                                        .iter()
-                                        .find(|(id, _)| id.eq_ignore_ascii_case(&dragging.provider))
-                                        .map(|(_, d)| *d)
-                                        .unwrap_or(&dragging.provider)
-                                        .to_string();
-
-                                    let current_error = provider_data.error.as_deref();
-                                    let cached_data = if current_error.is_some() {
-                                        self.history.read().latest_successful_for(&dragging.provider)
-                                    } else {
-                                        None
-                                    };
-
-                                    let status = match provider_data.error.is_some() {
-                                        true => {
-                                            if cached_data.is_some() {
-                                                ProviderStatus::ErrorWithCache
-                                            } else {
-                                                ProviderStatus::Error
-                                            }
-                                        }
-                                        false => ProviderStatus::Active,
-                                    };
-                                    let credits = if let Some(ref cached_d) = cached_data {
-                                        cached_d.credits.as_ref()
-                                    } else {
-                                        provider_data.credits.as_ref()
-                                    };
-                                    let error_msg = provider_data.error.as_deref();
-                                    let windows = if let Some(ref cached_d) = cached_data {
-                                        &cached_d.windows
-                                    } else {
-                                        &provider_data.windows
-                                    };
-                                    let is_dark = ui.visuals().dark_mode;
-
-                                    let card_frame = egui::Frame::NONE
-                                        .fill(ui.visuals().widgets.noninteractive.bg_fill)
-                                        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                                        .corner_radius(8)
-                                        .inner_margin(egui::Margin::symmetric(10, 8));
-
-                                    ui.allocate_ui(egui::vec2(card_width, 0.0), |ui| {
-                                        ui.set_min_width(card_width);
-                                        ui.set_max_width(card_width);
-                                        render_provider_card(
-                                            ui,
-                                            &dragging.provider,
-                                            &display_name,
-                                            status,
-                                            credits,
-                                            error_msg,
-                                            windows,
-                                            is_dark,
-                                            card_frame,
-                                            card_width,
-                                            &self.active_provider,
-                                            &mut self.config,
-                                            self.config_path.as_ref(),
-                                            &self.data,
-                                            &self.history,
-                                            false,
-                                        );
-                                    });
-                                }
-                            });
-                    }
-                }
-            });
-    }
-}
-
-impl QuotifyApp {
-    fn reload_config_if_due(&mut self) {
-        if self.drag.dragging.is_some()
-            || self.last_config_reload.elapsed() < Duration::from_secs(2)
-        {
-            return;
-        }
-        self.last_config_reload = Instant::now();
-
-        let loaded = if let Some(path) = &self.config_path {
-            crate::config::AppConfig::load_from(path)
-        } else {
-            crate::config::AppConfig::load()
-        };
-
-        match loaded {
-            Ok(mut config) => {
-                crate::secrets::hydrate_config(&mut config);
-                self.config = config;
-                *self.active_provider.write() =
-                    self.config.general.active_provider.trim().to_string();
-            }
-            Err(err) => tracing::debug!("Failed to reload UI config: {err}"),
+            show_codex_reset_credits: false,
         }
     }
 
     fn save_config(&self) {
-        let result = save_config_without_secrets(&self.config, self.config_path.as_ref());
-        if let Err(err) = result {
+        let mut config_to_save = self.config.clone();
+        crate::secrets::store_and_scrub_config(&mut config_to_save);
+        let res = if let Some(ref path) = self.config_path {
+            config_to_save.save_to(path)
+        } else {
+            config_to_save.save()
+        };
+        if let Err(err) = res {
             tracing::error!("Failed to save config: {err}");
         }
     }
 
-    fn render_provider_test_controls(&self, ui: &mut egui::Ui, provider_id: &str) {
-        let status = self.provider_test_status.lock().clone();
-        let testing_this = matches!(
-            &status,
-            ProviderTestStatus::Testing { provider } if provider == provider_id
-        );
-        let testing_other = matches!(&status, ProviderTestStatus::Testing { .. }) && !testing_this;
+    fn set_primary_provider(&mut self, provider_name: &str) {
+        *self.active_provider.write() = provider_name.to_string();
+        self.config.general.active_provider = provider_name.to_string();
+        self.save_config();
 
-        ui.horizontal(|ui| {
-            let button = egui::Button::new(if testing_this {
-                "Testing..."
-            } else {
-                "Test Provider"
-            })
-            .min_size(egui::vec2(104.0, 26.0));
-
-            if ui
-                .add_enabled(!testing_this && !testing_other, button)
-                .clicked()
-            {
-                self.trigger_provider_test(provider_id.to_string(), ui.ctx().clone());
-            }
-
-            if testing_this {
-                ui.spinner();
-            }
-
-            let supports_web_login = matches!(provider_id, "mimo" | "opencode" | "ollama");
-            if supports_web_login {
-                ui.add_space(8.0);
-                let btn = egui::Button::new("Web Login").min_size(egui::vec2(80.0, 26.0));
-                let btn_resp = ui.add(btn);
-                if btn_resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if btn_resp.clicked() {
-                    let name_str = provider_id.to_string();
-                    let ctx_clone = ui.ctx().clone();
-                    std::thread::spawn(move || {
-                        let fresh_cookie = match name_str.as_str() {
-                            "mimo" => crate::webview_login::login_and_get_cookie(),
-                            "opencode" => crate::webview_login::opencode_login_and_get_cookie(),
-                            "ollama" => crate::webview_login::ollama_login_and_get_cookie(),
-                            _ => return,
-                        };
-                        match fresh_cookie {
-                            Ok(cookie) => {
-                                let secret_key = match name_str.as_str() {
-                                    "mimo" => "cookie_header",
-                                    "opencode" => "auth_cookie",
-                                    "ollama" => "auth_cookie",
-                                    _ => return,
-                                };
-                                if let Err(err) = crate::secrets::set(&name_str, secret_key, &cookie) {
-                                    tracing::error!("Failed to store {name_str} cookie: {err}");
-                                } else {
-                                    tracing::info!("Successfully stored {name_str} cookie from web login.");
-                                    crate::tray::request_refresh();
-                                }
-                            }
-                            Err(err) => {
-                                tracing::error!("Web login for {name_str} failed: {err}");
-                            }
-                        }
-                        ctx_clone.request_repaint();
-                    });
-                }
-            }
-        });
-
-        match status {
-            ProviderTestStatus::Success {
-                provider,
-                fetched_at,
-                summary,
-            } if provider == provider_id => {
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Test passed at {}. {summary}",
-                        fetched_at.with_timezone(&chrono::Local).format("%H:%M:%S")
-                    ))
-                    .small()
-                    .color(egui::Color32::from_rgb(46, 125, 50)),
-                );
-            }
-            ProviderTestStatus::Error { provider, message } if provider == provider_id => {
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(format!("Test failed: {message}"))
-                        .small()
-                        .color(egui::Color32::from_rgb(198, 40, 40)),
-                );
-            }
-            ProviderTestStatus::Testing { provider } if provider == provider_id => {
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new("Fetching usage with the current provider settings...")
-                        .small()
-                        .weak(),
-                );
-            }
-            _ => {}
-        }
+        update_tray_icon_for_active_provider(provider_name, &self.data);
+        crate::tray::request_refresh();
     }
 
-    fn trigger_provider_test(&self, provider_id: String, ctx: egui::Context) {
+    fn move_dragged_provider_to(&mut self, provider_name: &str, target_index: usize) -> bool {
+        let visible_provider_names = self
+            .data
+            .read()
+            .iter()
+            .map(|data| data.provider.clone())
+            .collect::<Vec<_>>();
+        let mut full_order = provider_display_order(&self.config)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let visible_slots = full_order
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| {
+                visible_provider_names
+                    .iter()
+                    .any(|visible| visible.eq_ignore_ascii_case(name))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let mut visible_order = visible_slots
+            .iter()
+            .map(|index| full_order[*index].clone())
+            .collect::<Vec<_>>();
+
+        let Some(source_index) = visible_order
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(provider_name))
+        else {
+            return false;
+        };
+        let target_index = target_index.min(visible_order.len().saturating_sub(1));
+        if source_index == target_index {
+            return false;
+        }
+
+        let provider = visible_order.remove(source_index);
+        visible_order.insert(target_index, provider);
+        for (slot, provider) in visible_slots.into_iter().zip(visible_order) {
+            full_order[slot] = provider;
+        }
+        self.config.general.provider_order = full_order;
+        true
+    }
+
+    fn trigger_provider_test(&self, provider_id: String, cx: &mut Context<Self>) {
         self.save_config();
 
         let mut config = self.config.clone();
@@ -860,228 +256,1822 @@ impl QuotifyApp {
         };
 
         let status = self.provider_test_status.clone();
-        std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<UsageData> {
-                let provider = crate::create_provider(&provider_id, &config).ok_or_else(|| {
-                    anyhow::anyhow!("Provider could not be created from the current settings")
-                })?;
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-                rt.block_on(provider.fetch_usage())
-            })();
+        cx.spawn(|this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let provider_id_clone = provider_id.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let provider = crate::create_provider(&provider_id_clone, &config)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Provider could not be created from the current settings"
+                                )
+                            })?;
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+                        rt.block_on(provider.fetch_usage())
+                    })
+                    .await;
 
-            *status.lock() = match result {
-                Ok(data) => {
-                    if let Some(error) = data.error.clone() {
-                        ProviderTestStatus::Error {
-                            provider: provider_id,
-                            message: error,
-                        }
-                    } else {
-                        ProviderTestStatus::Success {
-                            provider: provider_id,
-                            fetched_at: data.fetched_at,
-                            summary: summarize_provider_test(&data),
+                *status.lock() = match result {
+                    Ok(data) => {
+                        if let Some(error) = data.error.clone() {
+                            ProviderTestStatus::Error {
+                                provider: provider_id,
+                                message: error,
+                            }
+                        } else {
+                            ProviderTestStatus::Success {
+                                provider: provider_id,
+                                fetched_at: data.fetched_at,
+                                summary: summarize_provider_test(&data),
+                            }
                         }
                     }
-                }
-                Err(err) => ProviderTestStatus::Error {
-                    provider: provider_id,
-                    message: err.to_string(),
-                },
-            };
-            ctx.request_repaint();
-        });
+                    Err(err) => ProviderTestStatus::Error {
+                        provider: provider_id,
+                        message: err.to_string(),
+                    },
+                };
+
+                cx.update(|cx| {
+                    this.update(cx, |_view, cx| {
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
-    fn dragged_provider_rect(&self, pointer_pos: egui::Pos2, fallback_width: f32) -> egui::Rect {
-        let pointer_offset = self
-            .drag
-            .pointer_offset
-            .unwrap_or_else(|| egui::vec2(fallback_width / 2.0, 12.0));
-        let card_size = self
-            .drag
-            .card_size
-            .unwrap_or_else(|| egui::vec2(fallback_width, 0.0));
+    fn trigger_check_update(&self, cx: &mut Context<Self>) {
+        *self.update_status.lock() = UpdateStatus::Checking;
+        cx.notify();
 
-        egui::Rect::from_min_size(pointer_pos - pointer_offset, card_size)
+        let status = self.update_status.clone();
+        cx.spawn(|this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let client = reqwest::Client::builder()
+                            .timeout(Duration::from_secs(10))
+                            .build()?;
+                        let resp = client
+                            .get("https://api.github.com/repos/zuoxinyu/quotify/releases/latest")
+                            .header("User-Agent", "Quotify-App")
+                            .send()
+                            .await?
+                            .json::<serde_json::Value>()
+                            .await?;
+
+                        let latest_tag = resp["tag_name"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("No tag_name"))?
+                            .to_string();
+                        let release_url = resp["html_url"]
+                            .as_str()
+                            .unwrap_or("https://github.com/zuoxinyu/quotify/releases")
+                            .to_string();
+                        let ret: anyhow::Result<(String, String)> = Ok((latest_tag, release_url));
+                        ret
+                    })
+                    .await;
+
+                *status.lock() = match result {
+                    Ok((latest_tag, release_url)) => {
+                        let current = env!("GIT_TAG");
+                        if is_newer(current, &latest_tag) {
+                            UpdateStatus::NewVersionAvailable {
+                                latest_version: latest_tag,
+                                release_url,
+                            }
+                        } else {
+                            UpdateStatus::UpToDate {
+                                latest_version: latest_tag,
+                            }
+                        }
+                    }
+                    Err(err) => UpdateStatus::Error(err.to_string()),
+                };
+
+                cx.update(|cx| {
+                    this.update(cx, |_view, cx| {
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+}
+
+impl Render for QuotifyApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_page = crate::tray::ACTIVE_PAGE.load(Ordering::SeqCst);
+
+        // Determine Theme colors
+        let is_dark = match self.config.general.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => matches!(
+                cx.window_appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
+        };
+
+        // UI style tokens (single hex parameter for gpui::rgba in 0.2.2)
+        let mica_active = crate::IS_MICA_ACTIVE.load(Ordering::SeqCst);
+        let bg_fill = if mica_active {
+            gpui::rgba(0x00000000)
+        } else if is_dark {
+            gpui::rgb(0x202020)
+        } else {
+            gpui::rgb(0xf3f3f3)
+        };
+        let text_color = if is_dark {
+            gpui::rgb(0xffffff)
+        } else {
+            gpui::rgb(0x000000)
+        };
+        let border_color = if is_dark {
+            gpui::rgba(0x55555566)
+        } else {
+            gpui::rgba(0xffffff99)
+        };
+
+        // Outer layout container matching Windows 11 Mica backdrop popup dimensions 400x520
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .h_full()
+            .p(px(12.0))
+            .bg(bg_fill)
+            .text_color(text_color)
+            .font_family("Segoe UI")
+            .child(
+                // Header block
+                self.render_header(active_page, is_dark, cx),
+            )
+            .child(
+                // Line separator
+                Divider::horizontal().mt(px(4.0)).color(border_color),
+            )
+            .child(
+                // Body View
+                div()
+                    .flex_1()
+                    .w_full()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .child(match active_page {
+                        1 => self.render_about(cx).into_any_element(),
+                        2 => self.render_settings(is_dark, window, cx).into_any_element(),
+                        _ => self.render_dashboard(is_dark, cx).into_any_element(),
+                    })
+                    .id("body_view")
+                    .overflow_y_scrollbar(),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(
+                    |this: &mut Self,
+                     _event: &MouseUpEvent,
+                     _window: &mut Window,
+                     cx: &mut Context<Self>| {
+                        if this.drag.order_changed {
+                            this.save_config();
+                        }
+                        if this.drag.held_provider.is_some() {
+                            this.drag = ProviderDragState::default();
+                            cx.notify();
+                        }
+                    },
+                ),
+            )
+    }
+}
+
+impl QuotifyApp {
+    fn render_header(&self, active_page: u32, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
+        let weak_text = if is_dark {
+            gpui::rgba(0xffffff99)
+        } else {
+            gpui::rgba(0x00000099)
+        };
+
+        let refresh_age = {
+            let last = *self.last_refresh.read();
+            let elapsed = chrono::Utc::now() - last;
+            let secs = elapsed.num_seconds();
+            if secs < 0 {
+                "just now".to_string()
+            } else if secs < 60 {
+                format!("{secs}s ago")
+            } else {
+                format!("{}m ago", secs / 60)
+            }
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(12.0))
+            .w_full()
+            .h(px(32.0)) // Matches egui's header row height (approx 28px + small margin)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(if active_page != 0 {
+                        // Back Button
+                        Button::new("back_btn")
+                            .ghost()
+                            .xsmall()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .child(fluent_icon("\u{E72B}", 12.0))
+                            .tooltip("Back")
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    crate::tray::ACTIVE_PAGE.store(0, Ordering::SeqCst);
+                                    app.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            })
+                    } else {
+                        // App Logo
+                        Button::new("app_logo")
+                            .ghost()
+                            .xsmall()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .child(img("assets/icons/quotify.svg").w(px(18.0)).h(px(18.0)))
+                            .tooltip("About Quotify")
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    crate::tray::ACTIVE_PAGE.store(1, Ordering::SeqCst);
+                                    app.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            })
+                    })
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_size(px(16.0))
+                            .child(match active_page {
+                                1 => "About",
+                                2 => "Settings",
+                                _ => "Quotify",
+                            }),
+                    ),
+            )
+            .child(if active_page == 0 {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(weak_text)
+                            .child(refresh_age),
+                    )
+                    .child(
+                        // Refresh button
+                        Button::new("refresh_btn")
+                            .ghost()
+                            .xsmall()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .child(fluent_icon("\u{E72C}", 12.0))
+                            .tooltip("Refresh usage")
+                            .on_click(move |_, _, _| {
+                                crate::tray::request_refresh();
+                            }),
+                    )
+                    .child(
+                        // Settings button
+                        Button::new("settings_btn")
+                            .ghost()
+                            .xsmall()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .child(fluent_icon("\u{E713}", 12.0))
+                            .tooltip("Settings")
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    crate::tray::ACTIVE_PAGE.store(2, Ordering::SeqCst);
+                                    app.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            }),
+                    )
+            } else {
+                div()
+            })
+            .into_any_element()
     }
 
-    fn autoscroll_provider_drag(&self, ui: &mut egui::Ui, ctx: &egui::Context, card_width: f32) {
-        if self.drag.dragging.is_none() {
-            return;
+    fn render_dashboard(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+        let data = self.data.read().clone();
+        let all_providers = provider_display_order(&self.config);
+        let visible_providers = all_providers
+            .into_iter()
+            .filter(|(name, _)| data.iter().any(|d| d.provider == *name))
+            .collect::<Vec<_>>();
+
+        if visible_providers.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .w_full()
+                .pt_8()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(if is_dark {
+                            gpui::rgba(0xffffff7f)
+                        } else {
+                            gpui::rgba(0x0000007f)
+                        })
+                        .child("No enabled providers. Configure credentials to enable cards."),
+                )
+                .into_any_element();
         }
 
-        let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) else {
-            return;
-        };
-
-        let viewport = ui.clip_rect();
-        let dragged_rect = self.dragged_provider_rect(pointer_pos, card_width);
-        let top_overflow = (viewport.min.y - dragged_rect.min.y).max(0.0);
-        let bottom_overflow = (dragged_rect.max.y - viewport.max.y).max(0.0);
-        let scroll_delta = if top_overflow > 0.0 {
-            -provider_drag_scroll_step(top_overflow)
-        } else if bottom_overflow > 0.0 {
-            provider_drag_scroll_step(bottom_overflow)
-        } else {
-            0.0
-        };
-
-        if scroll_delta == 0.0 {
-            return;
-        }
-
-        let target_y = if scroll_delta < 0.0 {
-            viewport.min.y + scroll_delta
-        } else {
-            viewport.max.y + scroll_delta
-        };
-        let target_rect = egui::Rect::from_center_size(
-            egui::pos2(viewport.center().x, target_y),
-            egui::vec2(card_width, 1.0),
-        );
-        let align = if scroll_delta < 0.0 {
-            egui::Align::TOP
-        } else {
-            egui::Align::BOTTOM
-        };
-
-        ui.scroll_to_rect(target_rect, Some(align));
-        ctx.request_repaint();
-    }
-
-    fn handle_provider_drag(
-        &mut self,
-        ctx: &egui::Context,
-        ui: &egui::Ui,
-        response: &egui::Response,
-        provider_name: &str,
-        row_idx: usize,
-    ) -> Option<ProviderDropTarget> {
-        let pointer_down = ctx.input(|i| i.pointer.primary_down());
-        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
-        let contains_pointer = pointer_pos.is_some_and(|pos| response.rect.contains(pos));
-        let can_start_from_card = response.contains_pointer();
-
-        if self.drag.dragging.is_some() && contains_pointer {
-            let insert_after = pointer_pos.is_some_and(|pos| pos.y >= response.rect.center().y);
-            paint_provider_drop_preview(ui, response.rect, insert_after);
-
-            if !pointer_down {
-                return Some(ProviderDropTarget::Item {
-                    provider: provider_name.to_string(),
-                    row: row_idx + usize::from(insert_after),
-                });
+        let mut cards = Vec::new();
+        for (idx, (name, display_name)) in visible_providers.iter().enumerate() {
+            if let Some(pdata) = data.iter().find(|d| d.provider == *name) {
+                cards.push(self.render_provider_card(
+                    name,
+                    SharedString::from(*display_name),
+                    pdata,
+                    idx,
+                    is_dark,
+                    cx,
+                ));
             }
         }
 
-        if !pointer_down {
-            return None;
-        }
-
-        let now = Instant::now();
-        if can_start_from_card && self.drag.held_provider.is_none() {
-            self.drag.held_provider = Some(provider_name.to_string());
-            self.drag.hold_started = Some(now);
-        }
-
-        let pointer_moved = ctx.input(|i| i.pointer.delta().length_sq() > 0.25);
-        if self.drag.held_provider.as_deref() == Some(provider_name)
-            && self.drag.dragging.is_none()
-            && self
-                .drag
-                .hold_started
-                .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(350))
-            && pointer_moved
-        {
-            self.drag.dragging = Some(ProviderDragPayload {
-                provider: provider_name.to_string(),
-                row: row_idx,
-            });
-            self.drag.pointer_offset = pointer_pos.map(|pos| pos - response.rect.min);
-            self.drag.card_size = Some(response.rect.size());
-        }
-        None
+        div()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .w_full()
+            .gap_5()
+            .children(cards)
+            .into_any_element()
     }
 
-    fn finish_provider_drag_if_released(
-        &mut self,
-        ctx: &egui::Context,
-        drop_target: Option<ProviderDropTarget>,
-        visible_providers: &[&str],
-    ) {
-        if ctx.input(|i| i.pointer.primary_down()) {
-            return;
-        }
+    fn render_provider_card(
+        &self,
+        name: &str,
+        display_name: SharedString,
+        data: &UsageData,
+        row_idx: usize,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let provider_name = name.to_string();
+        let mouse_down_provider = provider_name.clone();
+        let mouse_move_provider = provider_name.clone();
+        let card_elt_id = SharedString::from(format!("card_{name}"));
 
-        let changed =
-            if let (Some(dragging), Some(target)) = (self.drag.dragging.as_ref(), drop_target) {
-                reorder_provider(
-                    &mut self.config.general.provider_order,
-                    dragging,
-                    target,
-                    visible_providers,
+        let trend = self.history.read().trend_for(name, 7);
+        let reset_credits = crate::provider::codex::reset_credits(data);
+        let show_reset_credits = reset_credits.is_some() && self.show_codex_reset_credits;
+
+        div()
+            .w_full()
+            .id(card_elt_id)
+            .child(
+                GroupBox::new()
+                    .fill()
+                    .child(self.render_card_header(
+                        name,
+                        display_name,
+                        data,
+                        reset_credits.as_ref(),
+                        show_reset_credits,
+                        row_idx,
+                        is_dark,
+                        cx,
+                    ))
+                    .child(self.render_card_body(data, trend, is_dark))
+                    .when_some(reset_credits, |card, resets| {
+                        card.child(
+                            Collapsible::new()
+                                .open(show_reset_credits)
+                                .content(Self::render_codex_reset_details(&resets, is_dark)),
+                        )
+                    }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          _window: &mut gpui::Window,
+                          cx: &mut gpui::Context<Self>| {
+                        this.drag = ProviderDragState {
+                            held_provider: Some(mouse_down_provider.clone()),
+                            drag_start_pos: Some(event.position),
+                            ..ProviderDragState::default()
+                        };
+                        cx.notify();
+                    },
+                ),
+            )
+            .on_mouse_move(cx.listener(
+                move |this: &mut Self,
+                      event: &MouseMoveEvent,
+                      _window: &mut gpui::Window,
+                      cx: &mut gpui::Context<Self>| {
+                    let Some(held_provider) = this.drag.held_provider.clone() else {
+                        return;
+                    };
+
+                    if !this.drag.dragging
+                        && let Some(start_pos) = this.drag.drag_start_pos
+                    {
+                        let dx = (event.position.x - start_pos.x) / px(1.0);
+                        let dy = (event.position.y - start_pos.y) / px(1.0);
+                        if dx.abs() + dy.abs() > 6.0 {
+                            this.drag.dragging = true;
+                        }
+                    }
+
+                    if this.drag.dragging
+                        && !held_provider.eq_ignore_ascii_case(&mouse_move_provider)
+                        && this.move_dragged_provider_to(&held_provider, row_idx)
+                    {
+                        this.drag.order_changed = true;
+                        cx.notify();
+                    }
+                },
+            ))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_card_header(
+        &self,
+        name: &str,
+        display_name: SharedString,
+        data: &UsageData,
+        reset_credits: Option<&crate::provider::CodexResetCredits>,
+        show_reset_credits: bool,
+        row_idx: usize,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_primary = self.active_provider.read().eq_ignore_ascii_case(name);
+        let provider_name = name.to_string();
+        let provider_icon_element = if let Some(icon_path) = provider_icon(name, is_dark) {
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .child(img(icon_path).w_full().h_full())
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_full()
+                .bg(if is_dark {
+                    gpui::rgb(0x364559)
+                } else {
+                    gpui::rgb(0xe8f0ff)
+                })
+                .text_color(if is_dark {
+                    gpui::rgb(0xd2e1ff)
+                } else {
+                    gpui::rgb(0x254682)
+                })
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                .child("M")
+                .into_any_element()
+        };
+        let provider_icon_hitbox = div()
+            .id(SharedString::from(format!(
+                "provider-icon-{name}-{row_idx}"
+            )))
+            .w(px(18.0))
+            .h(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          _window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.set_primary_provider(&provider_name);
+                            cx.notify();
+                        }
+                    },
+                ),
+            )
+            .child(provider_icon_element);
+        let reset_tag = reset_credits.map(|resets| {
+            let app = cx.entity().downgrade();
+            div()
+                .id(SharedString::from(format!(
+                    "codex-reset-credits-hitbox-{row_idx}"
+                )))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new(SharedString::from(format!("codex-reset-credits-{row_idx}")))
+                        .ghost()
+                        .xsmall()
+                        .p_0()
+                        .h_auto()
+                        .child(
+                            Tag::info()
+                                .small()
+                                .outline()
+                                .gap_1()
+                                .child(format!("{} Resets", resets.available_count))
+                                .child(if show_reset_credits { "▴" } else { "▾" }),
+                        )
+                        .tooltip(if show_reset_credits {
+                            "Hide reset credit expiration details"
+                        } else {
+                            "Show reset credit expiration details"
+                        })
+                        .on_click(move |_, _, cx| {
+                            app.update(cx, |this, cx| {
+                                this.show_codex_reset_credits = !this.show_codex_reset_credits;
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
                 )
+                .into_any_element()
+        });
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(provider_icon_hitbox)
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_size(px(12.0))
+                            .child(display_name),
+                    )
+                    .child(if is_primary {
+                        div()
+                            .text_color(if is_dark {
+                                gpui::rgb(0x60cdff)
+                            } else {
+                                gpui::rgb(0x0067c0)
+                            })
+                            .child(fluent_icon("\u{E735}", 12.0))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }),
+            )
+            .child(if let Some(reset_tag) = reset_tag {
+                reset_tag
+            } else if let Some(ref credits) = data.credits {
+                let text = format!(
+                    "{} {}",
+                    format_credits_balance(credits.balance),
+                    credits.currency
+                );
+                Tag::info().small().outline().child(text).into_any_element()
             } else {
-                false
-            };
-
-        if changed {
-            self.save_config();
-            ctx.request_repaint();
-        }
-        self.drag = ProviderDragState::default();
+                div().into_any_element()
+            })
+            .into_any_element()
     }
-}
 
-fn format_credits_balance(balance: f64) -> String {
-    if balance.abs() >= 1_000_000_000.0 {
-        let val = balance / 1_000_000_000.0;
-        format!("{:.2}B", val)
-    } else if balance.abs() >= 1_000_000.0 {
-        let val = balance / 1_000_000.0;
-        if (val - val.round()).abs() < 0.01 {
-            format!("{:.0}M", val)
+    fn render_card_body(
+        &self,
+        data: &UsageData,
+        trend: Option<crate::usage_history::ProviderTrend>,
+        is_dark: bool,
+    ) -> AnyElement {
+        if let Some(ref error) = data.error {
+            return Alert::error("provider-error", error.clone())
+                .small()
+                .into_any_element();
+        }
+
+        let mut children = data
+            .windows
+            .iter()
+            .filter(|window| {
+                !data.provider.eq_ignore_ascii_case("codex")
+                    || !crate::provider::codex::is_reset_credits_window(window)
+            })
+            .map(|w| Self::render_progress_row(w, is_dark))
+            .collect::<Vec<_>>();
+
+        if let Some(trend_val) = trend {
+            let trend_text = format_trend_summary(&trend_val);
+            children.push(
+                div()
+                    .mt_2() // Top margin for trend summary matches layout spacing
+                    .text_size(px(10.0))
+                    .text_color(if is_dark {
+                        gpui::rgba(0xffffff7f)
+                    } else {
+                        gpui::rgba(0x0000007f)
+                    })
+                    .child(trend_text)
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0)) // 8px gap between progress rows matches egui's default spacing
+            .children(children)
+            .into_any_element()
+    }
+
+    fn render_codex_reset_details(
+        resets: &crate::provider::CodexResetCredits,
+        is_dark: bool,
+    ) -> AnyElement {
+        let weak_text = if is_dark {
+            gpui::rgba(0xffffff7f)
         } else {
-            format!("{:.2}M", val)
-        }
-    } else if balance.abs() >= 1_000.0 {
-        let val = balance / 1_000.0;
-        if (val - val.round()).abs() < 0.01 {
-            format!("{:.0}K", val)
+            gpui::rgba(0x0000007f)
+        };
+
+        let rows = resets
+            .credits
+            .iter()
+            .enumerate()
+            .map(|(index, credit)| {
+                let status = credit.status.trim();
+                let status_text = if status.is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    let mut chars = status.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_else(|| "Unknown".to_string())
+                };
+                let status_tag = if status.eq_ignore_ascii_case("available") {
+                    Tag::success()
+                        .small()
+                        .outline()
+                        .child(status_text)
+                        .into_any_element()
+                } else {
+                    Tag::secondary()
+                        .small()
+                        .outline()
+                        .child(status_text)
+                        .into_any_element()
+                };
+
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(20.0))
+                                    .text_size(px(10.0))
+                                    .text_color(weak_text)
+                                    .child(format!("#{}", index + 1)),
+                            )
+                            .child(status_tag),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(weak_text)
+                            .child(format_reset_credit_expiry(credit.expires_at)),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_1()
+            .child(Divider::horizontal())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(10.0))
+                    .text_color(weak_text)
+                    .child("Reset credit")
+                    .child("Expires"),
+            )
+            .when(rows.is_empty(), |details| {
+                details.child(
+                    div()
+                        .py_2()
+                        .text_size(px(10.0))
+                        .text_color(weak_text)
+                        .child("No reset credit details returned."),
+                )
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn render_progress_row(w: &crate::provider::UsageWindow, is_dark: bool) -> AnyElement {
+        let pct = w.used_percent.clamp(0.0, 100.0);
+        let fill_color = if pct >= 80.0 {
+            if is_dark {
+                gpui::rgb(0xf1707a)
+            } else {
+                gpui::rgb(0xc42b1c)
+            }
+        } else if pct >= 50.0 {
+            if is_dark {
+                gpui::rgb(0xffc800)
+            } else {
+                gpui::rgb(0xb37b00)
+            }
         } else {
-            format!("{:.2}K", val)
+            if is_dark {
+                gpui::rgb(0x60cdff)
+            } else {
+                gpui::rgb(0x0078d4)
+            }
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .w(px(88.0))
+                    .justify_center()
+                    .font_family("Segoe UI")
+                    .font_weight(gpui::FontWeight::EXTRA_LIGHT)
+                    .text_size(px(11.0))
+                    .child(w.label.clone()),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .h(px(8.0))
+                    .child(Progress::new().value(0.0).bg(fill_color).w_full().h_full())
+                    .when(pct > 0.0, |track| {
+                        track.child(
+                            Progress::new()
+                                .value(100.0)
+                                .bg(fill_color)
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(relative((pct / 100.0) as f32))
+                                .h_full(),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w(px(34.0))
+                    .text_size(px(10.0))
+                    .text_color(fill_color)
+                    .font_family("Segoe UI")
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(format!("{pct:.0}%")),
+            )
+            .child(
+                div()
+                    .w(px(42.0))
+                    .flex()
+                    .justify_end()
+                    .text_size(px(10.0))
+                    .text_color(if is_dark {
+                        gpui::rgba(0xffffff7f)
+                    } else {
+                        gpui::rgba(0x0000007f)
+                    })
+                    .child(reset_time_text(w.resets_at)),
+            )
+            .into_any_element()
+    }
+
+    fn render_about(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ver = env!("GIT_TAG");
+
+        GroupBox::new()
+            .fill()
+            .child(self.render_about_header(ver))
+            .child(Divider::horizontal())
+            .child(self.render_update_section(cx))
+            .into_any_element()
+    }
+
+    fn render_about_header(&self, ver: &str) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(42.0))
+                            .h(px(42.0))
+                            .child(img("assets/icons/quotify.svg").w_full().h_full()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_size(px(18.0))
+                                    .child("Quotify"),
+                            )
+                            .child(div().text_size(px(12.0)).child(format!("Version: {ver}"))),
+                    ),
+            )
+            .child(div().text_size(px(12.0)).child("Author: zuoxinyu"))
+            .child(
+                div().flex().gap_2().child("GitHub: ").child(
+                    Link::new("github_link")
+                        .href("https://github.com/zuoxinyu/quotify")
+                        .child("zuoxinyu/quotify"),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_update_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
+        let status = self.update_status.lock().clone();
+        let checking = matches!(&status, UpdateStatus::Checking);
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(14.0))
+                    .child("Check for Updates"),
+            )
+            .child(
+                Button::new("check_updates_btn")
+                    .primary()
+                    .small()
+                    .w(px(130.0))
+                    .label("Check now")
+                    .loading(checking)
+                    .disabled(checking)
+                    .on_click(move |_, _, cx| {
+                        app.update(cx, |this, cx| this.trigger_check_update(cx))
+                            .ok();
+                    }),
+            )
+            .child(match status {
+                UpdateStatus::Checking => Alert::info("update-checking", "Checking for updates...")
+                    .small()
+                    .into_any_element(),
+                UpdateStatus::UpToDate { .. } => {
+                    Alert::success("update-current", "App is up to date.")
+                        .small()
+                        .into_any_element()
+                }
+                UpdateStatus::NewVersionAvailable {
+                    latest_version,
+                    release_url,
+                } => div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Alert::warning(
+                            "update-available",
+                            format!("New version {latest_version} available!"),
+                        )
+                        .small(),
+                    )
+                    .child(
+                        Link::new("view_release_page_link")
+                            .href(release_url)
+                            .text_size(px(11.0))
+                            .child("View Release Page"),
+                    )
+                    .into_any_element(),
+                UpdateStatus::Error(err) => {
+                    Alert::error("update-error", format!("Update check failed: {err}"))
+                        .small()
+                        .into_any_element()
+                }
+                _ => div().into_any_element(),
+            })
+            .into_any_element()
+    }
+
+    fn render_settings(
+        &self,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(self.render_general_settings(is_dark, window, cx))
+            .child(self.render_provider_settings(is_dark, window, cx))
+            .child(self.render_settings_footer())
+            .child(div().h(px(20.0)))
+            .into_any_element()
+    }
+
+    fn render_general_settings(
+        &self,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let start_with_windows_app = cx.entity().downgrade();
+        let theme_app = cx.entity().downgrade();
+        let secondary_text = if is_dark {
+            gpui::rgba(0xffffff99)
+        } else {
+            gpui::rgba(0x00000099)
+        };
+        let refresh_intervals = [30_u64, 60, 300, 1800, 3600];
+        let refresh_index = refresh_intervals
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, value)| value.abs_diff(self.config.general.refresh_interval))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let slider_app = cx.entity().downgrade();
+        let refresh_slider = window.use_keyed_state("refresh-interval-slider", cx, move |_, cx| {
+            let slider = cx.new(|_| {
+                SliderState::new()
+                    .min(0.0)
+                    .max((refresh_intervals.len() - 1) as f32)
+                    .step(1.0)
+                    .default_value(refresh_index as f32)
+            });
+            let _subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let index = value
+                    .end()
+                    .round()
+                    .clamp(0.0, (refresh_intervals.len() - 1) as f32)
+                    as usize;
+                let refresh_interval = refresh_intervals[index];
+                slider_app
+                    .update(cx, |this, cx| {
+                        if this.config.general.refresh_interval != refresh_interval {
+                            this.config.general.refresh_interval = refresh_interval;
+                            this.save_config();
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+            RefreshSliderFieldState {
+                slider,
+                _subscription,
+            }
+        });
+        let refresh_slider = refresh_slider.read(cx).slider.clone();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(13.0)).child("General Settings"))
+            .child(
+                GroupBox::new()
+                    .fill()
+                    .child(
+                        // Theme Select
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Theme"))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Configure app color palette"))
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .children(vec!["system", "dark", "light"].into_iter().enumerate().map(|(idx, t)| {
+                                        let is_sel = self.config.general.theme == t;
+                                        let theme_app = theme_app.clone();
+                                        Button::new(("theme_btn", idx))
+                                            .label(t)
+                                            .small()
+                                            .compact()
+                                            .selected(is_sel)
+                                            .when(is_sel, |button| button.primary())
+                                            .on_click(move |_, window, cx| {
+                                                theme_app.update(cx, |this, view_cx| {
+                                                    this.config.general.theme = t.to_string();
+                                                    this.save_config();
+                                                    let dark = match t {
+                                                        "dark" => true,
+                                                        "light" => false,
+                                                        _ => matches!(
+                                                            window.appearance(),
+                                                            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                                                        ),
+                                                    };
+                                                    crate::refresh_mica_backdrop(dark);
+                                                    apply_component_theme(t, Some(window), view_cx);
+                                                    view_cx.notify();
+                                                }).ok();
+                                            })
+                                    }))
+                            )
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // Start with Windows
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Start with Windows"))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Launch Quotify when you sign in"))
+                            )
+                            .child(
+                                Switch::new("start_with_windows")
+                                    .checked(self.config.general.start_with_windows)
+                                    .on_click(move |checked, _window, cx| {
+                                        let checked = *checked;
+                                        start_with_windows_app
+                                            .update(cx, |this, cx| {
+                                                if let Ok(()) = crate::startup::set_enabled(checked) {
+                                                    this.config.general.start_with_windows = checked;
+                                                    this.save_config();
+                                                }
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    })
+                            )
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // Refresh Interval
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Refresh Interval"))
+                                    .child(div().text_size(px(11.0)).child(format!("{}s", self.config.general.refresh_interval)))
+                            )
+                            .child(
+                                Slider::new(&refresh_slider)
+                                    .horizontal()
+                                    .w_full()
+                                    .h(px(28.0))
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .text_size(px(9.0))
+                                    .text_color(secondary_text)
+                                    .child("30s")
+                                    .child("3600s")
+                            )
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // Network Proxy input field
+                        self.render_input_field(is_dark, "proxy".into(), "Network Proxy".into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
+                    )
+            )
+            .into_any_element()
+    }
+
+    fn render_provider_settings(
+        &self,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let select_app = cx.entity().downgrade();
+
+        let provider_names = provider_catalog()
+            .iter()
+            .map(|(_, display)| display.to_string())
+            .collect::<Vec<_>>();
+        let selected_index = provider_catalog()
+            .iter()
+            .position(|(id, _)| *id == self.selected_setting_provider)
+            .unwrap_or(0);
+        let provider_select =
+            window.use_keyed_state("provider-select-state", cx, move |window, cx| {
+                let select = cx.new(|cx| {
+                    SelectState::new(
+                        provider_names,
+                        Some(IndexPath::default().row(selected_index)),
+                        window,
+                        cx,
+                    )
+                    .searchable(true)
+                });
+                let _subscription = cx.subscribe(
+                    &select,
+                    move |_, _, event: &SelectEvent<Vec<String>>, cx| {
+                        let SelectEvent::Confirm(Some(display_name)) = event else {
+                            return;
+                        };
+                        if let Some((provider_id, _)) = provider_catalog()
+                            .iter()
+                            .find(|(_, display)| *display == display_name)
+                        {
+                            let provider_id = provider_id.to_string();
+                            select_app
+                                .update(cx, |this, cx| {
+                                    this.selected_setting_provider = provider_id;
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    },
+                );
+                ProviderSelectFieldState {
+                    select,
+                    _subscription,
+                }
+            });
+        let provider_select = provider_select.read(cx).select.clone();
+        let bg_fill = if is_dark {
+            gpui::rgb(0x202020)
+        } else {
+            gpui::rgb(0xf3f3f3)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(13.0))
+                    .child("Provider Settings"),
+            )
+            .child(
+                GroupBox::new()
+                    .fill()
+                    .child(
+                        // Provider ComboBox
+                        Select::new(&provider_select)
+                            .bg(bg_fill)
+                            .search_placeholder("Search providers")
+                            .w_full(),
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // Provider fields list based on selection
+                        self.render_selected_provider_fields(is_dark, window, cx),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_footer(&self) -> AnyElement {
+        let config_path = self.config_path.clone();
+        let report_config_path = self.config_path.clone();
+        let report_history = self.history.clone();
+        div()
+            .flex()
+            .gap_3()
+            .justify_center()
+            .child(
+                Link::new("open_config_file_link")
+                    .text_size(px(11.0))
+                    .child("Open config file")
+                    .on_click(move |_, _, _| {
+                        let _ = open_config_file(config_path.as_ref());
+                    }),
+            )
+            .child(Divider::vertical().h(px(12.0)))
+            .child(
+                Link::new("open_logs_link")
+                    .text_size(px(11.0))
+                    .child("Open logs")
+                    .on_click(move |_, _, _| {
+                        let _ = open_folder(&crate::diagnostics::log_dir());
+                    }),
+            )
+            .child(Divider::vertical().h(px(12.0)))
+            .child(
+                Link::new("create_diagnostic_report_link")
+                    .text_size(px(11.0))
+                    .child("Create diagnostic report")
+                    .on_click(move |_, _, _| {
+                        let _ = crate::diagnostics::write_diagnostic_report(
+                            report_config_path.as_deref(),
+                            Some(&report_history.read()),
+                        );
+                    }),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_input_field(
+        &self,
+        is_dark: bool,
+        field_id: SharedString,
+        label: SharedString,
+        placeholder: SharedString,
+        is_password: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let initial_value = config_field_value(&self.config, field_id.as_ref());
+        let masked = is_password;
+        let app = cx.entity().downgrade();
+        let subscription_field = field_id.to_string();
+        let input_state = window.use_keyed_state(
+            SharedString::from(format!("input-field-state-{field_id}")),
+            cx,
+            move |window, cx| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .default_value(initial_value)
+                        .placeholder(placeholder)
+                        .masked(masked)
+                });
+                let _subscription =
+                    cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let value = input.read(cx).value().to_string();
+                            app.update(cx, |this, cx| {
+                                if set_config_field_value(
+                                    &mut this.config,
+                                    &subscription_field,
+                                    value.clone(),
+                                ) {
+                                    this.save_config();
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    });
+
+                InputFieldState {
+                    input,
+                    masked,
+                    _subscription,
+                }
+            },
+        );
+
+        let input = input_state.read(cx).input.clone();
+        if input_state.read(cx).masked != masked {
+            input_state.update(cx, |state, cx| {
+                state.masked = masked;
+                state
+                    .input
+                    .update(cx, |input, cx| input.set_masked(masked, window, cx));
+            });
         }
-    } else if (balance - balance.round()).abs() < 0.01 {
-        format!("{:.0}", balance)
-    } else {
-        format!("{:.2}", balance)
+        let bg_fill = if is_dark {
+            gpui::rgb(0x202020)
+        } else {
+            gpui::rgb(0xf3f3f3)
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(11.0))
+                    .child(label),
+            )
+            .child(
+                Input::new(&input)
+                    .bg(bg_fill)
+                    .w_full()
+                    .when(is_password, |input| input.mask_toggle()),
+            )
+            .into_any_element()
+    }
+
+    fn render_selected_provider_fields(
+        &self,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let provider_id = self.selected_setting_provider.clone();
+
+        let mut widgets: Vec<AnyElement> = Vec::new();
+
+        // 1. Primary provider action
+        let is_primary = self
+            .active_provider
+            .read()
+            .eq_ignore_ascii_case(&provider_id);
+        let primary_provider_id = provider_id.clone();
+        let primary_provider_app = cx.entity().downgrade();
+        widgets.push(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_size(px(11.0)).child("Primary Provider"))
+                .child(
+                    Button::new("set_primary_provider_btn")
+                        .primary()
+                        .small()
+                        .disabled(is_primary)
+                        .child(fluent_icon("\u{E735}", 11.0))
+                        .child(if is_primary {
+                            "Primary"
+                        } else {
+                            "Set as Primary"
+                        })
+                        .on_click(move |_, _, cx| {
+                            primary_provider_app
+                                .update(cx, |this, cx| {
+                                    this.set_primary_provider(&primary_provider_id);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }),
+                )
+                .into_any_element(),
+        );
+
+        // 2. Enable toggle switch
+        let enabled = match provider_id.as_str() {
+            "deepseek" => self.config.deepseek.enabled.unwrap_or(false),
+            "claude" => self.config.claude.enabled.unwrap_or(false),
+            "codex" => self.config.codex.enabled.unwrap_or(false),
+            "gemini" => self.config.gemini.enabled.unwrap_or(false),
+            "antigravity" => self.config.antigravity.enabled.unwrap_or(false),
+            "opencode" => self.config.opencode.enabled.unwrap_or(false),
+            "mimo" => self.config.mimo.enabled.unwrap_or(false),
+            _ => {
+                if let Some(cfg) = api_key_provider_config(&self.config, &provider_id) {
+                    cfg.enabled.unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+        };
+
+        let provider_id_checkbox = provider_id.clone();
+        let enable_provider_app = cx.entity().downgrade();
+        widgets.push(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_size(px(11.0)).child("Enable Provider"))
+                .child(
+                    Switch::new("enable_provider_switch")
+                        .checked(enabled)
+                        .on_click(move |checked, _window, cx| {
+                            let checked = *checked;
+                            enable_provider_app
+                                .update(cx, |this, cx| {
+                                    match provider_id_checkbox.as_str() {
+                                        "deepseek" => this.config.deepseek.enabled = Some(checked),
+                                        "claude" => this.config.claude.enabled = Some(checked),
+                                        "codex" => this.config.codex.enabled = Some(checked),
+                                        "gemini" => this.config.gemini.enabled = Some(checked),
+                                        "antigravity" => {
+                                            this.config.antigravity.enabled = Some(checked)
+                                        }
+                                        "opencode" => this.config.opencode.enabled = Some(checked),
+                                        "mimo" => this.config.mimo.enabled = Some(checked),
+                                        _ => {
+                                            if let Some(cfg) = api_key_provider_config_mut(
+                                                &mut this.config,
+                                                &provider_id_checkbox,
+                                            ) {
+                                                cfg.enabled = Some(checked);
+                                            }
+                                        }
+                                    }
+                                    this.save_config();
+                                    cx.notify();
+                                })
+                                .ok();
+                        }),
+                )
+                .into_any_element(),
+        );
+
+        // 3. Specific field editors
+        match provider_id.as_str() {
+            "deepseek" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "deepseek_key".into(),
+                        "API Key".into(),
+                        "Paste DeepSeek Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "claude" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "claude_key".into(),
+                        "API Key".into(),
+                        "Claude Admin Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "claude_session".into(),
+                        "Session Key".into(),
+                        "Claude Session Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "claude_token".into(),
+                        "Access Token".into(),
+                        "Claude Access Token".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "claude_auth".into(),
+                        "Auth File Path".into(),
+                        "e.g. C:\\Users\\Admin\\.claude\\session.toml".into(),
+                        false,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "codex" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "codex_auth".into(),
+                        "Auth File Path".into(),
+                        "e.g. C:\\Users\\Admin\\.codex\\token.json".into(),
+                        false,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "gemini" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "gemini_key".into(),
+                        "API Key".into(),
+                        "Paste Gemini Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "antigravity" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "antigravity_key".into(),
+                        "API Key".into(),
+                        "Paste Antigravity Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "opencode" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "opencode_key".into(),
+                        "API Key".into(),
+                        "OpenCode Workspaces Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "opencode_workspace".into(),
+                        "Workspace ID".into(),
+                        "Paste Workspace ID".into(),
+                        false,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "opencode_auth".into(),
+                        "Auth Cookie".into(),
+                        "OpenCode Auth Cookie".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "mimo" => {
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "mimo_key".into(),
+                        "API Key".into(),
+                        "MiMo Token Key".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "mimo_token".into(),
+                        "Service Token".into(),
+                        "MiMo Service Token".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        "mimo_cookie".into(),
+                        "Cookie Header".into(),
+                        "MiMo Cookie Header".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+            "opencodego" => {
+                widgets.push(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgba(0xffffff7f))
+                        .child("OpenCode Go is configured using OpenCode settings.")
+                        .into_any_element(),
+                );
+            }
+            _ => {
+                let key_field = SharedString::from(format!("{}_key", provider_id));
+                let url_field = SharedString::from(format!("{}_url", provider_id));
+                let dep_field = SharedString::from(format!("{}_dep", provider_id));
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        key_field,
+                        "API Key / Token".into(),
+                        "Paste provider credential".into(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        url_field,
+                        "Base URL".into(),
+                        "e.g. http://127.0.0.1:8000/v1".into(),
+                        false,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                widgets.push(
+                    self.render_input_field(
+                        is_dark,
+                        dep_field,
+                        "Deployment / Model Name".into(),
+                        "e.g. gpui-4o-mini".into(),
+                        false,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
+
+        // Test Controls & Status message block
+        let status = self.provider_test_status.lock().clone();
+        let testing_this = matches!(
+            &status,
+            ProviderTestStatus::Testing { provider } if *provider == provider_id
+        );
+        let testing_other = matches!(&status, ProviderTestStatus::Testing { .. }) && !testing_this;
+
+        let provider_id_test = provider_id.clone();
+        let test_provider_app = cx.entity().downgrade();
+        widgets.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    Button::new("test_provider_btn")
+                        .primary()
+                        .small()
+                        .w(px(110.0))
+                        .label("Test Provider")
+                        .loading(testing_this)
+                        .disabled(testing_other)
+                        .on_click(move |_, _, cx| {
+                            if !testing_this && !testing_other {
+                                test_provider_app
+                                    .update(cx, |this, view_cx| {
+                                        this.trigger_provider_test(
+                                            provider_id_test.clone(),
+                                            view_cx,
+                                        );
+                                    })
+                                    .ok();
+                            }
+                        }),
+                )
+                .child(match status {
+                    ProviderTestStatus::Success {
+                        provider,
+                        fetched_at,
+                        summary,
+                    } if provider == provider_id => Alert::success(
+                        "provider-test-success",
+                        format!(
+                            "Test passed at {}. {summary}",
+                            fetched_at.with_timezone(&chrono::Local).format("%H:%M:%S")
+                        ),
+                    )
+                    .small()
+                    .into_any_element(),
+                    ProviderTestStatus::Error { provider, message } if provider == provider_id => {
+                        Alert::error("provider-test-error", format!("Test failed: {message}"))
+                            .small()
+                            .into_any_element()
+                    }
+                    ProviderTestStatus::Testing { provider } if provider == provider_id => {
+                        Alert::info(
+                            "provider-test-running",
+                            "Fetching usage with current provider settings...",
+                        )
+                        .small()
+                        .into_any_element()
+                    }
+                    _ => div().into_any_element(),
+                })
+                .into_any_element(),
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .children(widgets)
+            .into_any_element()
     }
 }
 
-fn open_config_file(config_path: Option<&PathBuf>) -> anyhow::Result<()> {
-    let path = config_path
-        .cloned()
-        .unwrap_or_else(crate::config::AppConfig::config_path);
-    if !path.exists() {
-        crate::config::AppConfig::default().save_to(&path)?;
-    }
-
-    std::process::Command::new("notepad.exe")
-        .arg(&path)
-        .spawn()
-        .map(|_| ())
-        .map_err(anyhow::Error::from)
+fn fluent_icon(glyph: &'static str, size: f32) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family("Segoe Fluent Icons")
+        .font_weight(gpui::FontWeight::THIN)
+        .text_size(px(size))
+        .line_height(relative(1.0))
+        .child(glyph)
+        .into_any_element()
 }
 
-fn open_folder(path: &std::path::Path) -> anyhow::Result<()> {
-    std::process::Command::new("explorer.exe")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(anyhow::Error::from)
+fn update_tray_icon_for_active_provider(provider_name: &str, data: &Arc<RwLock<Vec<UsageData>>>) {
+    let data = data.read();
+    let active_provider = Some(provider_name);
+    let icon = crate::icon::generate_icon(&data, active_provider);
+    let tooltip = crate::icon::tray_tooltip(&data, active_provider);
+
+    if let Ok(hicon) = icon.to_hicon()
+        && let Some(&tray_hwnd) = crate::tray::TRAY_HWND.get()
+    {
+        let controller = crate::tray::TrayController::from_hwnd(tray_hwnd.raw());
+        controller.update_icon_with_tooltip(hicon, &tooltip);
+    }
 }
 
 fn provider_catalog() -> &'static [(&'static str, &'static str)] {
@@ -1152,959 +2142,170 @@ fn provider_display_order(config: &crate::config::AppConfig) -> Vec<(String, &'s
     ordered
 }
 
-fn ensure_provider_order(order: &mut Vec<String>) {
-    let mut normalized = Vec::new();
-    for configured in order.iter() {
-        if let Some((id, _)) = provider_catalog()
-            .iter()
-            .find(|(id, _)| id.eq_ignore_ascii_case(configured))
-            && !normalized.iter().any(|existing| existing == id)
-        {
-            normalized.push((*id).to_string());
-        }
-    }
-
-    for (id, _) in provider_catalog() {
-        if !normalized.iter().any(|existing| existing == id) {
-            normalized.push((*id).to_string());
-        }
-    }
-
-    *order = normalized;
-}
-
-fn reorder_provider(
-    order: &mut Vec<String>,
-    dragged: &ProviderDragPayload,
-    target: ProviderDropTarget,
-    visible_providers: &[&str],
-) -> bool {
-    ensure_provider_order(order);
-
-    let mut visible_order = visible_providers
-        .iter()
-        .map(|provider| (*provider).to_string())
-        .collect::<Vec<_>>();
-    let Some(from) = visible_order
-        .iter()
-        .position(|provider| provider == &dragged.provider)
-    else {
-        return false;
-    };
-
-    let mut to = match target {
-        ProviderDropTarget::Item { provider, row } => {
-            if provider == dragged.provider {
-                row
-            } else {
-                visible_order
-                    .iter()
-                    .position(|candidate| candidate == &provider)
-                    .map(|target_row| {
-                        if row > target_row {
-                            target_row + 1
-                        } else {
-                            target_row
-                        }
-                    })
-                    .unwrap_or(row)
-            }
-        }
-        ProviderDropTarget::End => visible_order.len(),
-    };
-
-    if from < to {
-        to -= 1;
-    }
-    to = to.min(visible_order.len().saturating_sub(1));
-    if from == to {
-        return false;
-    }
-
-    let item = visible_order.remove(from);
-    visible_order.insert(to, item);
-
-    let mut reordered_visible = visible_order.into_iter();
-    for provider in order.iter_mut() {
-        if visible_providers
-            .iter()
-            .any(|visible| provider.eq_ignore_ascii_case(visible))
-            && let Some(next_visible) = reordered_visible.next()
-        {
-            *provider = next_visible;
-        }
-    }
-
-    true
-}
-
-fn provider_drag_scroll_step(overflow: f32) -> f32 {
-    (overflow * 0.55 + overflow.powf(1.25) * 0.18).clamp(3.0, 90.0)
-}
-
-fn provider_scrollbar_left(ui: &egui::Ui) -> f32 {
-    let scroll_style = &ui.style().spacing.scroll;
-    let full_width = scroll_style.bar_width.max(scroll_style.floating_width);
-    ui.clip_rect().max.x - scroll_style.bar_outer_margin - full_width
-}
-
-fn paint_provider_drop_preview(ui: &egui::Ui, rect: egui::Rect, insert_after: bool) {
-    let y = if insert_after {
-        rect.bottom()
-    } else {
-        rect.top()
-    };
-    let stroke = ui.visuals().selection.stroke;
-    ui.painter()
-        .hline(rect.x_range(), y, egui::Stroke::new(2.0, stroke.color));
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_provider(
-    ui: &mut egui::Ui,
-    provider_name: &str,
-    provider_display_name: &str,
-    data: Option<&UsageData>,
-    card_width: f32,
-    active_provider: &Arc<RwLock<String>>,
-    config: &mut crate::config::AppConfig,
-    config_path: Option<&PathBuf>,
-    all_data: &Arc<RwLock<Vec<UsageData>>>,
-    history: &Arc<RwLock<crate::usage_history::UsageHistory>>,
-    collapse: bool,
-    is_dragged: bool,
-) -> egui::Response {
-    let current_error = data.and_then(|d| d.error.as_deref());
-    let cached_data = if current_error.is_some() {
-        history.read().latest_successful_for(provider_name)
-    } else {
-        None
-    };
-
-    let status = match data {
-        Some(d) if d.error.is_some() => {
-            if cached_data.is_some() {
-                ProviderStatus::ErrorWithCache
-            } else {
-                ProviderStatus::Error
-            }
-        }
-        Some(_) => ProviderStatus::Active,
-        None => ProviderStatus::Disabled,
-    };
-
-    let credits = if let Some(ref cached_d) = cached_data {
-        cached_d.credits.as_ref()
-    } else {
-        data.and_then(|d| d.credits.as_ref())
-    };
-    let error_msg = data.and_then(|d| d.error.as_deref());
-    let empty_vec = Vec::new();
-    let windows = if let Some(ref cached_d) = cached_data {
-        &cached_d.windows
-    } else {
-        data.map(|d| &d.windows).unwrap_or(&empty_vec)
-    };
-
-    let is_dark = ui.visuals().dark_mode;
-
-    let card_frame = egui::Frame::NONE
-        .fill(ui.visuals().widgets.noninteractive.bg_fill)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(10, 8));
-
-    let left_indent = ((ui.available_width() - card_width) / 2.0).max(0.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.add_space(left_indent);
-        let inner = ui.allocate_ui_with_layout(
-            egui::vec2(card_width, 0.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_min_width(card_width);
-                ui.set_max_width(card_width);
-                if is_dragged {
-                    ui.set_opacity(0.45);
-                }
-                render_provider_card(
-                    ui,
-                    provider_name,
-                    provider_display_name,
-                    status,
-                    credits,
-                    error_msg,
-                    windows,
-                    is_dark,
-                    card_frame,
-                    card_width,
-                    active_provider,
-                    config,
-                    config_path,
-                    all_data,
-                    history,
-                    collapse,
-                )
-            },
-        );
-        inner.inner
-    })
-    .inner
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_provider_card(
-    ui: &mut egui::Ui,
-    provider_name: &str,
-    provider_display_name: &str,
-    status: ProviderStatus,
-    credits: Option<&crate::provider::CreditsInfo>,
-    error_msg: Option<&str>,
-    windows: &[crate::provider::UsageWindow],
-    is_dark: bool,
-    card_frame: egui::Frame,
-    card_width: f32,
-    active_provider: &Arc<RwLock<String>>,
-    config: &mut crate::config::AppConfig,
-    config_path: Option<&PathBuf>,
-    all_data: &Arc<RwLock<Vec<UsageData>>>,
-    history: &Arc<RwLock<crate::usage_history::UsageHistory>>,
-    collapse: bool,
-) -> egui::Response {
-    let response = card_frame.show(ui, |ui| {
-        // Enforce uniform width across all cards based on parent width minus horizontal margins (cast i8 margins to f32)
-        let margin_x = (card_frame.inner_margin.left
-            + card_frame.inner_margin.right
-            + card_frame.outer_margin.left
-            + card_frame.outer_margin.right) as f32;
-        let content_width = (card_width - margin_x).max(0.0);
-        let is_primary = active_provider.read().eq_ignore_ascii_case(provider_name);
-        ui.set_min_width(content_width);
-        ui.set_max_width(content_width);
-        // Header Row - allocate the full content width to ensure all cards are identical in size
-        ui.allocate_ui_with_layout(
-            egui::vec2(content_width, 24.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                if render_provider_icon(
-                    ui,
-                    provider_name,
-                    is_dark,
-                    active_provider,
-                    config,
-                    config_path,
-                    all_data,
-                ) {
-                    ui.add_space(6.0);
-                }
-
-                // Title
-                ui.label(
-                    egui::RichText::new(provider_display_name)
-                        .strong()
-                        .size(13.5),
-                );
-                ui.add_space(6.0);
-
-                if is_primary {
-                    let (primary_bg, primary_border, primary_fg) = if is_dark {
-                        (
-                            egui::Color32::from_rgb(34, 43, 66),
-                            egui::Color32::from_rgb(118, 185, 237),
-                            egui::Color32::from_rgb(118, 185, 237),
-                        )
-                    } else {
-                        (
-                            egui::Color32::from_rgb(229, 242, 255),
-                            egui::Color32::from_rgb(0, 120, 212),
-                            egui::Color32::from_rgb(0, 91, 161),
-                        )
-                    };
-                    let primary_frame = egui::Frame::NONE
-                        .fill(primary_bg)
-                        .stroke(egui::Stroke::new(1.0, primary_border))
-                        .corner_radius(4)
-                        .inner_margin(egui::Margin::symmetric(5, 2));
-                    let resp = primary_frame
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new("PRIMARY")
-                                    .strong()
-                                    .size(8.0)
-                                    .color(primary_fg),
-                            );
-                        })
-                        .response;
-                    if resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-                    }
-                    ui.add_space(4.0);
-                }
-
-                if status != ProviderStatus::Active {
-                    // Fluent-styled Badging (bordered plates with soft tints)
-                    let (status_text, bg_color, border_color, fg_color) = if is_dark {
-                        match status {
-                            ProviderStatus::Active => unreachable!(),
-                            ProviderStatus::Error => (
-                                "ERROR",
-                                egui::Color32::from_rgb(62, 30, 30),
-                                egui::Color32::from_rgb(255, 108, 108),
-                                egui::Color32::from_rgb(255, 108, 108),
-                            ),
-                            ProviderStatus::ErrorWithCache => (
-                                "ERROR",
-                                egui::Color32::from_rgb(60, 45, 20), // soft warning orange/brown
-                                egui::Color32::from_rgb(255, 185, 96), // soft orange
-                                egui::Color32::from_rgb(255, 185, 96),
-                            ),
-                            ProviderStatus::Disabled => (
-                                "OFFLINE",
-                                egui::Color32::from_rgb(40, 40, 40),
-                                egui::Color32::from_rgb(80, 80, 80),
-                                egui::Color32::from_rgb(161, 161, 161),
-                            ),
-                        }
-                    } else {
-                        match status {
-                            ProviderStatus::Active => unreachable!(),
-                            ProviderStatus::Error => (
-                                "ERROR",
-                                egui::Color32::from_rgb(253, 232, 232),
-                                egui::Color32::from_rgb(196, 43, 28),
-                                egui::Color32::from_rgb(196, 43, 28),
-                            ),
-                            ProviderStatus::ErrorWithCache => (
-                                "ERROR",
-                                egui::Color32::from_rgb(255, 244, 204), // soft yellow/orange
-                                egui::Color32::from_rgb(216, 131, 0),
-                                egui::Color32::from_rgb(216, 131, 0),
-                            ),
-                            ProviderStatus::Disabled => (
-                                "OFFLINE",
-                                egui::Color32::from_rgb(243, 243, 243),
-                                egui::Color32::from_rgb(204, 204, 204),
-                                egui::Color32::from_rgb(118, 118, 118),
-                            ),
-                        }
-                    };
-
-                    let badge_frame = egui::Frame::NONE
-                        .fill(bg_color)
-                        .stroke(egui::Stroke::new(1.0, border_color))
-                        .corner_radius(4)
-                        .inner_margin(egui::Margin::symmetric(5, 2));
-                    let resp = badge_frame
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(status_text)
-                                    .strong()
-                                    .size(8.0)
-                                    .color(fg_color),
-                            );
-                        })
-                        .response;
-                    if resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-                    }
-
-                    if status == ProviderStatus::ErrorWithCache {
-                        let last_fetch_time = history.read().latest_successful_for(provider_name).map(|d| d.fetched_at);
-                        resp.on_hover_ui(|ui| {
-                            ui.set_max_width(260.0);
-                            ui.label(egui::RichText::new("Fetch Failed (Showing Cached Data)").strong());
-                            ui.add_space(4.0);
-                            if let Some(t) = last_fetch_time {
-                                let local_time = t.with_timezone(&chrono::Local);
-                                ui.label(format!("Last fetched: {}", local_time.format("%Y-%m-%d %H:%M:%S")));
-                            }
-                            if let Some(err) = error_msg {
-                                ui.add_space(4.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                                ui.colored_label(fg_color, err);
-                            }
-                        });
-                    }
-                }
-
-                // Credits Badge (Windows 11 accent tint badge)
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let codex_reset_credits = if provider_name == "codex" {
-                        windows
-                            .iter()
-                            .find(|w| w.label == "Reset Credits")
-                            .and_then(|w| {
-                                w.unit.as_deref().and_then(|json_str| {
-                                    serde_json::from_str::<crate::provider::CodexResetCredits>(
-                                        json_str,
-                                    )
-                                    .ok()
-                                })
-                            })
-                    } else {
-                        None
-                    };
-
-                    if let Some(resets) = codex_reset_credits {
-                        let credit_text = format!("{} Resets", resets.available_count);
-
-                        let (credits_bg, credits_border, credits_fg) = if is_dark {
-                            (
-                                egui::Color32::from_rgb(28, 46, 60),
-                                egui::Color32::from_rgb(96, 205, 255), // Fluent Accent Blue
-                                egui::Color32::from_rgb(96, 205, 255),
-                            )
-                        } else {
-                            (
-                                egui::Color32::from_rgb(224, 244, 255),
-                                egui::Color32::from_rgb(0, 120, 212), // Fluent Accent Blue (Light)
-                                egui::Color32::from_rgb(0, 120, 212),
-                            )
-                        };
-
-                        let credits_frame = egui::Frame::NONE
-                            .fill(credits_bg)
-                            .stroke(egui::Stroke::new(1.0, credits_border))
-                            .corner_radius(4)
-                            .inner_margin(egui::Margin::symmetric(8, 3));
-                        let badge_resp = credits_frame
-                            .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(credit_text)
-                                        .strong()
-                                        .size(10.0)
-                                        .color(credits_fg),
-                                );
-                            })
-                            .response;
-                        if badge_resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-                        }
-
-                        badge_resp.on_hover_ui(|ui| {
-                            ui.set_max_width(200.0);
-                            ui.label(
-                                egui::RichText::new("Codex Reset Credits")
-                                    .strong()
-                                    .size(11.0),
-                            );
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Available: {}",
-                                    resets.available_count
-                                ))
-                                .size(10.0)
-                                .weak(),
-                            );
-                            if resets.credits.is_empty() {
-                                ui.label(
-                                    egui::RichText::new("No active reset credits.")
-                                        .size(9.0)
-                                        .weak(),
-                                );
-                            } else {
-                                for (i, credit) in resets.credits.iter().enumerate() {
-                                    ui.separator();
-                                    let status_tag = if credit.status == "available" {
-                                        "Active"
-                                    } else {
-                                        &credit.status
-                                    };
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Credit #{}: {}",
-                                            i + 1,
-                                            status_tag
-                                        ))
-                                        .strong()
-                                        .size(9.5),
-                                    );
-                                    if let Some(expires) = credit.expires_at {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "Expires: {}",
-                                                expires
-                                                    .with_timezone(&chrono::Local)
-                                                    .format("%m-%d %H:%M")
-                                            ))
-                                            .size(9.0)
-                                            .weak(),
-                                        );
-                                    } else if let Some(granted) = credit.granted_at {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "Granted: {}",
-                                                granted
-                                                    .with_timezone(&chrono::Local)
-                                                    .format("%m-%d %H:%M")
-                                            ))
-                                            .size(9.0)
-                                            .weak(),
-                                        );
-                                    }
-                                }
-                            }
-                        });
-                    } else if let Some(c) = credits {
-                        let credit_text =
-                            format!("{} {}", format_credits_balance(c.balance), c.currency);
-
-                        let (credits_bg, credits_border, credits_fg) = if is_dark {
-                            (
-                                egui::Color32::from_rgb(28, 46, 60),
-                                egui::Color32::from_rgb(96, 205, 255), // Fluent Accent Blue
-                                egui::Color32::from_rgb(96, 205, 255),
-                            )
-                        } else {
-                            (
-                                egui::Color32::from_rgb(224, 244, 255),
-                                egui::Color32::from_rgb(0, 120, 212), // Fluent Accent Blue (Light)
-                                egui::Color32::from_rgb(0, 120, 212),
-                            )
-                        };
-
-                        let credits_frame = egui::Frame::NONE
-                            .fill(credits_bg)
-                            .stroke(egui::Stroke::new(1.0, credits_border))
-                            .corner_radius(4)
-                            .inner_margin(egui::Margin::symmetric(8, 3));
-                        let badge_resp = credits_frame
-                            .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(credit_text)
-                                        .strong()
-                                        .size(10.0)
-                                        .color(credits_fg),
-                                );
-                            })
-                            .response;
-                        if badge_resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-                        }
-                    }
-                });
-            },
-        );
-
-        if !collapse {
-            let trend = history.read().trend_for(provider_name, 7);
-            match status {
-                ProviderStatus::Disabled => {}
-                ProviderStatus::Error => {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    // Fluent Callout Infolink / Infobar styling
-                    let (err_bg, err_border, err_fg, warning_symbol_color) = if is_dark {
-                        (
-                            egui::Color32::from_rgb(61, 38, 38),
-                            egui::Color32::from_rgb(196, 43, 28),
-                            egui::Color32::from_rgb(255, 153, 153),
-                            egui::Color32::from_rgb(255, 108, 108),
-                        )
-                    } else {
-                        (
-                            egui::Color32::from_rgb(253, 232, 232),
-                            egui::Color32::from_rgb(196, 43, 28),
-                            egui::Color32::from_rgb(153, 27, 27),
-                            egui::Color32::from_rgb(196, 43, 28),
-                        )
-                    };
-
-                    let error_frame = egui::Frame::NONE
-                        .fill(err_bg)
-                        .stroke(egui::Stroke::new(1.0, err_border))
-                        .corner_radius(6)
-                        .inner_margin(8);
-                    error_frame.show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(warning_symbol_color, "⚠");
-                                ui.add_space(4.0);
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center)
-                                        .with_main_wrap(true),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                error_msg.unwrap_or("Unknown error occurred"),
-                                            )
-                                            .small()
-                                            .color(err_fg),
-                                        );
-                                    },
-                                );
-                            });
-
-                            let supports_web_login = matches!(provider_name, "mimo" | "opencode" | "ollama");
-                            if supports_web_login {
-                                ui.add_space(6.0);
-                                ui.horizontal(|ui| {
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new("Web Login")
-                                            .small()
-                                    )
-                                    .min_size(egui::vec2(72.0, 20.0));
-                                    
-                                    let btn_resp = ui.add(btn);
-                                    if btn_resp.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-                                    if btn_resp.clicked() {
-                                        let name_str = provider_name.to_string();
-                                        std::thread::spawn(move || {
-                                            let fresh_cookie = match name_str.as_str() {
-                                                "mimo" => crate::webview_login::login_and_get_cookie(),
-                                                "opencode" => crate::webview_login::opencode_login_and_get_cookie(),
-                                                "ollama" => crate::webview_login::ollama_login_and_get_cookie(),
-                                                _ => return,
-                                            };
-                                            match fresh_cookie {
-                                                Ok(cookie) => {
-                                                    let secret_key = match name_str.as_str() {
-                                                        "mimo" => "cookie_header",
-                                                        "opencode" => "auth_cookie",
-                                                        "ollama" => "auth_cookie",
-                                                        _ => return,
-                                                    };
-                                                    if let Err(err) = crate::secrets::set(&name_str, secret_key, &cookie) {
-                                                        tracing::error!("Failed to store {name_str} cookie: {err}");
-                                                    } else {
-                                                        tracing::info!("Successfully stored {name_str} cookie from web login.");
-                                                        crate::tray::request_refresh();
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    tracing::error!("Web login for {name_str} failed: {err}");
-                                                }
-                                            }
-                                        });
-                                    }
-                                });
-                            }
-                        });
-                    });
-                }
-                ProviderStatus::Active | ProviderStatus::ErrorWithCache => {
-                    let active_windows: Vec<_> = windows
-                        .iter()
-                        .filter(|w| w.label != "Reset Credits")
-                        .collect();
-                    if active_windows.is_empty() {
-                        if credits.is_none() {
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("No active usage windows.")
-                                    .small()
-                                    .weak(),
-                            );
-                        }
-                    } else {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        let available_width = ui.available_width();
-                        let gap = 8.0;
-                        let label_width = 88.0_f32;
-                        let reset_width = 82.0_f32;
-                        let progress_width =
-                            (available_width - label_width - reset_width - gap * 2.0).max(96.0);
-
-                        for window in active_windows {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = gap;
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(label_width, 18.0),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.add_sized(
-                                            [label_width, 18.0],
-                                            egui::Label::new(
-                                                egui::RichText::new(&window.label)
-                                                    .strong()
-                                                    .size(11.0),
-                                            )
-                                            .truncate(),
-                                        );
-                                    },
-                                );
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(progress_width, 18.0),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        render_usage_progress(
-                                            ui,
-                                            window.used_percent as f32,
-                                            is_dark,
-                                        );
-                                    },
-                                );
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(reset_width, 18.0),
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let reset_text = reset_time_text(window.resets_at);
-                                        ui.add_sized(
-                                            [reset_width, 18.0],
-                                            egui::Label::new(
-                                                egui::RichText::new(reset_text).small().weak(),
-                                            )
-                                            .truncate(),
-                                        );
-                                    },
-                                );
-                            });
-                            ui.add_space(4.0);
-                        }
-
-                        if let Some(trend) = trend {
-                            ui.add_space(2.0);
-                            ui.label(
-                                egui::RichText::new(format_trend_summary(&trend))
-                                    .small()
-                                    .weak(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    if response.response.rect.width() < card_width {
-        ui.allocate_space(egui::vec2(card_width, 0.0));
-    }
-
-    response.response
-}
-
-fn format_trend_summary(trend: &crate::usage_history::ProviderTrend) -> String {
-    let delta = trend
-        .previous_percent
-        .map(|previous| trend.latest_percent - previous)
-        .filter(|value| value.abs() >= 0.05)
-        .map(|value| {
-            if value >= 0.0 {
-                format!("+{value:.1} pp")
-            } else {
-                format!("{value:.1} pp")
-            }
-        })
-        .unwrap_or_else(|| "flat".to_string());
-
-    format!(
-        "7d trend: avg {:.0}% · peak {:.0}% · {delta} · {} samples",
-        trend.average_percent, trend.peak_percent, trend.samples
-    )
-}
-
-fn render_secret_status(ui: &mut egui::Ui, provider: &str, field: &str, env_names: &[&str]) {
-    ui.horizontal(|ui| {
-        let status = if crate::secrets::configured(provider, field, env_names) {
-            "Stored in Windows Credential Manager"
-        } else {
-            "Not stored"
-        };
-        ui.label(egui::RichText::new(status).small().weak());
-        if ui.link("Clear").clicked()
-            && let Err(err) = crate::secrets::delete(provider, field)
-        {
-            tracing::error!("Failed to clear credential {provider}/{field}: {err}");
-        }
-    });
-}
-
-fn provider_icon(provider_name: &str, is_dark: bool) -> Option<egui::ImageSource<'static>> {
+fn provider_icon(provider_name: &str, is_dark: bool) -> Option<&'static str> {
     match (provider_name, is_dark) {
-        ("abacus", true) => Some(egui::include_image!(
-            "../assets/provider-icons/abacus-ai-dark.svg"
-        )),
-        ("abacus", false) => Some(egui::include_image!(
-            "../assets/provider-icons/abacus-ai.png"
-        )),
-        ("alibabatoken", _) => Some(egui::include_image!("../assets/provider-icons/alibaba.svg")),
-        ("amp", _) => Some(egui::include_image!("../assets/provider-icons/amp.svg")),
-        ("augment", _) => Some(egui::include_image!("../assets/provider-icons/augment.svg")),
-        ("codex", true) => Some(egui::include_image!(
-            "../assets/provider-icons/codex-dark.svg"
-        )),
-        ("codex", false) => Some(egui::include_image!("../assets/provider-icons/codex.svg")),
-        ("codebuff", true) => Some(egui::include_image!(
-            "../assets/provider-icons/codebuff-dark.svg"
-        )),
-        ("codebuff", false) => Some(egui::include_image!(
-            "../assets/provider-icons/codebuff.svg"
-        )),
-        ("copilot", _) => Some(egui::include_image!("../assets/provider-icons/copilot.svg")),
-        ("cursor", _) => Some(egui::include_image!("../assets/provider-icons/cursor.svg")),
-        ("droid", true) => Some(egui::include_image!(
-            "../assets/provider-icons/droid-dark.svg"
-        )),
-        ("droid", false) => Some(egui::include_image!("../assets/provider-icons/droid.svg")),
-        ("elevenlabs", _) => Some(egui::include_image!(
-            "../assets/provider-icons/elevenlabs.svg"
-        )),
-        ("jetbrains", _) => Some(egui::include_image!(
-            "../assets/provider-icons/jetbrains-ai.svg"
-        )),
-        ("kilo", _) => Some(egui::include_image!("../assets/provider-icons/kilo.svg")),
-        ("kimi", _) => Some(egui::include_image!("../assets/provider-icons/kimi.svg")),
-        ("kiro", true) => Some(egui::include_image!(
-            "../assets/provider-icons/kiro-dark.svg"
-        )),
-        ("kiro", false) => Some(egui::include_image!("../assets/provider-icons/kiro.svg")),
-        ("minimax", _) => Some(egui::include_image!("../assets/provider-icons/minimax.svg")),
-        ("mistral", _) => Some(egui::include_image!("../assets/provider-icons/mistral.svg")),
-        ("ollama", _) => Some(egui::include_image!("../assets/provider-icons/ollama.svg")),
-        ("opencode" | "opencodego", true) => Some(egui::include_image!(
-            "../assets/provider-icons/opencode-dark.svg"
-        )),
-        ("opencode" | "opencodego", false) => Some(egui::include_image!(
-            "../assets/provider-icons/opencode.svg"
-        )),
-        ("openrouter", _) => Some(egui::include_image!(
-            "../assets/provider-icons/openrouter.svg"
-        )),
-        ("claude", _) => Some(egui::include_image!("../assets/provider-icons/claude.svg")),
-        ("gemini", _) => Some(egui::include_image!("../assets/provider-icons/gemini.svg")),
-        ("antigravity", _) => Some(egui::include_image!(
-            "../assets/provider-icons/antigravity.svg"
-        )),
-        ("deepseek", _) => Some(egui::include_image!(
-            "../assets/provider-icons/deepseek.svg"
-        )),
-        ("synthetic", true) => Some(egui::include_image!(
-            "../assets/provider-icons/synthetic-dark.svg"
-        )),
-        ("synthetic", false) => Some(egui::include_image!(
-            "../assets/provider-icons/synthetic.svg"
-        )),
-        ("vertexai", _) => Some(egui::include_image!(
-            "../assets/provider-icons/vertex-ai.svg"
-        )),
-        ("warp", _) => Some(egui::include_image!("../assets/provider-icons/warp.svg")),
-        ("zai", true) => Some(egui::include_image!(
-            "../assets/provider-icons/zai-dark.svg"
-        )),
-        ("zai", false) => Some(egui::include_image!("../assets/provider-icons/zai.svg")),
+        ("abacus", true) => Some("assets/provider-icons/abacus-ai-dark.svg"),
+        ("abacus", false) => Some("assets/provider-icons/abacus-ai.png"),
+        ("alibabatoken", _) => Some("assets/provider-icons/alibaba.svg"),
+        ("amp", _) => Some("assets/provider-icons/amp.svg"),
+        ("augment", _) => Some("assets/provider-icons/augment.svg"),
+        ("codex", true) => Some("assets/provider-icons/codex-dark.svg"),
+        ("codex", false) => Some("assets/provider-icons/codex.svg"),
+        ("codebuff", true) => Some("assets/provider-icons/codebuff-dark.svg"),
+        ("codebuff", false) => Some("assets/provider-icons/codebuff.svg"),
+        ("copilot", _) => Some("assets/provider-icons/copilot.svg"),
+        ("cursor", _) => Some("assets/provider-icons/cursor.svg"),
+        ("droid", true) => Some("assets/provider-icons/droid-dark.svg"),
+        ("droid", false) => Some("assets/provider-icons/droid.svg"),
+        ("elevenlabs", _) => Some("assets/provider-icons/elevenlabs.svg"),
+        ("jetbrains", _) => Some("assets/provider-icons/jetbrains-ai.svg"),
+        ("kilo", _) => Some("assets/provider-icons/kilo.svg"),
+        ("kimi", _) => Some("assets/provider-icons/kimi.svg"),
+        ("kiro", true) => Some("assets/provider-icons/kiro-dark.svg"),
+        ("kiro", false) => Some("assets/provider-icons/kiro.svg"),
+        ("minimax", _) => Some("assets/provider-icons/minimax.svg"),
+        ("mistral", _) => Some("assets/provider-icons/mistral.svg"),
+        ("ollama", _) => Some("assets/provider-icons/ollama.svg"),
+        ("opencode" | "opencodego", true) => Some("assets/provider-icons/opencode-dark.svg"),
+        ("opencode" | "opencodego", false) => Some("assets/provider-icons/opencode.svg"),
+        ("openrouter", _) => Some("assets/provider-icons/openrouter.svg"),
+        ("claude", _) => Some("assets/provider-icons/claude.svg"),
+        ("gemini", _) => Some("assets/provider-icons/gemini.svg"),
+        ("antigravity", _) => Some("assets/provider-icons/antigravity.svg"),
+        ("deepseek", _) => Some("assets/provider-icons/deepseek.svg"),
+        ("synthetic", true) => Some("assets/provider-icons/synthetic-dark.svg"),
+        ("synthetic", false) => Some("assets/provider-icons/synthetic.svg"),
+        ("vertexai", _) => Some("assets/provider-icons/vertex-ai.svg"),
+        ("warp", _) => Some("assets/provider-icons/warp.svg"),
+        ("zai", true) => Some("assets/provider-icons/zai-dark.svg"),
+        ("zai", false) => Some("assets/provider-icons/zai.svg"),
+        ("mimo", _) => Some("assets/provider-icons/mimo.svg"),
         _ => None,
     }
 }
 
-fn render_provider_icon(
-    ui: &mut egui::Ui,
-    provider_name: &str,
-    is_dark: bool,
-    active_provider: &Arc<RwLock<String>>,
+fn config_field_value(config: &crate::config::AppConfig, field: &str) -> String {
+    match field {
+        "proxy" => return config.network.proxy.clone(),
+        "deepseek_key" => return config.deepseek.api_key.clone(),
+        "claude_key" => return config.claude.api_key.clone(),
+        "claude_session" => return config.claude.session_key.clone(),
+        "claude_token" => return config.claude.access_token.clone(),
+        "claude_auth" => return config.claude.auth_file.clone(),
+        "codex_auth" => return config.codex.auth_file.clone(),
+        "gemini_key" => return config.gemini.api_key.clone(),
+        "antigravity_key" => return config.antigravity.api_key.clone(),
+        "opencode_key" => return config.opencode.api_key.clone(),
+        "opencode_workspace" => return config.opencode.workspace_id.clone(),
+        "opencode_auth" => return config.opencode.auth_cookie.clone(),
+        "mimo_key" => return config.mimo.api_key.clone(),
+        "mimo_token" => return config.mimo.service_token.clone(),
+        "mimo_cookie" => return config.mimo.cookie_header.clone(),
+        _ => {}
+    }
+
+    if let Some(provider) = field.strip_suffix("_key")
+        && let Some(config) = api_key_provider_config(config, provider) {
+            return config.api_key.clone();
+        }
+    if let Some(provider) = field.strip_suffix("_url")
+        && let Some(config) = api_key_provider_config(config, provider) {
+            return config.base_url.clone();
+        }
+    if let Some(provider) = field.strip_suffix("_dep")
+        && let Some(config) = api_key_provider_config(config, provider) {
+            return config.deployment.clone();
+        }
+
+    String::new()
+}
+
+fn set_config_field_value(
     config: &mut crate::config::AppConfig,
-    config_path: Option<&PathBuf>,
-    data: &Arc<RwLock<Vec<UsageData>>>,
+    field: &str,
+    value: String,
 ) -> bool {
-    let is_active = active_provider.read().eq_ignore_ascii_case(provider_name);
-    let tooltip = if is_active {
-        "Primary provider"
-    } else {
-        "Double-click to set as primary provider"
+    let target = match field {
+        "proxy" => Some(&mut config.network.proxy),
+        "deepseek_key" => Some(&mut config.deepseek.api_key),
+        "claude_key" => Some(&mut config.claude.api_key),
+        "claude_session" => Some(&mut config.claude.session_key),
+        "claude_token" => Some(&mut config.claude.access_token),
+        "claude_auth" => Some(&mut config.claude.auth_file),
+        "codex_auth" => Some(&mut config.codex.auth_file),
+        "gemini_key" => Some(&mut config.gemini.api_key),
+        "antigravity_key" => Some(&mut config.antigravity.api_key),
+        "opencode_key" => Some(&mut config.opencode.api_key),
+        "opencode_workspace" => Some(&mut config.opencode.workspace_id),
+        "opencode_auth" => Some(&mut config.opencode.auth_cookie),
+        "mimo_key" => Some(&mut config.mimo.api_key),
+        "mimo_token" => Some(&mut config.mimo.service_token),
+        "mimo_cookie" => Some(&mut config.mimo.cookie_header),
+        _ => None,
     };
 
-    if let Some(icon) = provider_icon(provider_name, is_dark) {
-        let response = ui
-            .add(
-                egui::Image::new(icon)
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0))
-                    .maintain_aspect_ratio(true)
-                    .sense(egui::Sense::click()),
-            )
-            .on_hover_text(tooltip);
-        if response.double_clicked() {
-            set_active_provider(provider_name, active_provider, config, config_path, data);
-        }
+    if let Some(target) = target {
+        *target = value;
         return true;
     }
 
-    if provider_name == "mimo" {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-        let (bg, fg) = if is_dark {
-            (
-                egui::Color32::from_rgb(54, 69, 89),
-                egui::Color32::from_rgb(210, 225, 255),
-            )
-        } else {
-            (
-                egui::Color32::from_rgb(232, 240, 255),
-                egui::Color32::from_rgb(37, 70, 130),
-            )
-        };
-        ui.painter().circle_filled(rect.center(), 9.0, bg);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "M",
-            egui::FontId::proportional(11.0),
-            fg,
-        );
-        if response.on_hover_text(tooltip).double_clicked() {
-            set_active_provider(provider_name, active_provider, config, config_path, data);
-        }
-        return true;
+    for suffix in ["_key", "_url", "_dep"] {
+        if let Some(provider) = field.strip_suffix(suffix)
+            && let Some(provider_config) = api_key_provider_config_mut(config, provider) {
+                match suffix {
+                    "_key" => provider_config.api_key = value,
+                    "_url" => provider_config.base_url = value,
+                    "_dep" => provider_config.deployment = value,
+                    _ => unreachable!(),
+                }
+                return true;
+            }
     }
 
     false
 }
 
-fn set_active_provider(
-    provider_name: &str,
-    active_provider: &Arc<RwLock<String>>,
-    config: &mut crate::config::AppConfig,
-    config_path: Option<&PathBuf>,
-    data: &Arc<RwLock<Vec<UsageData>>>,
-) {
-    *active_provider.write() = provider_name.to_string();
-
-    config.general.active_provider = provider_name.to_string();
-    if let Err(err) = save_config_without_secrets(config, config_path) {
-        tracing::error!("Failed to save active provider {provider_name}: {err}");
-    }
-
-    update_tray_icon_for_active_provider(provider_name, data);
-    crate::tray::request_refresh();
-}
-
-fn save_config_without_secrets(
-    config: &crate::config::AppConfig,
-    config_path: Option<&PathBuf>,
-) -> anyhow::Result<()> {
-    let mut config_to_save = config.clone();
-    crate::secrets::store_and_scrub_config(&mut config_to_save);
-    if let Some(path) = config_path {
-        config_to_save.save_to(path)
-    } else {
-        config_to_save.save()
-    }
-}
-
-fn enable_provider_for_test(config: &mut crate::config::AppConfig, provider: &str) {
+fn api_key_provider_config<'a>(
+    config: &'a crate::config::AppConfig,
+    provider: &str,
+) -> Option<&'a crate::config::ApiKeyProviderConfig> {
     match provider {
-        "deepseek" => config.deepseek.enabled = Some(true),
-        "claude" => config.claude.enabled = Some(true),
-        "codex" => config.codex.enabled = Some(true),
-        "gemini" => config.gemini.enabled = Some(true),
-        "antigravity" => config.antigravity.enabled = Some(true),
-        "opencode" | "opencodego" => config.opencode.enabled = Some(true),
-        "mimo" => config.mimo.enabled = Some(true),
-        _ => {
-            if let Some(cfg) = api_key_provider_config_mut(config, provider) {
-                cfg.enabled = Some(true);
-            }
-        }
+        "openai" => Some(&config.openai),
+        "openrouter" => Some(&config.openrouter),
+        "moonshot" => Some(&config.moonshot),
+        "elevenlabs" => Some(&config.elevenlabs),
+        "doubao" => Some(&config.doubao),
+        "zai" => Some(&config.zai),
+        "venice" => Some(&config.venice),
+        "crof" => Some(&config.crof),
+        "synthetic" => Some(&config.synthetic),
+        "warp" => Some(&config.warp),
+        "groqcloud" => Some(&config.groqcloud),
+        "deepgram" => Some(&config.deepgram),
+        "llmproxy" => Some(&config.llmproxy),
+        "codebuff" => Some(&config.codebuff),
+        "kiro" => Some(&config.kiro),
+        "copilot" => Some(&config.copilot),
+        "azureopenai" => Some(&config.azureopenai),
+        "ollama" => Some(&config.ollama),
+        "minimax" => Some(&config.minimax),
+        "jetbrains" => Some(&config.jetbrains),
+        "kimi" => Some(&config.kimi),
+        "kilo" => Some(&config.kilo),
+        "augment" => Some(&config.augment),
+        "bedrock" => Some(&config.bedrock),
+        "vertexai" => Some(&config.vertexai),
+        "stepfun" => Some(&config.stepfun),
+        "abacus" => Some(&config.abacus),
+        "alibabatoken" => Some(&config.alibabatoken),
+        "t3chat" => Some(&config.t3chat),
+        "amp" => Some(&config.amp),
+        "mistral" => Some(&config.mistral),
+        "grok" => Some(&config.grok),
+        "cursor" => Some(&config.cursor),
+        "droid" => Some(&config.droid),
+        "windsurf" => Some(&config.windsurf),
+        _ => None,
     }
 }
 
@@ -2152,6 +2353,23 @@ fn api_key_provider_config_mut<'a>(
     }
 }
 
+fn enable_provider_for_test(config: &mut crate::config::AppConfig, provider: &str) {
+    match provider {
+        "deepseek" => config.deepseek.enabled = Some(true),
+        "claude" => config.claude.enabled = Some(true),
+        "codex" => config.codex.enabled = Some(true),
+        "gemini" => config.gemini.enabled = Some(true),
+        "antigravity" => config.antigravity.enabled = Some(true),
+        "opencode" | "opencodego" => config.opencode.enabled = Some(true),
+        "mimo" => config.mimo.enabled = Some(true),
+        _ => {
+            if let Some(cfg) = api_key_provider_config_mut(config, provider) {
+                cfg.enabled = Some(true);
+            }
+        }
+    }
+}
+
 fn summarize_provider_test(data: &UsageData) -> String {
     let max_percent = data.max_used_percent();
     let windows = data.windows.len();
@@ -2174,118 +2392,23 @@ fn summarize_provider_test(data: &UsageData) -> String {
     }
 }
 
-fn update_tray_icon_for_active_provider(provider_name: &str, data: &Arc<RwLock<Vec<UsageData>>>) {
-    let data = data.read();
-    let active_provider = Some(provider_name);
-    let icon = crate::icon::generate_icon(&data, active_provider);
-    let tooltip = crate::icon::tray_tooltip(&data, active_provider);
-    if let Ok(hicon) = icon.to_hicon()
-        && let Some(&tray_hwnd) = crate::tray::TRAY_HWND.get()
-    {
-        let controller = crate::tray::TrayController::from_hwnd(tray_hwnd.raw());
-        controller.update_icon_with_tooltip(hicon, &tooltip);
-    }
-}
-
-fn render_usage_progress(ui: &mut egui::Ui, pct: f32, is_dark: bool) {
-    let pct = pct.clamp(0.0, 100.0);
-    let pct_width = 34.0;
-    let bar_width = (ui.available_width() - pct_width - 6.0).max(48.0);
-    let bar_height = 8.0;
-    let rounding = 4.0;
-
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
-    if ui.is_rect_visible(rect) {
-        let track_color = if is_dark {
-            egui::Color32::from_rgb(32, 32, 32)
-        } else {
-            egui::Color32::from_rgb(229, 229, 229)
-        };
-        ui.painter().rect_filled(rect, rounding, track_color);
-
-        let fill_width = bar_width * (pct / 100.0);
-        if fill_width > 0.0 {
-            if fill_width < rounding {
-                // If the fill width is smaller than the corner radius, a standard rounded rectangle
-                // would have scaled-down corner radii, causing it to overflow the track's left end.
-                // We construct a custom convex polygon matching the exact mathematical intersection
-                // of the track's left semicircle and the vertical slice at `fill_width`.
-                let mut points = Vec::with_capacity(22);
-                let center_y = rect.min.y + rounding;
-                let steps = 10;
-
-                // Top arc from left to right: x goes from 0.0 to fill_width
-                for i in 0..=steps {
-                    let x_offset = fill_width * (i as f32 / steps as f32);
-                    let h_half = (2.0 * rounding * x_offset - x_offset * x_offset)
-                        .max(0.0)
-                        .sqrt();
-                    points.push(egui::pos2(rect.min.x + x_offset, center_y - h_half));
-                }
-
-                // Bottom arc from right to left: x goes from fill_width down to 0.0
-                for i in (0..=steps).rev() {
-                    let x_offset = fill_width * (i as f32 / steps as f32);
-                    let h_half = (2.0 * rounding * x_offset - x_offset * x_offset)
-                        .max(0.0)
-                        .sqrt();
-                    points.push(egui::pos2(rect.min.x + x_offset, center_y + h_half));
-                }
-
-                ui.painter().add(egui::Shape::convex_polygon(
-                    points,
-                    progress_color(pct, is_dark),
-                    egui::Stroke::NONE,
-                ));
-            } else {
-                // If fill_width >= rounding, we can safely draw it as a rounded rectangle.
-                // To prevent the left corners from being scaled down by the right corner's rounding,
-                // we set the right corner radius dynamically such that `left_rounding + right_rounding <= fill_width`.
-                let right_rounding = (fill_width - rounding).min(rounding);
-                let fill_rect =
-                    egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, bar_height));
-
-                let nw = rounding.round() as u8;
-                let sw = rounding.round() as u8;
-                let ne = right_rounding.round() as u8;
-                let se = right_rounding.round() as u8;
-
-                let corner_radius = egui::CornerRadius { nw, ne, sw, se };
-
-                ui.painter()
-                    .rect_filled(fill_rect, corner_radius, progress_color(pct, is_dark));
-            }
-        }
-    }
-
-    ui.add_space(4.0);
-    ui.add_sized(
-        [pct_width, 18.0],
-        egui::Label::new(
-            egui::RichText::new(format!("{pct:.0}%"))
-                .color(progress_color(pct, is_dark))
-                .strong()
-                .size(10.0),
-        ),
-    );
-}
-
-fn progress_color(pct: f32, is_dark: bool) -> egui::Color32 {
-    if is_dark {
-        if pct >= 80.0 {
-            egui::Color32::from_rgb(241, 112, 122)
-        } else if pct >= 50.0 {
-            egui::Color32::from_rgb(255, 200, 0)
-        } else {
-            egui::Color32::from_rgb(96, 205, 255)
-        }
-    } else if pct >= 80.0 {
-        egui::Color32::from_rgb(196, 43, 28)
-    } else if pct >= 50.0 {
-        egui::Color32::from_rgb(179, 123, 0)
+fn format_credits_balance(balance: f64) -> String {
+    if balance.fract() == 0.0 {
+        format!("{:.0}", balance)
     } else {
-        egui::Color32::from_rgb(0, 120, 212)
+        format!("{:.2}", balance)
     }
+}
+
+fn format_reset_credit_expiry(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    expires_at
+        .map(|expires| {
+            expires
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "No expiration".to_string())
 }
 
 fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
@@ -2311,878 +2434,43 @@ fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
     }
 }
 
-impl QuotifyApp {
-    fn render_about_page(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        card_width: f32,
-        card_left_indent: f32,
-    ) {
-        let about_frame = egui::Frame::NONE
-            .fill(ui.visuals().widgets.noninteractive.bg_fill)
-            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(16, 16));
+use crate::version::is_newer;
 
-        ui.horizontal(|ui| {
-            ui.add_space(card_left_indent);
-            ui.allocate_ui(egui::vec2(card_width, 0.0), |ui| {
-                about_frame.show(ui, |ui| {
-                    ui.set_min_width(card_width - 32.0);
-                    ui.vertical(|ui| {
-                        let logo =
-                            egui::Image::new(egui::include_image!("../assets/icons/quotify.svg"))
-                                .fit_to_exact_size(egui::vec2(48.0, 48.0))
-                                .maintain_aspect_ratio(true);
-                        ui.add(logo);
-
-                        ui.add_space(12.0);
-
-                        ui.label(egui::RichText::new("Quotify").heading().size(24.0).strong());
-
-                        ui.add_space(8.0);
-
-                        let version_str = env!("GIT_TAG");
-                        ui.label(
-                            egui::RichText::new(format!("Version: {version_str}"))
-                                .size(14.0)
-                                .color(ui.visuals().widgets.noninteractive.text_color()),
-                        );
-
-                        ui.add_space(4.0);
-
-                        ui.label(
-                            egui::RichText::new("Author: zuoxinyu")
-                                .size(14.0)
-                                .color(ui.visuals().widgets.noninteractive.text_color()),
-                        );
-
-                        ui.add_space(4.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("GitHub: ")
-                                    .size(14.0)
-                                    .color(ui.visuals().widgets.noninteractive.text_color()),
-                            );
-                            ui.hyperlink_to(
-                                egui::RichText::new("zuoxinyu/quotify")
-                                    .size(14.0)
-                                    .underline(),
-                                "https://github.com/zuoxinyu/quotify",
-                            );
-                        });
-
-                        ui.add_space(16.0);
-                        ui.separator();
-                        ui.add_space(16.0);
-
-                        ui.label(egui::RichText::new("Check for Updates").strong().size(16.0));
-
-                        ui.add_space(8.0);
-
-                        let status = self.update_status.lock().clone();
-                        match status {
-                            UpdateStatus::Idle => {
-                                let check_btn = ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Check for Updates")
-                                            .size(10.0)
-                                            .strong()
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(egui::Color32::from_rgb(0, 95, 184)) // WinUI Accent Blue
-                                    .corner_radius(4)
-                                    .min_size(egui::vec2(96.0, 24.0)),
-                                );
-                                if check_btn.clicked() {
-                                    self.trigger_check_update(ctx.clone());
-                                }
-                            }
-                            UpdateStatus::Checking => {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(
-                                        egui::RichText::new("Checking latest release...")
-                                            .size(14.0)
-                                            .color(ui.visuals().weak_text_color()),
-                                    );
-                                });
-                            }
-                            UpdateStatus::UpToDate { latest_version } => {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "You are up to date! (Latest: {latest_version})"
-                                    ))
-                                    .size(14.0)
-                                    .color(egui::Color32::from_rgb(46, 125, 50)),
-                                );
-                                ui.add_space(6.0);
-
-                                let check_again = ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Check Again").size(10.0),
-                                    )
-                                    .corner_radius(4)
-                                    .min_size(egui::vec2(64.0, 24.0)),
-                                );
-                                if check_again.clicked() {
-                                    self.trigger_check_update(ctx.clone());
-                                }
-                            }
-                            UpdateStatus::NewVersionAvailable {
-                                latest_version,
-                                release_url,
-                            } => {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "A new version is available: {latest_version}"
-                                    ))
-                                    .size(14.0)
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(22, 101, 216)),
-                                );
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Please download manually from GitHub releases.",
-                                    )
-                                    .size(12.0)
-                                    .color(ui.visuals().widgets.noninteractive.text_color()),
-                                );
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    let dl_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new("Download Now")
-                                                .size(13.0)
-                                                .strong()
-                                                .color(egui::Color32::WHITE),
-                                        )
-                                        .fill(egui::Color32::from_rgb(0, 95, 184))
-                                        .corner_radius(4)
-                                        .min_size(egui::vec2(100.0, 26.0)),
-                                    );
-                                    if dl_btn.clicked() {
-                                        open_browser(&release_url);
-                                    }
-
-                                    let check_again = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new("Check Again").size(12.0),
-                                        )
-                                        .corner_radius(4)
-                                        .min_size(egui::vec2(80.0, 26.0)),
-                                    );
-                                    if check_again.clicked() {
-                                        self.trigger_check_update(ctx.clone());
-                                    }
-                                });
-                            }
-                            UpdateStatus::Error(err) => {
-                                ui.label(
-                                    egui::RichText::new(format!("Error: {err}"))
-                                        .size(14.0)
-                                        .color(egui::Color32::from_rgb(198, 40, 40)),
-                                );
-                                ui.add_space(6.0);
-
-                                let retry_btn = ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Retry")
-                                            .size(13.0)
-                                            .strong()
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(egui::Color32::from_rgb(0, 95, 184))
-                                    .corner_radius(4)
-                                    .min_size(egui::vec2(80.0, 26.0)),
-                                );
-                                if retry_btn.clicked() {
-                                    self.trigger_check_update(ctx.clone());
-                                }
-                            }
-                        }
-                    });
-                });
-            });
-        });
-    }
-
-    fn trigger_check_update(&self, ctx: egui::Context) {
-        *self.update_status.lock() = UpdateStatus::Checking;
-
-        let status = self.update_status.clone();
-        let proxy = self.config.network.proxy.clone();
-        let current_version = env!("GIT_TAG").to_string();
-
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(err) => {
-                    *status.lock() = UpdateStatus::Error(format!("Runtime error: {}", err));
-                    ctx.request_repaint();
-                    return;
-                }
-            };
-
-            rt.block_on(async {
-                let client = crate::provider::http_client(Some(&proxy));
-
-                let res = client
-                    .get("https://api.github.com/repos/zuoxinyu/quotify/releases/latest")
-                    .header("User-Agent", "Quotify-Update-Checker")
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await;
-
-                match res {
-                    Ok(response) => {
-                        if response.status() == reqwest::StatusCode::NOT_FOUND {
-                            *status.lock() = UpdateStatus::UpToDate {
-                                latest_version: "None (No releases found)".to_string(),
-                            };
-                            ctx.request_repaint();
-                            return;
-                        }
-
-                        if !response.status().is_success() {
-                            let err_msg = format!("GitHub API returned HTTP {}", response.status());
-                            *status.lock() = UpdateStatus::Error(err_msg);
-                            ctx.request_repaint();
-                            return;
-                        }
-
-                        #[derive(serde::Deserialize)]
-                        struct GithubRelease {
-                            tag_name: String,
-                            html_url: String,
-                        }
-
-                        match response.json::<GithubRelease>().await {
-                            Ok(release) => {
-                                if is_newer(&current_version, &release.tag_name) {
-                                    *status.lock() = UpdateStatus::NewVersionAvailable {
-                                        latest_version: release.tag_name,
-                                        release_url: release.html_url,
-                                    };
-                                } else {
-                                    *status.lock() = UpdateStatus::UpToDate {
-                                        latest_version: release.tag_name,
-                                    };
-                                }
-                            }
-                            Err(err) => {
-                                let err_msg = format!("Failed to parse release: {err}");
-                                *status.lock() = UpdateStatus::Error(err_msg);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let err_msg = format!("Network error: {err}");
-                        *status.lock() = UpdateStatus::Error(err_msg);
-                    }
-                }
-                ctx.request_repaint();
-            });
-        });
-    }
-
-    fn render_settings_page(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &egui::Context,
-        card_width: f32,
-        card_left_indent: f32,
-    ) {
-        let card_frame = egui::Frame::NONE
-            .fill(ui.visuals().widgets.noninteractive.bg_fill)
-            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(16, 12));
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(card_left_indent);
-                    ui.allocate_ui(egui::vec2(card_width, 0.0), |ui| {
-                        ui.vertical(|ui| {
-                            // Section 1: General Settings
-                            ui.label(egui::RichText::new("General Settings").strong().size(14.0));
-                            ui.add_space(4.0);
-
-                            card_frame.show(ui, |ui| {
-                                ui.set_min_width(card_width - 32.0);
-                                ui.vertical(|ui| {
-                                    // Theme Settings
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new("Theme").strong().size(13.0));
-                                            ui.label(egui::RichText::new("Configure app color palette").small().color(ui.visuals().weak_text_color()));
-                                        });
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let mut current_theme = self.config.general.theme.clone();
-                                            egui::ComboBox::from_id_salt("theme_combobox")
-                                                .selected_text(match current_theme.as_str() {
-                                                    "dark" => "Dark",
-                                                    "light" => "Light",
-                                                    _ => "System",
-                                                })
-                                                .show_ui(ui, |ui| {
-                                                    let mut changed = false;
-                                                    changed |= ui.selectable_value(&mut current_theme, "system".to_string(), "System").changed();
-                                                    changed |= ui.selectable_value(&mut current_theme, "dark".to_string(), "Dark").changed();
-                                                    changed |= ui.selectable_value(&mut current_theme, "light".to_string(), "Light").changed();
-                                                    if changed {
-                                                        self.config.general.theme = current_theme;
-                                                        self.save_config();
-                                                    }
-                                                });
-                                        });
-                                    });
-
-                                    ui.add_space(10.0);
-                                    ui.separator();
-                                    ui.add_space(10.0);
-
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("Start with Windows")
-                                                    .strong()
-                                                    .size(13.0),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new("Launch Quotify when you sign in")
-                                                    .small()
-                                                    .color(ui.visuals().weak_text_color()),
-                                            );
-                                        });
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                let mut enabled =
-                                                    self.config.general.start_with_windows;
-                                                if ui.checkbox(&mut enabled, "").changed() {
-                                                    match crate::startup::set_enabled(enabled) {
-                                                        Ok(()) => {
-                                                            self.config.general.start_with_windows =
-                                                                enabled;
-                                                            self.save_config();
-                                                        }
-                                                        Err(err) => {
-                                                            tracing::error!(
-                                                                "Failed to update startup setting: {err}"
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    ui.add_space(10.0);
-                                    ui.separator();
-                                    ui.add_space(10.0);
-
-                                    // Refresh Interval Settings
-                                    ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new("Refresh Interval").strong().size(13.0));
-                                        ui.label(egui::RichText::new("Background update frequency").small().color(ui.visuals().weak_text_color()));
-                                        ui.add_space(4.0);
-                                        let mut interval = self.config.general.refresh_interval;
-                                        let slider = ui.add_sized(
-                                            egui::vec2(ui.available_width() - 12.0, 20.0),
-                                            egui::Slider::new(&mut interval, 10..=3600)
-                                                .suffix("s")
-                                                .show_value(true)
-                                                .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.4 })
-                                        );
-                                        if slider.changed() {
-                                            self.config.general.refresh_interval = interval;
-                                            self.save_config();
-                                        }
-                                    });
-
-                                    ui.add_space(10.0);
-                                    ui.separator();
-                                    ui.add_space(10.0);
-
-                                    // Network Proxy Settings
-                                    ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new("Network Proxy").strong().size(13.0));
-                                        ui.label(egui::RichText::new("Supports http://, https://, or socks5://").small().color(ui.visuals().weak_text_color()));
-                                        ui.add_space(4.0);
-                                        let mut proxy = self.config.network.proxy.clone();
-                                        let text_edit = ui.add(
-                                            egui::TextEdit::singleline(&mut proxy)
-                                                .desired_width(f32::INFINITY)
-                                                .hint_text("e.g. http://127.0.0.1:7890")
-                                        );
-                                        if text_edit.changed() {
-                                            self.config.network.proxy = proxy;
-                                            self.save_config();
-                                        }
-                                    });
-                                });
-                            });
-
-                            ui.add_space(16.0);
-
-                            // Section 2: Provider Configs
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Provider Settings").strong().size(14.0));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let btn_icon = if self.show_secrets { "\u{ED1A}" } else { "\u{E7B3}" };
-                                    let btn_tooltip = if self.show_secrets { "Hide Secrets" } else { "Show Secrets" };
-
-                                    ui.scope(|ui| {
-                                        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                                        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                                        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                                        let btn = ui.add_sized(
-                                            egui::vec2(24.0, 24.0),
-                                            egui::Button::new(
-                                                egui::RichText::new(btn_icon)
-                                                    .strong()
-                                                    .size(14.0)
-                                            )
-                                            .corner_radius(4)
-                                        ).on_hover_text(btn_tooltip);
-
-                                        if btn.hovered() {
-                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        }
-
-                                        if btn.clicked() {
-                                            self.show_secrets = !self.show_secrets;
-                                        }
-                                    });
-                                });
-                            });
-                            ui.add_space(4.0);
-
-                            card_frame.show(ui, |ui| {
-                                ui.set_min_width(card_width - 32.0);
-                                ui.vertical(|ui| {
-                                    // Dropdown selection to pick which provider to configure
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("Select Provider").strong().size(13.0));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let current_provider = self.selected_setting_provider.clone();
-                                            let catalog = provider_catalog();
-                                            let display_name = catalog.iter()
-                                                .find(|(id, _)| *id == current_provider)
-                                                .map(|(_, name)| *name)
-                                                .unwrap_or(&current_provider);
-
-                                            egui::ComboBox::from_id_salt("provider_select_combo")
-                                                .selected_text(display_name)
-                                                .show_ui(ui, |ui| {
-                                                    let mut selected = self.selected_setting_provider.clone();
-                                                    for (id, display) in catalog {
-                                                        if ui.selectable_value(&mut selected, id.to_string(), *display).clicked() {
-                                                            self.selected_setting_provider = selected.clone();
-                                                        }
-                                                    }
-                                                });
-                                        });
-                                    });
-
-                                    ui.add_space(10.0);
-                                    ui.separator();
-                                    ui.add_space(10.0);
-
-                                    // Render the fields for the selected provider
-                                    let provider_id = self.selected_setting_provider.clone();
-                                    let mut changed = false;
-
-                                    match provider_id.as_str() {
-                                        "deepseek" => {
-                                            let mut enabled = self.config.deepseek.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.deepseek.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
-                                            let text_edit = ui.add(
-                                                egui::TextEdit::singleline(&mut self.config.deepseek.api_key)
-                                                    .password(!self.show_secrets)
-                                                    .desired_width(f32::INFINITY)
-                                            );
-                                            if text_edit.changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "claude" => {
-                                            let mut enabled = self.config.claude.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.claude.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Session Key").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.session_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Access Token").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.access_token).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Auth File Path").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.claude.auth_file).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "codex" => {
-                                            let mut enabled = self.config.codex.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.codex.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("Auth File Path").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.codex.auth_file).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "gemini" => {
-                                            let mut enabled = self.config.gemini.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.gemini.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.gemini.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "antigravity" => {
-                                            let mut enabled = self.config.antigravity.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.antigravity.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.antigravity.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "opencode" => {
-                                            let mut enabled = self.config.opencode.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.opencode.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.opencode.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Workspace ID").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.opencode.workspace_id).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Auth Cookie").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.opencode.auth_cookie).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "mimo" => {
-                                            let mut enabled = self.config.mimo.enabled.unwrap_or(false);
-                                            if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                self.config.mimo.enabled = Some(enabled);
-                                                changed = true;
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new("API Key").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.mimo.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Service Token").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.mimo.service_token).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                            ui.add_space(6.0);
-                                            ui.label(egui::RichText::new("Cookie Header").strong().size(12.0));
-                                            if ui.add(egui::TextEdit::singleline(&mut self.config.mimo.cookie_header).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
-                                        "opencodego" => {
-                                            ui.label(egui::RichText::new("OpenCode Go is configured using the OpenCode settings. Please select 'OpenCode' from the dropdown to edit its configuration.").italics().color(ui.visuals().weak_text_color()));
-                                        }
-                                        // All standard ApiKeyProviderConfig providers
-                                        _ => {
-                                            let cfg = match provider_id.as_str() {
-                                                "openai" => Some(&mut self.config.openai),
-                                                "openrouter" => Some(&mut self.config.openrouter),
-                                                "moonshot" => Some(&mut self.config.moonshot),
-                                                "elevenlabs" => Some(&mut self.config.elevenlabs),
-                                                "doubao" => Some(&mut self.config.doubao),
-                                                "zai" => Some(&mut self.config.zai),
-                                                "venice" => Some(&mut self.config.venice),
-                                                "crof" => Some(&mut self.config.crof),
-                                                "synthetic" => Some(&mut self.config.synthetic),
-                                                "warp" => Some(&mut self.config.warp),
-                                                "groqcloud" => Some(&mut self.config.groqcloud),
-                                                "deepgram" => Some(&mut self.config.deepgram),
-                                                "llmproxy" => Some(&mut self.config.llmproxy),
-                                                "codebuff" => Some(&mut self.config.codebuff),
-                                                "kiro" => Some(&mut self.config.kiro),
-                                                "copilot" => Some(&mut self.config.copilot),
-                                                "azureopenai" => Some(&mut self.config.azureopenai),
-                                                "ollama" => Some(&mut self.config.ollama),
-                                                "minimax" => Some(&mut self.config.minimax),
-                                                "jetbrains" => Some(&mut self.config.jetbrains),
-                                                "kimi" => Some(&mut self.config.kimi),
-                                                "kilo" => Some(&mut self.config.kilo),
-                                                "augment" => Some(&mut self.config.augment),
-                                                "bedrock" => Some(&mut self.config.bedrock),
-                                                "vertexai" => Some(&mut self.config.vertexai),
-                                                "stepfun" => Some(&mut self.config.stepfun),
-                                                "abacus" => Some(&mut self.config.abacus),
-                                                "alibabatoken" => Some(&mut self.config.alibabatoken),
-                                                "t3chat" => Some(&mut self.config.t3chat),
-                                                "amp" => Some(&mut self.config.amp),
-                                                "mistral" => Some(&mut self.config.mistral),
-                                                "grok" => Some(&mut self.config.grok),
-                                                "cursor" => Some(&mut self.config.cursor),
-                                                "droid" => Some(&mut self.config.droid),
-                                                "windsurf" => Some(&mut self.config.windsurf),
-                                                _ => None,
-                                            };
-
-                                            if let Some(cfg) = cfg {
-                                                let mut enabled = cfg.enabled.unwrap_or(false);
-                                                if ui.checkbox(&mut enabled, "Enable Provider").changed() {
-                                                    cfg.enabled = Some(enabled);
-                                                    changed = true;
-                                                }
-                                                ui.add_space(8.0);
-                                                ui.label(egui::RichText::new("API Key / Token").strong().size(12.0));
-                                                render_secret_status(ui, provider_id.as_str(), "api_key", &[]);
-                                                if ui.add(egui::TextEdit::singleline(&mut cfg.api_key).password(!self.show_secrets).desired_width(f32::INFINITY)).changed() {
-                                                    changed = true;
-                                                }
-                                                ui.add_space(6.0);
-                                                ui.label(egui::RichText::new("Base URL").strong().size(12.0));
-                                                if ui.add(egui::TextEdit::singleline(&mut cfg.base_url).desired_width(f32::INFINITY)).changed() {
-                                                    changed = true;
-                                                }
-                                                ui.add_space(6.0);
-                                                ui.label(egui::RichText::new("Deployment").strong().size(12.0));
-                                                if ui.add(egui::TextEdit::singleline(&mut cfg.deployment).desired_width(f32::INFINITY)).changed() {
-                                                    changed = true;
-                                                }
-                                            } else {
-                                                ui.label("Unknown provider settings.");
-                                            }
-                                        }
-                                    }
-
-                                    if changed {
-                                        self.save_config();
-                                    }
-
-                                    ui.add_space(12.0);
-                                    ui.separator();
-                                    ui.add_space(10.0);
-                                    self.render_provider_test_controls(ui, &provider_id);
-                                });
-                            });
-
-                            ui.add_space(16.0);
-                            // Link/button to open file in Notepad directly
-                            ui.horizontal(|ui| {
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    if ui.link("Open config file").clicked() {
-                                        let _ = open_config_file(self.config_path.as_ref());
-                                    }
-                                    ui.separator();
-                                    if ui.link("Open logs").clicked() {
-                                        let _ = open_folder(&crate::diagnostics::log_dir());
-                                    }
-                                    ui.separator();
-                                    if ui.link("Create diagnostic report").clicked() {
-                                        match crate::diagnostics::write_diagnostic_report(
-                                            self.config_path.as_deref(),
-                                            Some(&self.history.read()),
-                                        ) {
-                                            Ok(path) => {
-                                                let _ = open_folder(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
-                                            }
-                                            Err(err) => tracing::error!("Failed to write diagnostic report: {err}"),
-                                        }
-                                    }
-                                });
-                            });
-                            ui.add_space(20.0);
-                        });
-                    });
-                });
-            });
-    }
-}
-
-fn normalize_version(v: &str) -> String {
-    let v = v.trim().trim_start_matches('v').trim_start_matches('V');
-    if let Some((main, _)) = v.split_once('-') {
-        main.to_string()
+fn open_config_file(config_path: Option<&PathBuf>) -> anyhow::Result<()> {
+    let path = if let Some(p) = config_path {
+        p.clone()
     } else {
-        v.to_string()
-    }
+        crate::config::AppConfig::config_path()
+    };
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", "notepad", &path.to_string_lossy()])
+        .spawn()?;
+    Ok(())
 }
 
-fn is_newer(current: &str, latest: &str) -> bool {
-    let current_norm = normalize_version(current);
-    let latest_norm = normalize_version(latest);
-
-    let current_parts: Vec<u32> = current_norm
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let latest_parts: Vec<u32> = latest_norm
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    for i in 0..std::cmp::max(current_parts.len(), latest_parts.len()) {
-        let curr = current_parts.get(i).cloned().unwrap_or(0);
-        let lat = latest_parts.get(i).cloned().unwrap_or(0);
-        if lat > curr {
-            return true;
-        } else if curr > lat {
-            return false;
-        }
-    }
-    false
+fn open_folder(path: &std::path::Path) -> anyhow::Result<()> {
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &path.to_string_lossy()])
+        .spawn()?;
+    Ok(())
 }
 
-fn open_browser(url: &str) {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
-}
+fn format_trend_summary(trend: &crate::usage_history::ProviderTrend) -> String {
+    let delta = trend
+        .previous_percent
+        .map(|previous| trend.latest_percent - previous)
+        .filter(|value| value.abs() >= 0.05)
+        .map(|value| {
+            if value >= 0.0 {
+                format!("+{value:.1} pp")
+            } else {
+                format!("{value:.1} pp")
+            }
+        })
+        .unwrap_or_else(|| "flat".to_string());
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_version() {
-        assert_eq!(normalize_version("v0.1.0-1-gae62f96"), "0.1.0");
-        assert_eq!(normalize_version("V1.2.3"), "1.2.3");
-        assert_eq!(normalize_version("2.0.0"), "2.0.0");
-    }
-
-    #[test]
-    fn test_is_newer() {
-        assert!(is_newer("v0.1.0-1-gae62f96", "v0.2.0"));
-        assert!(is_newer("0.1.0", "v0.1.1"));
-        assert!(!is_newer("v0.2.0", "v0.1.0"));
-        assert!(!is_newer("v0.1.0", "v0.1.0"));
-        assert!(is_newer("v0.1.0", "1.0.0"));
-    }
-
-    #[test]
-    fn test_reorder_provider_moves_to_item_row() {
-        let mut order = vec![
-            "openai".to_string(),
-            "claude".to_string(),
-            "codex".to_string(),
-        ];
-        let dragged = ProviderDragPayload {
-            provider: "codex".to_string(),
-            row: 2,
-        };
-
-        assert!(reorder_provider(
-            &mut order,
-            &dragged,
-            ProviderDropTarget::Item {
-                provider: "openai".to_string(),
-                row: 0,
-            },
-            &["openai", "claude", "codex"],
-        ));
-        assert_eq!(&order[..3], ["codex", "openai", "claude"]);
-    }
-
-    #[test]
-    fn test_reorder_provider_moves_to_visible_end_without_moving_hidden_slots() {
-        let mut order = vec![
-            "openai".to_string(),
-            "deepseek".to_string(),
-            "claude".to_string(),
-            "codex".to_string(),
-        ];
-        let dragged = ProviderDragPayload {
-            provider: "openai".to_string(),
-            row: 0,
-        };
-
-        assert!(reorder_provider(
-            &mut order,
-            &dragged,
-            ProviderDropTarget::End,
-            &["openai", "claude", "codex"],
-        ));
-        assert_eq!(&order[..4], ["claude", "deepseek", "codex", "openai"]);
-    }
-
-    #[test]
-    fn test_reorder_provider_ignores_same_position_drop() {
-        let mut order = vec![
-            "openai".to_string(),
-            "claude".to_string(),
-            "codex".to_string(),
-        ];
-        let dragged = ProviderDragPayload {
-            provider: "claude".to_string(),
-            row: 1,
-        };
-
-        assert!(!reorder_provider(
-            &mut order,
-            &dragged,
-            ProviderDropTarget::Item {
-                provider: "claude".to_string(),
-                row: 1,
-            },
-            &["openai", "claude", "codex"],
-        ));
-        assert_eq!(&order[..3], ["openai", "claude", "codex"]);
-    }
-
-    #[test]
-    fn test_enable_provider_for_test_does_not_require_ui_enabled_state() {
-        let mut config = crate::config::AppConfig::default();
-        config.openai.enabled = Some(false);
-        config.opencode.enabled = Some(false);
-
-        enable_provider_for_test(&mut config, "openai");
-        enable_provider_for_test(&mut config, "opencodego");
-
-        assert_eq!(config.openai.enabled, Some(true));
-        assert_eq!(config.opencode.enabled, Some(true));
-    }
+    format!(
+        "7d trend: avg {:.0}% · peak {:.0}% · {delta} · {} samples",
+        trend.average_percent, trend.peak_percent, trend.samples
+    )
 }
