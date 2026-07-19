@@ -23,25 +23,25 @@ struct ClaudeOauth {
     #[serde(alias = "accessToken")]
     access_token: Option<String>,
     #[serde(alias = "refreshToken")]
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     refresh_token: Option<String>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OrgResponse {
     uuid: String,
     name: Option<String>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct UsageResponse {
     daily_usage: Option<WindowUsage>,
     session_limit: Option<WindowUsage>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct WindowUsage {
     used: Option<f64>,
@@ -74,7 +74,7 @@ struct ClaudeSettingsEnv {
     anthropic_base_url: Option<String>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct StatsCacheFile {
     #[serde(default)]

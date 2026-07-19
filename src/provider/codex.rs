@@ -40,20 +40,20 @@ struct CodexTokens {
     #[serde(default)]
     access_token: Option<String>,
     #[serde(default)]
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     refresh_token: Option<String>,
     #[serde(default)]
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     account_id: Option<String>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CodexUsageResponse {
     usage: Option<CodexUsageData>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CodexUsageData {
     rate_limits: Option<CodexRateLimits>,

@@ -324,10 +324,9 @@ fn parse_usage_block(label: &str, block: &str) -> Option<UsageWindow> {
 
     let used_percent = if let Some(caps) = re_style_width.captures(block) {
         caps[1].parse::<f64>().unwrap_or(0.0)
-    } else if let Some(caps) = re_text_pct.captures(block) {
-        caps[1].parse::<f64>().unwrap_or(0.0)
     } else {
-        return None;
+        let caps = re_text_pct.captures(block)?;
+        caps[1].parse::<f64>().unwrap_or(0.0)
     };
 
     let re_iso_time = Regex::new(r#"(?:data-time|datetime)="([^"]+)""#).unwrap();
