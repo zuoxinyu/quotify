@@ -333,12 +333,13 @@ impl ClaudeProvider {
 
     fn read_settings_env() -> Option<(String, Option<String>)> {
         if let Ok(admin_key) = std::env::var("ANTHROPIC_ADMIN_KEY")
-            && !admin_key.is_empty() {
-                let base_url = std::env::var("ANTHROPIC_BASE_URL")
-                    .ok()
-                    .filter(|u| !u.is_empty());
-                return Some((admin_key, base_url));
-            }
+            && !admin_key.is_empty()
+        {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .ok()
+                .filter(|u| !u.is_empty());
+            return Some((admin_key, base_url));
+        }
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|k| !k.is_empty())?;

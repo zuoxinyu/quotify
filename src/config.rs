@@ -238,7 +238,11 @@ impl AppConfig {
             let mut config: AppConfig = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config from {:?}", p))?;
 
-            if config.general.active_provider.eq_ignore_ascii_case("opencodego") {
+            if config
+                .general
+                .active_provider
+                .eq_ignore_ascii_case("opencodego")
+            {
                 config.general.active_provider = "opencode".to_string();
             }
             for item in &mut config.general.provider_order {
@@ -252,10 +256,11 @@ impl AppConfig {
         if !path.exists() {
             let backup_path = path.with_extension("toml.bak");
             if backup_path.exists()
-                && let Ok(config) = load_impl(&backup_path) {
-                    let _ = config.save_to(path);
-                    return Ok(config);
-                }
+                && let Ok(config) = load_impl(&backup_path)
+            {
+                let _ = config.save_to(path);
+                return Ok(config);
+            }
             let config = Self::default();
             config.save_to(path)?;
             return Ok(config);
@@ -278,7 +283,10 @@ impl AppConfig {
                             return Ok(config);
                         }
                         Err(backup_err) => {
-                            tracing::error!("Failed to load config from backup as well: {:?}", backup_err);
+                            tracing::error!(
+                                "Failed to load config from backup as well: {:?}",
+                                backup_err
+                            );
                         }
                     }
                 }
@@ -306,10 +314,15 @@ impl AppConfig {
         let tmp_path = path.with_extension("toml.tmp");
         {
             use std::io::Write;
-            let mut file = std::fs::File::create(&tmp_path)
-                .with_context(|| format!("Failed to create temporary config file {:?}", tmp_path))?;
-            file.write_all(content.as_bytes())
-                .with_context(|| format!("Failed to write content to temporary config file {:?}", tmp_path))?;
+            let mut file = std::fs::File::create(&tmp_path).with_context(|| {
+                format!("Failed to create temporary config file {:?}", tmp_path)
+            })?;
+            file.write_all(content.as_bytes()).with_context(|| {
+                format!(
+                    "Failed to write content to temporary config file {:?}",
+                    tmp_path
+                )
+            })?;
             file.sync_all()
                 .with_context(|| format!("Failed to sync temporary config file {:?}", tmp_path))?;
         }

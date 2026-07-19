@@ -322,12 +322,12 @@ impl AntigravityProvider {
                 .send()
                 .await
                 && resp.status().is_success()
-                    && let Ok(json) = resp.json::<serde_json::Value>().await
-                        && (json.get("response").and_then(|r| r.get("groups")).is_some()
-                            || json.get("groups").is_some())
-                        {
-                            return Ok(QuotaOrSummary::Summary(json));
-                        }
+                && let Ok(json) = resp.json::<serde_json::Value>().await
+                && (json.get("response").and_then(|r| r.get("groups")).is_some()
+                    || json.get("groups").is_some())
+            {
+                return Ok(QuotaOrSummary::Summary(json));
+            }
         }
 
         // Fallback to retrieveUserQuota
@@ -384,12 +384,13 @@ impl AntigravityProvider {
             .send()
             .await
             && resp.status().is_success()
-                && let Ok(json) = resp.json::<serde_json::Value>().await {
-                    let parsed = parse_antigravity_quota_summary(&json);
-                    if !parsed.is_empty() {
-                        return Ok(parsed);
-                    }
-                }
+            && let Ok(json) = resp.json::<serde_json::Value>().await
+        {
+            let parsed = parse_antigravity_quota_summary(&json);
+            if !parsed.is_empty() {
+                return Ok(parsed);
+            }
+        }
 
         // 2. Fall back to GetAvailableModels if summary fails
         let url = format!("{base_url}{ANTIGRAVITY_GET_AVAILABLE_MODELS_PATH}");
@@ -1130,31 +1131,32 @@ fn collect_quota_entries(
                 .and_then(number_value);
 
             if let Some(remaining) = remaining
-                && let Some(ref model_id) = current_model_id {
-                    let remaining_percent = if remaining <= 1.0 {
-                        remaining * 100.0
-                    } else {
-                        remaining
-                    }
-                    .clamp(0.0, 100.0);
-
-                    let reset_time = string_field(value, &["resetTime", "reset_time", "resetsAt"])
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.to_utc());
-
-                    let mut final_window = current_window;
-                    let w = detect_window_type(model_id);
-                    if w != QuotaWindowType::Unknown {
-                        final_window = w;
-                    }
-
-                    out.push(AntigravityQuotaEntry {
-                        model_id: model_id.clone(),
-                        remaining_percent,
-                        reset_time,
-                        window_type: final_window,
-                    });
+                && let Some(ref model_id) = current_model_id
+            {
+                let remaining_percent = if remaining <= 1.0 {
+                    remaining * 100.0
+                } else {
+                    remaining
                 }
+                .clamp(0.0, 100.0);
+
+                let reset_time = string_field(value, &["resetTime", "reset_time", "resetsAt"])
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.to_utc());
+
+                let mut final_window = current_window;
+                let w = detect_window_type(model_id);
+                if w != QuotaWindowType::Unknown {
+                    final_window = w;
+                }
+
+                out.push(AntigravityQuotaEntry {
+                    model_id: model_id.clone(),
+                    remaining_percent,
+                    reset_time,
+                    window_type: final_window,
+                });
+            }
 
             for (key, child) in map {
                 let mut child_window = current_window;

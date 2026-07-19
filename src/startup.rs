@@ -99,7 +99,8 @@ pub fn is_enabled() -> Result<bool> {
 
 pub fn verify_and_sync_path() -> Result<()> {
     if is_enabled()? {
-        let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
+        let current_exe =
+            std::env::current_exe().context("Failed to resolve current executable")?;
         let current_command = format!("\"{}\" tray", current_exe.display());
 
         let name = wide_null(VALUE_NAME);
@@ -133,14 +134,15 @@ pub fn verify_and_sync_path() -> Result<()> {
                 wide
             };
             if let Ok(existing_command) = String::from_utf16(wide_stripped)
-                && existing_command != current_command {
-                    tracing::info!(
-                        "Startup path mismatch detected (existing: {}, current: {}). Updating path.",
-                        existing_command,
-                        current_command
-                    );
-                    set_enabled(true)?;
-                }
+                && existing_command != current_command
+            {
+                tracing::info!(
+                    "Startup path mismatch detected (existing: {}, current: {}). Updating path.",
+                    existing_command,
+                    current_command
+                );
+                set_enabled(true)?;
+            }
         }
     }
     Ok(())

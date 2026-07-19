@@ -86,7 +86,9 @@ impl OpenCodeProvider {
             return Ok(cookie);
         }
 
-        anyhow::bail!("OpenCode auth cookie not found. Please configure it in your config file or set the OPENCODE_AUTH_COOKIE env var.")
+        anyhow::bail!(
+            "OpenCode auth cookie not found. Please configure it in your config file or set the OPENCODE_AUTH_COOKIE env var."
+        )
     }
 }
 

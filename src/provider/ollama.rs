@@ -23,7 +23,10 @@ impl OllamaProvider {
     }
 
     fn resolve_api_key(&self) -> Option<String> {
-        if !self.api_key.trim().is_empty() && !self.api_key.contains('=') && !self.api_key.contains(';') {
+        if !self.api_key.trim().is_empty()
+            && !self.api_key.contains('=')
+            && !self.api_key.contains(';')
+        {
             return Some(self.api_key.trim().to_string());
         }
         std::env::var("OLLAMA_API_KEY")
@@ -32,7 +35,9 @@ impl OllamaProvider {
     }
 
     fn resolve_cookie(&self) -> Option<String> {
-        if !self.api_key.trim().is_empty() && (self.api_key.contains('=') || self.api_key.contains(';')) {
+        if !self.api_key.trim().is_empty()
+            && (self.api_key.contains('=') || self.api_key.contains(';'))
+        {
             return Some(cookie_header(self.api_key.trim()));
         }
         std::env::var("OLLAMA_COOKIE")
@@ -176,10 +181,14 @@ impl Provider for OllamaProvider {
         // If we don't have a cookie and also don't have a standard API key configured, trigger login
         if cookie.is_none() && self.resolve_api_key().is_none() {
             tracing::info!("Ollama: No credentials found, launching WebView login...");
-            match tokio::task::spawn_blocking(crate::webview_login::ollama_login_and_get_cookie).await? {
+            match tokio::task::spawn_blocking(crate::webview_login::ollama_login_and_get_cookie)
+                .await?
+            {
                 Ok(fresh_cookie) => {
                     if let Err(err) = crate::secrets::set("ollama", "auth_cookie", &fresh_cookie) {
-                        tracing::error!("Failed to store Ollama cookie in Windows Credential Manager: {err}");
+                        tracing::error!(
+                            "Failed to store Ollama cookie in Windows Credential Manager: {err}"
+                        );
                     }
                     cookie = Some(fresh_cookie);
                 }
@@ -193,20 +202,34 @@ impl Provider for OllamaProvider {
             match self.fetch_settings_usage(&cookie_str).await {
                 Ok(data) => return Ok(data),
                 Err(err) => {
-                    tracing::warn!("Ollama settings page fetch failed: {err}. Retrying with WebView login...");
-                    match tokio::task::spawn_blocking(crate::webview_login::ollama_login_and_get_cookie).await? {
+                    tracing::warn!(
+                        "Ollama settings page fetch failed: {err}. Retrying with WebView login..."
+                    );
+                    match tokio::task::spawn_blocking(
+                        crate::webview_login::ollama_login_and_get_cookie,
+                    )
+                    .await?
+                    {
                         Ok(fresh_cookie) => {
-                            if let Err(err) = crate::secrets::set("ollama", "auth_cookie", &fresh_cookie) {
-                                tracing::error!("Failed to store Ollama cookie in Windows Credential Manager: {err}");
+                            if let Err(err) =
+                                crate::secrets::set("ollama", "auth_cookie", &fresh_cookie)
+                            {
+                                tracing::error!(
+                                    "Failed to store Ollama cookie in Windows Credential Manager: {err}"
+                                );
                             }
                             match self.fetch_settings_usage(&fresh_cookie).await {
                                 Ok(data) => return Ok(data),
                                 Err(err2) => {
-                                    tracing::warn!("Ollama settings page fetch failed again with fresh cookie: {err2}");
+                                    tracing::warn!(
+                                        "Ollama settings page fetch failed again with fresh cookie: {err2}"
+                                    );
                                     if self.resolve_api_key().is_some() {
                                         return self.fetch_api_usage().await;
                                     } else {
-                                        anyhow::bail!("Failed to fetch Ollama settings usage: {err2}");
+                                        anyhow::bail!(
+                                            "Failed to fetch Ollama settings usage: {err2}"
+                                        );
                                     }
                                 }
                             }
@@ -216,7 +239,9 @@ impl Provider for OllamaProvider {
                             if self.resolve_api_key().is_some() {
                                 return self.fetch_api_usage().await;
                             } else {
-                                anyhow::bail!("Ollama settings page fetch failed: {err} and login failed: {login_err}");
+                                anyhow::bail!(
+                                    "Ollama settings page fetch failed: {err} and login failed: {login_err}"
+                                );
                             }
                         }
                     }
@@ -237,7 +262,10 @@ fn cookie_header(raw: &str) -> String {
     if raw.contains('=') {
         raw.to_string()
     } else {
-        format!("__Host-next-auth.session-token={}; __Secure-session={}; next-auth.session-token={}", raw, raw, raw)
+        format!(
+            "__Host-next-auth.session-token={}; __Secure-session={}; next-auth.session-token={}",
+            raw, raw, raw
+        )
     }
 }
 
@@ -258,8 +286,17 @@ fn parse_settings_html(html: &str) -> Vec<UsageWindow> {
     windows
 }
 
-fn find_window_for_label(label: &str, keyword: &str, html_lower: &str, html: &str) -> Option<UsageWindow> {
-    let other_keyword = if keyword == "session" { "weekly" } else { "session" };
+fn find_window_for_label(
+    label: &str,
+    keyword: &str,
+    html_lower: &str,
+    html: &str,
+) -> Option<UsageWindow> {
+    let other_keyword = if keyword == "session" {
+        "weekly"
+    } else {
+        "session"
+    };
 
     let mut start = 0;
     while let Some(idx) = html_lower[start..].find(keyword) {
@@ -294,7 +331,9 @@ fn parse_usage_block(label: &str, block: &str) -> Option<UsageWindow> {
     };
 
     let re_iso_time = Regex::new(r#"(?:data-time|datetime)="([^"]+)""#).unwrap();
-    let re_standalone_iso = Regex::new(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b").unwrap();
+    let re_standalone_iso =
+        Regex::new(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b")
+            .unwrap();
 
     let resets_at = if let Some(caps) = re_iso_time.captures(block) {
         chrono::DateTime::parse_from_rfc3339(caps[1].trim())

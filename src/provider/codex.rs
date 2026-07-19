@@ -229,9 +229,10 @@ impl Provider for CodexProvider {
 
             if let Ok(r) = reset_resp
                 && r.status().is_success()
-                    && let Ok(parsed) = r.json::<super::CodexResetCredits>().await {
-                        codex_reset_credits = Some(parsed);
-                    }
+                && let Ok(parsed) = r.json::<super::CodexResetCredits>().await
+            {
+                codex_reset_credits = Some(parsed);
+            }
 
             let resp = self
                 .client
@@ -374,16 +375,17 @@ impl Provider for CodexProvider {
         }
 
         if let Some(resets) = codex_reset_credits
-            && let Ok(json_str) = serde_json::to_string(&resets) {
-                windows.push(UsageWindow {
-                    label: RESET_CREDITS_LABEL.to_string(),
-                    used_percent: 0.0,
-                    limit: None,
-                    used: None,
-                    unit: Some(json_str),
-                    resets_at: None,
-                });
-            }
+            && let Ok(json_str) = serde_json::to_string(&resets)
+        {
+            windows.push(UsageWindow {
+                label: RESET_CREDITS_LABEL.to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: None,
+                unit: Some(json_str),
+                resets_at: None,
+            });
+        }
 
         if windows.is_empty() {
             windows.push(UsageWindow {

@@ -15,9 +15,9 @@ mod tray;
 mod usage_history;
 mod version;
 
-use gpui::prelude::*;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use gpui::prelude::*;
 use parking_lot::{Mutex, RwLock};
 use provider::{
     Provider, UsageData, abacus::AbacusProvider, alibabatoken::AlibabaTokenProvider,
@@ -53,8 +53,7 @@ pub fn trigger_gui_update() {
 
 pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static MICA_DARK_MODE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static MICA_DARK_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static SYSTEM_SLEEPING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
@@ -1097,7 +1096,9 @@ fn main() -> Result<()> {
                         if single_instance::activate_existing_instance() {
                             tracing::info!("Activated existing Quotify instance.");
                         } else {
-                            tracing::error!("Quotify is already running, but could not activate the existing instance: {err}");
+                            tracing::error!(
+                                "Quotify is already running, but could not activate the existing instance: {err}"
+                            );
                             return Err(err);
                         }
                     }
@@ -1176,8 +1177,7 @@ fn configured_fetch_order(config: &config::AppConfig) -> Vec<String> {
     }
 
     for name in PROVIDER_ORDER {
-        if !names.iter().any(|existing| existing == name)
-            && create_provider(name, config).is_some()
+        if !names.iter().any(|existing| existing == name) && create_provider(name, config).is_some()
         {
             names.push(name.to_string());
         }
@@ -1366,23 +1366,29 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let active_provider_bg_tray = active_provider.clone();
     let history_bg_tray = history.clone();
     std::thread::spawn(move || {
-        let tray_controller = Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
+        let tray_controller =
+            Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
         tray_tx.send(tray_controller.clone()).unwrap();
 
         // Set initial loading icon before data is fetched
         let (initial_icon, tooltip) = {
             let d = data_bg_tray.read();
-            let d_resolved: Vec<UsageData> = d.iter().map(|item| {
-                if item.error.is_some() {
-                    if let Some(cached) = history_bg_tray.read().latest_successful_for(&item.provider) {
-                        cached
+            let d_resolved: Vec<UsageData> = d
+                .iter()
+                .map(|item| {
+                    if item.error.is_some() {
+                        if let Some(cached) =
+                            history_bg_tray.read().latest_successful_for(&item.provider)
+                        {
+                            cached
+                        } else {
+                            item.clone()
+                        }
                     } else {
                         item.clone()
                     }
-                } else {
-                    item.clone()
-                }
-            }).collect();
+                })
+                .collect();
             let active_provider = active_provider_bg_tray.read();
             let icon = icon::generate_icon(&d_resolved, active_provider_option(&active_provider));
             let tooltip = icon::tray_tooltip(&d_resolved, active_provider_option(&active_provider));
@@ -1441,17 +1447,22 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
                 // Regenerate HICON
                 let d = data_bg.read();
-                let d_resolved: Vec<UsageData> = d.iter().map(|item| {
-                    if item.error.is_some() {
-                        if let Some(cached) = history_bg.read().latest_successful_for(&item.provider) {
-                            cached
+                let d_resolved: Vec<UsageData> = d
+                    .iter()
+                    .map(|item| {
+                        if item.error.is_some() {
+                            if let Some(cached) =
+                                history_bg.read().latest_successful_for(&item.provider)
+                            {
+                                cached
+                            } else {
+                                item.clone()
+                            }
                         } else {
                             item.clone()
                         }
-                    } else {
-                        item.clone()
-                    }
-                }).collect();
+                    })
+                    .collect();
                 let active_provider_bg = active_provider_bg.read();
                 let active_provider = active_provider_option(&active_provider_bg);
                 let new_icon = icon::generate_icon(&d_resolved, active_provider);
@@ -1521,7 +1532,10 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
         let window_options = gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
-                origin: gpui::Point { x: gpui::px(pos[0] as f32), y: gpui::px(pos[1] as f32) },
+                origin: gpui::Point {
+                    x: gpui::px(pos[0] as f32),
+                    y: gpui::px(pos[1] as f32),
+                },
                 size: gpui::size(gpui::px(win_w), gpui::px(win_h)),
             })),
             titlebar: None,
@@ -1639,10 +1653,13 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             async move {
                 while update_rx.recv().await.is_some() {
                     cx.update(|cx| {
-                        win_w.update(cx, |_, _, cx| {
-                            cx.notify();
-                        }).ok();
-                    }).ok();
+                        win_w
+                            .update(cx, |_, _, cx| {
+                                cx.notify();
+                            })
+                            .ok();
+                    })
+                    .ok();
                 }
             }
         })
@@ -1965,7 +1982,9 @@ unsafe extern "system" fn main_window_subclass(
                 let scale = window_scale_factor();
                 let physical_w = (400.0 * scale) as i32;
                 let physical_h = (520.0 * scale) as i32;
-                use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+                };
                 let _ = SetWindowPos(
                     hwnd,
                     None,
@@ -1976,7 +1995,8 @@ unsafe extern "system" fn main_window_subclass(
                     SWP_NOMOVE | SWP_NOZORDER,
                 );
 
-                let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
+                let (win_w, win_h) =
+                    actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
                 let pos = compute_popup_position(win_w, win_h);
                 *inactive_guard().lock() = Some(Instant::now() + Duration::from_millis(350));
                 apply_rounded_window_region(hwnd);
@@ -2015,10 +2035,12 @@ unsafe extern "system" fn main_window_subclass(
             }
             windows::Win32::UI::WindowsAndMessaging::WM_POWERBROADCAST => {
                 let power_event = wparam.0 as u32;
-                if power_event == 4 { // PBT_APMSUSPEND
+                if power_event == 4 {
+                    // PBT_APMSUSPEND
                     tracing::info!("System is suspending (sleeping). Pausing refresh.");
                     SYSTEM_SLEEPING.store(true, Ordering::SeqCst);
-                } else if power_event == 18 { // PBT_APMRESUMEAUTOMATIC
+                } else if power_event == 18 {
+                    // PBT_APMRESUMEAUTOMATIC
                     tracing::info!("System resumed from sleep. Triggering refresh.");
                     SYSTEM_SLEEPING.store(false, Ordering::SeqCst);
                     tray::request_refresh();
@@ -2054,7 +2076,7 @@ unsafe extern "system" fn main_window_subclass(
 fn window_scale_factor() -> f32 {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, GetDeviceCaps, LOGPIXELSX};
+        use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSX, ReleaseDC};
         unsafe {
             let hdc = GetDC(None);
             if !hdc.0.is_null() {

@@ -2205,17 +2205,20 @@ fn config_field_value(config: &crate::config::AppConfig, field: &str) -> String 
     }
 
     if let Some(provider) = field.strip_suffix("_key")
-        && let Some(config) = api_key_provider_config(config, provider) {
-            return config.api_key.clone();
-        }
+        && let Some(config) = api_key_provider_config(config, provider)
+    {
+        return config.api_key.clone();
+    }
     if let Some(provider) = field.strip_suffix("_url")
-        && let Some(config) = api_key_provider_config(config, provider) {
-            return config.base_url.clone();
-        }
+        && let Some(config) = api_key_provider_config(config, provider)
+    {
+        return config.base_url.clone();
+    }
     if let Some(provider) = field.strip_suffix("_dep")
-        && let Some(config) = api_key_provider_config(config, provider) {
-            return config.deployment.clone();
-        }
+        && let Some(config) = api_key_provider_config(config, provider)
+    {
+        return config.deployment.clone();
+    }
 
     String::new()
 }
@@ -2251,15 +2254,16 @@ fn set_config_field_value(
 
     for suffix in ["_key", "_url", "_dep"] {
         if let Some(provider) = field.strip_suffix(suffix)
-            && let Some(provider_config) = api_key_provider_config_mut(config, provider) {
-                match suffix {
-                    "_key" => provider_config.api_key = value,
-                    "_url" => provider_config.base_url = value,
-                    "_dep" => provider_config.deployment = value,
-                    _ => unreachable!(),
-                }
-                return true;
+            && let Some(provider_config) = api_key_provider_config_mut(config, provider)
+        {
+            match suffix {
+                "_key" => provider_config.api_key = value,
+                "_url" => provider_config.base_url = value,
+                "_dep" => provider_config.deployment = value,
+                _ => unreachable!(),
             }
+            return true;
+        }
     }
 
     false

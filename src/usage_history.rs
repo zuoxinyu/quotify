@@ -105,16 +105,13 @@ impl UsageHistory {
     }
 
     pub fn latest_successful_for(&self, provider: &str) -> Option<crate::provider::UsageData> {
-        self.entries
-            .iter()
-            .rev()
-            .find_map(|entry| {
-                entry
-                    .providers
-                    .iter()
-                    .find(|data| data.provider.eq_ignore_ascii_case(provider) && data.error.is_none())
-                    .cloned()
-            })
+        self.entries.iter().rev().find_map(|entry| {
+            entry
+                .providers
+                .iter()
+                .find(|data| data.provider.eq_ignore_ascii_case(provider) && data.error.is_none())
+                .cloned()
+        })
     }
 
     fn prune(&mut self, days: i64, max_entries: usize) {

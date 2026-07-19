@@ -30,15 +30,16 @@ pub fn clean_old_logs(days_to_keep: i64) {
             let path = entry.path();
             if path.is_file()
                 && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
-                    && file_name.starts_with("quotify.log")
-                        && let Ok(metadata) = entry.metadata()
-                            && let Ok(modified) = metadata.modified() {
-                                let modified_chrono: chrono::DateTime<chrono::Utc> = modified.into();
-                                let age = now.signed_duration_since(modified_chrono);
-                                if age.num_days() > days_to_keep {
-                                    let _ = std::fs::remove_file(path);
-                                }
-                            }
+                && file_name.starts_with("quotify.log")
+                && let Ok(metadata) = entry.metadata()
+                && let Ok(modified) = metadata.modified()
+            {
+                let modified_chrono: chrono::DateTime<chrono::Utc> = modified.into();
+                let age = now.signed_duration_since(modified_chrono);
+                if age.num_days() > days_to_keep {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
         }
     }
 }
@@ -117,8 +118,8 @@ pub fn setup_panic_hook() {
         // Display a Windows message box
         #[cfg(target_os = "windows")]
         unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
             use windows::core::w;
-            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
             let message = format!(
                 "Quotify has encountered a fatal error and has crashed.\n\n\

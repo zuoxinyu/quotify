@@ -224,19 +224,20 @@ impl Provider for MimoProvider {
         let mut credits = None;
         if resp.status().is_success()
             && let Ok(balance_resp) = resp.json::<MimoBalanceResponse>().await
-                && let Some(data) = balance_resp.data {
-                    let total = data
-                        .balance
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    let currency = data.currency.unwrap_or_else(|| "CNY".to_string());
-                    credits = Some(CreditsInfo {
-                        balance: total,
-                        currency,
-                        total_granted: None,
-                        topped_up: None,
-                    });
-                }
+            && let Some(data) = balance_resp.data
+        {
+            let total = data
+                .balance
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let currency = data.currency.unwrap_or_else(|| "CNY".to_string());
+            credits = Some(CreditsInfo {
+                balance: total,
+                currency,
+                total_granted: None,
+                topped_up: None,
+            });
+        }
 
         let mut windows = Vec::new();
 
@@ -299,18 +300,19 @@ impl Provider for MimoProvider {
 
             // If we didn't get credits from the balance API, try fallback to tokens remaining
             if credits.is_none()
-                && let Some(usage) = &data.usage {
-                    let total_limit: f64 = usage.items.iter().filter_map(|i| i.limit).sum();
-                    let total_used: f64 = usage.items.iter().filter_map(|i| i.used).sum();
-                    if total_limit > 0.0 {
-                        credits = Some(CreditsInfo {
-                            balance: total_limit - total_used,
-                            currency: "tokens".to_string(),
-                            total_granted: Some(total_limit),
-                            topped_up: None,
-                        });
-                    }
+                && let Some(usage) = &data.usage
+            {
+                let total_limit: f64 = usage.items.iter().filter_map(|i| i.limit).sum();
+                let total_used: f64 = usage.items.iter().filter_map(|i| i.used).sum();
+                if total_limit > 0.0 {
+                    credits = Some(CreditsInfo {
+                        balance: total_limit - total_used,
+                        currency: "tokens".to_string(),
+                        total_granted: Some(total_limit),
+                        topped_up: None,
+                    });
                 }
+            }
         }
 
         if windows.is_empty() {

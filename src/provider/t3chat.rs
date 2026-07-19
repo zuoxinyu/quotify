@@ -169,9 +169,10 @@ fn find_number(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
         serde_json::Value::Object(map) => {
             for (key, val) in map {
                 if keys.iter().any(|needle| key.eq_ignore_ascii_case(needle))
-                    && let Some(number) = val.as_f64().or_else(|| val.as_str()?.parse().ok()) {
-                        return Some(number);
-                    }
+                    && let Some(number) = val.as_f64().or_else(|| val.as_str()?.parse().ok())
+                {
+                    return Some(number);
+                }
             }
             None
         }
