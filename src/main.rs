@@ -51,9 +51,11 @@ pub fn trigger_gui_update() {
     }
 }
 
-pub static IS_MICA_ACTIVE: std::sync::atomic::AtomicBool =
+pub static IS_BACKDROP_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static MICA_DARK_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BACKDROP_DARK_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static BACKDROP_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
 pub static SYSTEM_SLEEPING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
@@ -104,6 +106,27 @@ pub const PROVIDER_ORDER: [&str; 42] = [
 
 fn inactive_guard() -> &'static Mutex<Option<Instant>> {
     IGNORE_INACTIVE_UNTIL.get_or_init(|| Mutex::new(None))
+}
+
+fn normalize_backdrop_setting(setting: &str) -> &'static str {
+    if setting.eq_ignore_ascii_case("mica") {
+        "mica"
+    } else if setting.eq_ignore_ascii_case("acrylic") {
+        "acrylic"
+    } else if setting.eq_ignore_ascii_case("none") {
+        "none"
+    } else {
+        // Preserve the stronger material introduced for dark mode, and use it for
+        // missing or invalid values from older configuration files.
+        "mica_alt"
+    }
+}
+
+fn current_backdrop_setting() -> String {
+    BACKDROP_SETTING
+        .get_or_init(|| RwLock::new("mica_alt".to_string()))
+        .read()
+        .clone()
 }
 
 #[derive(Parser)]
@@ -1552,7 +1575,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             ..Default::default()
         };
 
-        let mica_dark = match config_window.general.theme.as_str() {
+        let backdrop_dark = match config_window.general.theme.as_str() {
             "dark" => true,
             "light" => false,
             _ => matches!(
@@ -1560,6 +1583,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                 gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
             ),
         };
+        let backdrop_setting = config_window.general.backdrop.clone();
 
         let view = cx.new(|cx| {
             app::QuotifyApp::new(
@@ -1607,7 +1631,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                             window.appearance(),
                             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
                         );
-                        refresh_mica_backdrop(dark);
+                        refresh_current_backdrop(dark);
                     }
                     app::apply_component_theme(&theme_setting, Some(window), cx);
                     cx.notify();
@@ -1633,8 +1657,8 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             };
 
             let hwnd = shwnd.raw();
-            apply_mica_backdrop(hwnd, mica_dark);
-            // Mica becomes active after the first GPUI frame. Repaint immediately so
+            apply_backdrop(hwnd, backdrop_dark, &backdrop_setting);
+            // The backdrop becomes active after the first GPUI frame. Repaint immediately so
             // Quotify drops its opaque fallback fill and reveals the DWM backdrop.
             trigger_gui_update();
             apply_rounded_window_region(hwnd);
@@ -1839,28 +1863,37 @@ fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
     }
 }
 
-fn apply_mica_backdrop(hwnd: HWND, dark: bool) {
+fn apply_backdrop(hwnd: HWND, dark: bool, setting: &str) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Graphics::Dwm::{
-            DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+            DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
+            DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
+            DwmSetWindowAttribute,
         };
         use windows::Win32::UI::Controls::MARGINS;
 
-        MICA_DARK_MODE.store(dark, std::sync::atomic::Ordering::SeqCst);
-        IS_MICA_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        let setting = normalize_backdrop_setting(setting);
+        *BACKDROP_SETTING
+            .get_or_init(|| RwLock::new("mica_alt".to_string()))
+            .write() = setting.to_string();
+        BACKDROP_DARK_MODE.store(dark, std::sync::atomic::Ordering::SeqCst);
+        IS_BACKDROP_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         if hwnd.0.is_null() {
-            tracing::warn!("apply_mica_backdrop called with null HWND");
+            tracing::warn!("apply_backdrop called with null HWND");
             return;
         }
 
         let dark_mode = if dark { 1_i32 } else { 0_i32 };
-        let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
+        let margins = if setting == "none" {
+            MARGINS::default()
+        } else {
+            MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            }
         };
 
         unsafe {
@@ -1871,11 +1904,16 @@ fn apply_mica_backdrop(hwnd: HWND, dark: bool) {
                 std::mem::size_of_val(&dark_mode) as u32,
             );
             if let Err(err) = dark_result {
-                tracing::warn!("Failed to set Mica theme: {err}");
+                tracing::warn!("Failed to set backdrop theme: {err}");
             }
 
             let frame_result = DwmExtendFrameIntoClientArea(hwnd, &margins);
-            let backdrop_type = DWMSBT_MAINWINDOW.0;
+            let (backdrop_type, backdrop_name) = match setting {
+                "mica" => (DWMSBT_MAINWINDOW.0, "Mica"),
+                "acrylic" => (DWMSBT_TRANSIENTWINDOW.0, "Acrylic"),
+                "none" => (DWMSBT_NONE.0, "None"),
+                _ => (DWMSBT_TABBEDWINDOW.0, "Mica Alt"),
+            };
             let backdrop_result = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_SYSTEMBACKDROP_TYPE,
@@ -1883,27 +1921,44 @@ fn apply_mica_backdrop(hwnd: HWND, dark: bool) {
                 std::mem::size_of_val(&backdrop_type) as u32,
             );
 
-            // Windows 11 build 22000 predates DWMWA_SYSTEMBACKDROP_TYPE. Use the
-            // former private Mica attribute only when the supported API is rejected.
-            let effect_result = backdrop_result.or_else(|_| {
-                let mica_attribute = windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(1029);
-                let enabled = 1_i32;
-                DwmSetWindowAttribute(
-                    hwnd,
-                    mica_attribute,
-                    &enabled as *const _ as *const _,
-                    std::mem::size_of_val(&enabled) as u32,
-                )
-            });
+            // Windows 11 build 22000 predates DWMWA_SYSTEMBACKDROP_TYPE. Its former
+            // private attribute can enable/disable Mica, but has no Acrylic equivalent.
+            let effect_result = match setting {
+                "mica" | "mica_alt" => backdrop_result.or_else(|_| {
+                    let mica_attribute = windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(1029);
+                    let enabled = 1_i32;
+                    DwmSetWindowAttribute(
+                        hwnd,
+                        mica_attribute,
+                        &enabled as *const _ as *const _,
+                        std::mem::size_of_val(&enabled) as u32,
+                    )
+                }),
+                "none" => backdrop_result.or_else(|_| {
+                    let mica_attribute = windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(1029);
+                    let disabled = 0_i32;
+                    DwmSetWindowAttribute(
+                        hwnd,
+                        mica_attribute,
+                        &disabled as *const _ as *const _,
+                        std::mem::size_of_val(&disabled) as u32,
+                    )
+                }),
+                _ => backdrop_result,
+            };
 
             match (frame_result, effect_result) {
                 (Ok(()), Ok(())) => {
-                    IS_MICA_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-                    tracing::info!("Mica backdrop enabled for HWND {:?}", hwnd.0);
+                    if setting == "none" {
+                        tracing::info!("DWM backdrop disabled for HWND {:?}", hwnd.0);
+                    } else {
+                        IS_BACKDROP_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+                        tracing::info!("{backdrop_name} backdrop enabled for HWND {:?}", hwnd.0);
+                    }
                 }
                 (frame, effect) => {
                     tracing::warn!(
-                        "Mica backdrop unavailable (extend frame: {frame:?}, backdrop: {effect:?})"
+                        "{backdrop_name} backdrop unavailable (extend frame: {frame:?}, backdrop: {effect:?})"
                     );
                 }
             }
@@ -1911,11 +1966,16 @@ fn apply_mica_backdrop(hwnd: HWND, dark: bool) {
     }
 }
 
-pub(crate) fn refresh_mica_backdrop(dark: bool) {
+pub(crate) fn refresh_backdrop(dark: bool, setting: &str) {
     if let Some(hwnd) = tray::MAIN_HWND.get() {
-        apply_mica_backdrop(hwnd.raw(), dark);
+        apply_backdrop(hwnd.raw(), dark, setting);
         trigger_gui_update();
     }
+}
+
+fn refresh_current_backdrop(dark: bool) {
+    let setting = current_backdrop_setting();
+    refresh_backdrop(dark, &setting);
 }
 fn apply_rounded_window_region(hwnd: HWND) {
     #[cfg(target_os = "windows")]
@@ -2048,7 +2108,8 @@ unsafe extern "system" fn main_window_subclass(
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             WM_DWMCOMPOSITIONCHANGED => {
-                apply_mica_backdrop(hwnd, MICA_DARK_MODE.load(Ordering::SeqCst));
+                let setting = current_backdrop_setting();
+                apply_backdrop(hwnd, BACKDROP_DARK_MODE.load(Ordering::SeqCst), &setting);
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             WM_SIZE => {

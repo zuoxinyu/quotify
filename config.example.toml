@@ -8,6 +8,7 @@
 refresh_interval = 300
 active_provider = ""                # Optional primary provider for tray icon/tip, e.g. "codex", "opencode", "claude"
 start_with_windows = false          # Register Quotify under HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+backdrop = "mica_alt"               # "mica", "mica_alt", "acrylic", or "none"
 provider_order = [
   "claude",
   "codex",

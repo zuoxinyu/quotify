@@ -12,6 +12,8 @@ pub struct GeneralConfig {
     pub provider_order: Vec<String>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_backdrop")]
+    pub backdrop: String,
     #[serde(default)]
     pub start_with_windows: bool,
 }
@@ -24,6 +26,10 @@ fn default_theme() -> String {
     "system".to_string()
 }
 
+fn default_backdrop() -> String {
+    "mica_alt".to_string()
+}
+
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -31,6 +37,7 @@ impl Default for GeneralConfig {
             active_provider: String::new(),
             provider_order: Vec::new(),
             theme: default_theme(),
+            backdrop: default_backdrop(),
             start_with_windows: false,
         }
     }
@@ -339,7 +346,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_general_config_theme_defaults() {
+    fn test_general_config_appearance_defaults() {
         let toml_str = r#"
             refresh_interval = 300
             active_provider = "openai"
@@ -347,15 +354,18 @@ mod tests {
         "#;
         let gen_config: GeneralConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(gen_config.theme, "system");
+        assert_eq!(gen_config.backdrop, "mica_alt");
 
         let toml_str_with_theme = r#"
             refresh_interval = 300
             active_provider = "openai"
             provider_order = []
             theme = "dark"
+            backdrop = "acrylic"
         "#;
         let gen_config2: GeneralConfig = toml::from_str(toml_str_with_theme).unwrap();
         assert_eq!(gen_config2.theme, "dark");
+        assert_eq!(gen_config2.backdrop, "acrylic");
     }
 
     #[test]

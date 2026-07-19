@@ -320,27 +320,38 @@ impl QuotifyApp {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        let client = reqwest::Client::builder()
-                            .timeout(Duration::from_secs(10))
+                        // GPUI's background executor is not a Tokio executor. Polling a
+                        // reqwest request on it panics because no Tokio reactor is active.
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
                             .build()?;
-                        let resp = client
-                            .get("https://api.github.com/repos/zuoxinyu/quotify/releases/latest")
-                            .header("User-Agent", "Quotify-App")
-                            .send()
-                            .await?
-                            .json::<serde_json::Value>()
-                            .await?;
+                        rt.block_on(async {
+                            let client = reqwest::Client::builder()
+                                .timeout(Duration::from_secs(10))
+                                .build()?;
+                            let resp = client
+                                .get(
+                                    "https://api.github.com/repos/zuoxinyu/quotify/releases/latest",
+                                )
+                                .header("User-Agent", "Quotify-App")
+                                .send()
+                                .await?
+                                .error_for_status()?
+                                .json::<serde_json::Value>()
+                                .await?;
 
-                        let latest_tag = resp["tag_name"]
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("No tag_name"))?
-                            .to_string();
-                        let release_url = resp["html_url"]
-                            .as_str()
-                            .unwrap_or("https://github.com/zuoxinyu/quotify/releases")
-                            .to_string();
-                        let ret: anyhow::Result<(String, String)> = Ok((latest_tag, release_url));
-                        ret
+                            let latest_tag = resp["tag_name"]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("No tag_name"))?
+                                .to_string();
+                            let release_url = resp["html_url"]
+                                .as_str()
+                                .unwrap_or("https://github.com/zuoxinyu/quotify/releases")
+                                .to_string();
+                            let result: anyhow::Result<(String, String)> =
+                                Ok((latest_tag, release_url));
+                            result
+                        })
                     })
                     .await;
 
@@ -389,8 +400,8 @@ impl Render for QuotifyApp {
         };
 
         // UI style tokens (single hex parameter for gpui::rgba in 0.2.2)
-        let mica_active = crate::IS_MICA_ACTIVE.load(Ordering::SeqCst);
-        let bg_fill = if mica_active {
+        let backdrop_active = crate::IS_BACKDROP_ACTIVE.load(Ordering::SeqCst);
+        let bg_fill = if backdrop_active {
             gpui::rgba(0x00000000)
         } else if is_dark {
             gpui::rgb(0x202020)
@@ -1244,6 +1255,7 @@ impl QuotifyApp {
     ) -> AnyElement {
         let start_with_windows_app = cx.entity().downgrade();
         let theme_app = cx.entity().downgrade();
+        let backdrop_app = cx.entity().downgrade();
         let secondary_text = if is_dark {
             gpui::rgba(0xffffff99)
         } else {
@@ -1336,8 +1348,64 @@ impl QuotifyApp {
                                                             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
                                                         ),
                                                     };
-                                                    crate::refresh_mica_backdrop(dark);
+                                                    let backdrop = this.config.general.backdrop.clone();
+                                                    crate::refresh_backdrop(dark, &backdrop);
                                                     apply_component_theme(t, Some(window), view_cx);
+                                                    view_cx.notify();
+                                                }).ok();
+                                            })
+                                    }))
+                            )
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // Windows backdrop material
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Backdrop"))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Windows material effect"))
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .children([
+                                        ("mica", "Mica"),
+                                        ("mica_alt", "Mica Alt"),
+                                        ("acrylic", "Acrylic"),
+                                        ("none", "None"),
+                                    ].into_iter().enumerate().map(|(idx, (value, label))| {
+                                        let configured = match self.config.general.backdrop.as_str() {
+                                            "mica" | "mica_alt" | "acrylic" | "none" => self.config.general.backdrop.as_str(),
+                                            _ => "mica_alt",
+                                        };
+                                        let is_sel = configured == value;
+                                        let backdrop_app = backdrop_app.clone();
+                                        Button::new(("backdrop_btn", idx))
+                                            .label(label)
+                                            .small()
+                                            .compact()
+                                            .selected(is_sel)
+                                            .when(is_sel, |button| button.primary())
+                                            .on_click(move |_, window, cx| {
+                                                backdrop_app.update(cx, |this, view_cx| {
+                                                    this.config.general.backdrop = value.to_string();
+                                                    this.save_config();
+                                                    let dark = match this.config.general.theme.as_str() {
+                                                        "dark" => true,
+                                                        "light" => false,
+                                                        _ => matches!(
+                                                            window.appearance(),
+                                                            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                                                        ),
+                                                    };
+                                                    crate::refresh_backdrop(dark, value);
                                                     view_cx.notify();
                                                 }).ok();
                                             })
