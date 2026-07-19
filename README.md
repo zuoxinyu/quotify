@@ -1,179 +1,166 @@
 # Quotify
 
-Quotify is a small Windows tray app for checking AI provider quota usage.
+[![Platform Support](https://img.shields.io/badge/platform-Windows-blue.svg?style=flat-pack)](https://www.microsoft.com/windows)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![CI Build Status](https://img.shields.io/badge/CI-GitHub--Actions-brightgreen)](https://github.com/zuoxinyu/quotify/actions)
 
-It shows a compact flyout with provider status, reset times, and a tray icon that can reflect a primary provider. The app is Windows-only and uses Win32 APIs with an `egui` popup UI.
+Quotify is a lightweight Windows system tray application designed to monitor your API usage quotas across various AI providers. It displays a compact, beautiful popup flyout showing your current consumption, remaining credits, and quota reset times.
 
-Quotify is inspired by [CodexBar](https://github.com/steipete/CodexBar), especially its practical approach to surfacing provider usage in a lightweight desktop utility.
+Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) and brings a native, modern, and secure solution for Windows developers to keep track of their AI budgets at a glance.
 
-## Screenshots
+---
+
+## 📸 Screenshots
+
 ![light mode](assets/screenshots/light.png)
-![dark mode](assets/screenshots/dark.png)
 
-## Providers
+---
 
-Supported providers:
+## ✨ Core Features
 
-- Codex/OpenAI
-- OpenCode Zen/Go
-- Claude
-- Gemini/Antigravity
-- Github Copilot
-- DeepSeek
-- Moonshot/Kimi
-- z.ai
-- Xiaomi MiMo
-- Alibaba Token Plan
-- MiniMax
-- StepFun
-- Windsurf
-- Cursor
-- Amp
-- Augment
-- Kiro
-- Kilo Code
-- Ollama
-- OpenRouter
-- Azure OpenAI
-- AWS Bedrock
-- Vertex AI
-- Mistral
-- Grok
+* **GPUI-powered UI**: Renders a premium, GPU-accelerated, high-performance interface built using the modern `GPUI` framework (developed by the Zed team).
+* **Mica & Fluent Aesthetics**: Implements native Windows 11 DWM Mica backdrop effects with semi-transparent card layouts.
+* **Windows Credential Manager Security**: API keys, session tokens, and browser cookies are securely stored using Windows Credential Manager (`quotify/<provider>/<field>`), ensuring no secrets are stored in plain text.
+* **Smart Local History Caching**: Usage snapshots are cached locally in `%APPDATA%\quotify\usage-history.json` so you can instantly view your last fetched usage stats while background fetch is running.
+* **Interactive Drag-to-Reorder**: Reorder provider cards directly in the UI with a simple long-press and drag action. Your custom order is automatically updated in the config file.
+* **Windows Desktop Facilities**: Supports running as a single instance, automatically registering to start with Windows, and writing rotating daily diagnostic logs to `%APPDATA%\quotify\logs`.
+* **CDP Cookie Synchronizer**: Includes a PowerShell script to fetch and sync session cookies via Chrome DevTools Protocol (CDP) for providers that require active browser sessions.
 
-Authentication is intentionally explicit. The app does not scrape browser cookies at runtime; configure credentials through `quotify.toml` or environment variables.
+---
 
-## Usage
+## 🤖 Supported Providers
 
-Create a default config:
+Quotify supports over 25 different AI models, services, and developer tools, categorized below:
 
-```powershell
-cargo run -- init
-```
+### General & Custom LLM Providers
+* **Claude / Anthropic** (Session keys, cookies, or API keys)
+* **Gemini / Antigravity**
+* **OpenAI / Codex**
+* **DeepSeek**
+* **OpenRouter**
+* **Mistral**
+* **Grok / xAI**
+* **z.ai**
+* **MiniMax**
 
-Fetch provider usage once:
+### Coding Assistants
+* **GitHub Copilot** (OAuth token)
+* **Cursor** (Session cookies)
+* **Windsurf / Codeium** (Service keys)
+* **Augment** (Session token)
+* **Codebuff**
+* **Kiro**
+* **Kilo Code**
 
-```powershell
-cargo run -- fetch
-cargo run -- fetch --provider claude
-```
+### Cloud & Local Hostings
+* **Azure OpenAI**
+* **AWS Bedrock**
+* **Vertex AI / Google Cloud**
+* **Ollama** (Local API)
 
-Run the tray app:
+### Regional & Specialized Platforms
+* **OpenCode Zen/Go**
+* **Xiaomi MiMo**
+* **Alibaba Token Plan**
+* **StepFun**
+* **Amp**
 
-```powershell
-cargo run -- tray
-```
+---
 
-Build an optimized release binary:
+## 🚀 Getting Started
 
-```powershell
-cargo build --release
-```
+### Prerequisites
 
-## Configuration
+* Windows 10/11 (Building on non-Windows systems will fail)
+* Rust toolchain (Edition 2024, Rust $\ge$ 1.85)
 
-The default config path is:
+### Running Locally
 
+1. **Initialize the Default Configuration**:
+   ```powershell
+   cargo run -- init
+   ```
+   This creates your local configuration folder and writes a default template.
+
+2. **Verify Configuration & Fetch Quotas**:
+   ```powershell
+   # Fetch all configured providers
+   cargo run -- fetch
+   
+   # Fetch a specific provider
+   cargo run -- fetch --provider claude
+   ```
+
+3. **Start the System Tray App**:
+   ```powershell
+   cargo run -- tray
+   ```
+
+4. **Build a Production Release**:
+   ```powershell
+   cargo build --release
+   ```
+   *Optimized with `opt-level = "z"`, LTO, and stripped symbols for a compact binary.*
+
+---
+
+## ⚙️ Configuration & Security
+
+The configuration directory is located at:
 ```text
-%APPDATA%\quotify\quotify.toml
+%APPDATA%\quotify\
 ```
 
-See `config.example.toml` for available fields. Non-secret settings remain in
-`quotify.toml`; API keys, cookies, service tokens, and session values entered in
-the settings UI are stored in Windows Credential Manager under
-`quotify/<provider>/<field>` and are injected into memory at runtime. Common
-environment variables include 
- - `OPENCODE_AUTH_COOKIE`
- - `OPENCODE_WORKSPACE_ID`
- - `CLAUDE_ACCESS_TOKEN`
- - `CLAUDE_SESSION_KEY`
- - `GEMINI_API_KEY`
- - `GOOGLE_API_KEY`
- - `OPENAI_ADMIN_KEY`
- - `OPENAI_API_KEY`
- - `DEEPSEEK_API_KEY`
- - `OPENROUTER_API_KEY`
- - `MOONSHOT_API_KEY`
- - `ELEVENLABS_API_KEY`
- - `ARK_API_KEY`
- - `Z_AI_API_KEY`
- - `VENICE_API_KEY`
- - `CROF_API_KEY`
- - `SYNTHETIC_API_KEY`
- - `WARP_API_KEY`
- - `GROQ_API_KEY`
- - `DEEPGRAM_API_KEY`
- - `LLM_PROXY_API_KEY`
- - `CODEBUFF_API_KEY`
- - `KIRO_API_KEY`
- - `GITHUB_COPILOT_TOKEN`
- - `AZURE_OPENAI_API_KEY`
- - `OLLAMA_API_KEY`
- - `MINIMAX_API_KEY`
- - `KIMI_AUTH_TOKEN`
- - `KILO_API_KEY`
- - `AUGMENT_SESSION_TOKEN`
- - `CODEXBAR_BEDROCK_BUDGET`
- - `GOOGLE_CLOUD_PROJECT`
- - `STEPFUN_TOKEN`
- - `ABACUS_COOKIE`
- - `ALIBABA_TOKEN_PLAN_COOKIE`
- - `T3_CHAT_COOKIE`
- - `AMP_COOKIE`
- - `MISTRAL_API_KEY`
- - `XAI_API_KEY`
- - `CURSOR_COOKIE`
- - `FACTORY_API_KEY`
- - `WINDSURF_SERVICE_KEY`
- - `MIMO_SERVICE_TOKEN`
- - `MIMO_COOKIE_HEADER`.
+* **`quotify.toml`**: Stores non-sensitive settings like refresh intervals, proxy setup, and active provider ordering. See `config.example.toml` for options.
+* **Credential Manager**: Secret fields (API keys, cookies) configured via the settings UI are saved securely under Windows Credential Manager.
 
-### Desktop facilities
+> [!TIP]
+> **Explicit Network Proxying**  
+> If you are behind a firewall, you can set `[network].proxy` in your `quotify.toml` to redirect requests. It supports HTTP, HTTPS, and SOCKS5 proxies:
+> ```toml
+> [network]
+> proxy = "socks5://127.0.0.1:7890"
+> ```
 
-Quotify enforces a single running tray instance. It writes rotating daily logs to
-`%APPDATA%\quotify\logs`, can generate diagnostic reports from the settings UI,
-can register itself to start with Windows, and stores usage snapshots in
-`%APPDATA%\quotify\usage-history.json` so the popup can show the last successful
-data and recent trend summaries before the next refresh completes.
+---
 
-### Cookie helper scripts
+## 🍪 CDP Cookie Sync Helpers
 
-Some providers require an explicit browser cookie header. The PowerShell helper
-can open a separate Chrome profile with remote debugging, wait for you to log in,
-fetch cookies for the selected provider, and sync the cookie header into Windows
-Credential Manager.
-
-Run the interactive flow:
+Some providers (e.g. OpenCode, MiMo, Cursor) require active browser cookies. We provide an interactive PowerShell helper script to automate retrieving these cookies via Chrome DevTools Protocol:
 
 ```powershell
+# Run the interactive setup flow
 .\scripts\get_cdp_cookies.ps1
 ```
 
-This prompts for a provider, opens the provider page, waits for you to press
-Enter after login, then writes the cookie to Windows Credential Manager.
-For MiMo, the script opens `https://platform.xiaomimimo.com/console/balance`.
+### Script Usage Examples
 
-You can also run it directly for a provider:
+* **Fetch and sync cookies for a specific provider**:
+  ```powershell
+  .\scripts\get_cdp_cookies.ps1 -Provider mimo -OpenChrome -Sync
+  ```
+* **Sync from an already running Chrome session with remote debugging (port 9222)**:
+  ```powershell
+  .\scripts\get_cdp_cookies.ps1 -Domain platform.xiaomimimo.com -Sync
+  ```
 
-```powershell
-.\scripts\get_cdp_cookies.ps1 -Provider mimo -OpenChrome -Sync
-.\scripts\get_cdp_cookies.ps1 -Provider opencode -OpenChrome -Sync
-```
+---
 
-If Chrome is already running with remote debugging enabled, fetch and sync from
-the existing browser session:
+## 🛠️ CI/CD Workflow
 
-```powershell
-.\scripts\get_cdp_cookies.ps1 -Domain platform.xiaomimimo.com -Sync
-```
+This project includes a pre-configured GitHub Actions workflow:
+* **CI Checks**: Automatically runs code formatting checks (`cargo fmt`), clippy lints (`cargo clippy`), and runs unit tests on a Windows runner for every pull request and push to the main branches.
+* **Automatic Releases**: When you push a version tag (e.g., `v0.2.0`), GitHub Actions will compile the production binary, create a new GitHub Release, and automatically upload the compiled `quotify.exe` as an asset.
 
-Supported cookie-sync providers are `mimo`, `opencode`, `opencodego`,
-`abacus`, `alibabatoken`, `t3chat`, `amp`, and `cursor`.
+> [!NOTE]
+> **How to release a new version**:
+> ```bash
+> git tag v0.2.0
+> git push origin v0.2.0
+> ```
 
-Provider card order is controlled by `[general].provider_order`. In the tray popup
- long-press and drag a provider card to reorder it; the new order is saved back to the config.
+---
 
-For explicit network proxying, set `[network].proxy` to an HTTP or SOCKS5 URL, for example `http://127.0.0.1:7890` or `socks5://127.0.0.1:7890`.
+## 📄 License
 
-## License
-
-MIT. See `LICENSE`.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
