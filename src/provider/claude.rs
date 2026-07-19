@@ -332,14 +332,13 @@ impl ClaudeProvider {
     }
 
     fn read_settings_env() -> Option<(String, Option<String>)> {
-        if let Ok(admin_key) = std::env::var("ANTHROPIC_ADMIN_KEY") {
-            if !admin_key.is_empty() {
+        if let Ok(admin_key) = std::env::var("ANTHROPIC_ADMIN_KEY")
+            && !admin_key.is_empty() {
                 let base_url = std::env::var("ANTHROPIC_BASE_URL")
                     .ok()
                     .filter(|u| !u.is_empty());
                 return Some((admin_key, base_url));
             }
-        }
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|k| !k.is_empty())?;
@@ -720,31 +719,32 @@ impl ClaudeProvider {
             }
         }
 
-        let mut windows = Vec::new();
-        windows.push(UsageWindow {
-            label: "Today's Spend".to_string(),
-            used_percent: 0.0,
-            limit: None,
-            used: Some(today_cost),
-            unit: Some("USD".to_string()),
-            resets_at: None,
-        });
-        windows.push(UsageWindow {
-            label: "7d Spend".to_string(),
-            used_percent: 0.0,
-            limit: None,
-            used: Some(seven_day_cost),
-            unit: Some("USD".to_string()),
-            resets_at: None,
-        });
-        windows.push(UsageWindow {
-            label: "30d Spend".to_string(),
-            used_percent: 0.0,
-            limit: None,
-            used: Some(thirty_day_cost),
-            unit: Some("USD".to_string()),
-            resets_at: None,
-        });
+        let windows = vec![
+            UsageWindow {
+                label: "Today's Spend".to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: Some(today_cost),
+                unit: Some("USD".to_string()),
+                resets_at: None,
+            },
+            UsageWindow {
+                label: "7d Spend".to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: Some(seven_day_cost),
+                unit: Some("USD".to_string()),
+                resets_at: None,
+            },
+            UsageWindow {
+                label: "30d Spend".to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: Some(thirty_day_cost),
+                unit: Some("USD".to_string()),
+                resets_at: None,
+            },
+        ];
 
         Ok(windows)
     }

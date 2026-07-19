@@ -132,8 +132,8 @@ pub fn verify_and_sync_path() -> Result<()> {
             } else {
                 wide
             };
-            if let Ok(existing_command) = String::from_utf16(wide_stripped) {
-                if existing_command != current_command {
+            if let Ok(existing_command) = String::from_utf16(wide_stripped)
+                && existing_command != current_command {
                     tracing::info!(
                         "Startup path mismatch detected (existing: {}, current: {}). Updating path.",
                         existing_command,
@@ -141,7 +141,6 @@ pub fn verify_and_sync_path() -> Result<()> {
                     );
                     set_enabled(true)?;
                 }
-            }
         }
     }
     Ok(())

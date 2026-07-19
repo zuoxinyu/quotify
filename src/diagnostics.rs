@@ -28,21 +28,17 @@ pub fn clean_old_logs(days_to_keep: i64) {
     if let Ok(entries) = std::fs::read_dir(log_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.starts_with("quotify.log") {
-                        if let Ok(metadata) = entry.metadata() {
-                            if let Ok(modified) = metadata.modified() {
+            if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                    && file_name.starts_with("quotify.log")
+                        && let Ok(metadata) = entry.metadata()
+                            && let Ok(modified) = metadata.modified() {
                                 let modified_chrono: chrono::DateTime<chrono::Utc> = modified.into();
                                 let age = now.signed_duration_since(modified_chrono);
                                 if age.num_days() > days_to_keep {
                                     let _ = std::fs::remove_file(path);
                                 }
                             }
-                        }
-                    }
-                }
-            }
         }
     }
 }

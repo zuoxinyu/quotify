@@ -222,9 +222,9 @@ impl Provider for MimoProvider {
             .context("Failed to connect to MiMo Balance API")?;
 
         let mut credits = None;
-        if resp.status().is_success() {
-            if let Ok(balance_resp) = resp.json::<MimoBalanceResponse>().await {
-                if let Some(data) = balance_resp.data {
+        if resp.status().is_success()
+            && let Ok(balance_resp) = resp.json::<MimoBalanceResponse>().await
+                && let Some(data) = balance_resp.data {
                     let total = data
                         .balance
                         .and_then(|s| s.parse::<f64>().ok())
@@ -237,8 +237,6 @@ impl Provider for MimoProvider {
                         topped_up: None,
                     });
                 }
-            }
-        }
 
         let mut windows = Vec::new();
 
@@ -300,8 +298,8 @@ impl Provider for MimoProvider {
             }
 
             // If we didn't get credits from the balance API, try fallback to tokens remaining
-            if credits.is_none() {
-                if let Some(usage) = &data.usage {
+            if credits.is_none()
+                && let Some(usage) = &data.usage {
                     let total_limit: f64 = usage.items.iter().filter_map(|i| i.limit).sum();
                     let total_used: f64 = usage.items.iter().filter_map(|i| i.used).sum();
                     if total_limit > 0.0 {
@@ -313,7 +311,6 @@ impl Provider for MimoProvider {
                         });
                     }
                 }
-            }
         }
 
         if windows.is_empty() {

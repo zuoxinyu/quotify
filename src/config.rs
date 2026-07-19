@@ -251,12 +251,11 @@ impl AppConfig {
 
         if !path.exists() {
             let backup_path = path.with_extension("toml.bak");
-            if backup_path.exists() {
-                if let Ok(config) = load_impl(&backup_path) {
+            if backup_path.exists()
+                && let Ok(config) = load_impl(&backup_path) {
                     let _ = config.save_to(path);
                     return Ok(config);
                 }
-            }
             let config = Self::default();
             config.save_to(path)?;
             return Ok(config);

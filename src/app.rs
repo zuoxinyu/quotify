@@ -1,6 +1,5 @@
 use gpui::prelude::{FluentBuilder, InteractiveElement, ParentElement, Styled};
 use gpui::*;
-use gpui_component::StyledExt;
 use gpui_component::{
     Disableable, IndexPath, Selectable, Sizable,
     alert::Alert,
@@ -729,6 +728,7 @@ impl QuotifyApp {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_card_header(
         &self,
         name: &str,
@@ -1542,6 +1542,7 @@ impl QuotifyApp {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_input_field(
         &self,
         is_dark: bool,
@@ -2203,21 +2204,18 @@ fn config_field_value(config: &crate::config::AppConfig, field: &str) -> String 
         _ => {}
     }
 
-    if let Some(provider) = field.strip_suffix("_key") {
-        if let Some(config) = api_key_provider_config(config, provider) {
+    if let Some(provider) = field.strip_suffix("_key")
+        && let Some(config) = api_key_provider_config(config, provider) {
             return config.api_key.clone();
         }
-    }
-    if let Some(provider) = field.strip_suffix("_url") {
-        if let Some(config) = api_key_provider_config(config, provider) {
+    if let Some(provider) = field.strip_suffix("_url")
+        && let Some(config) = api_key_provider_config(config, provider) {
             return config.base_url.clone();
         }
-    }
-    if let Some(provider) = field.strip_suffix("_dep") {
-        if let Some(config) = api_key_provider_config(config, provider) {
+    if let Some(provider) = field.strip_suffix("_dep")
+        && let Some(config) = api_key_provider_config(config, provider) {
             return config.deployment.clone();
         }
-    }
 
     String::new()
 }
@@ -2252,8 +2250,8 @@ fn set_config_field_value(
     }
 
     for suffix in ["_key", "_url", "_dep"] {
-        if let Some(provider) = field.strip_suffix(suffix) {
-            if let Some(provider_config) = api_key_provider_config_mut(config, provider) {
+        if let Some(provider) = field.strip_suffix(suffix)
+            && let Some(provider_config) = api_key_provider_config_mut(config, provider) {
                 match suffix {
                     "_key" => provider_config.api_key = value,
                     "_url" => provider_config.base_url = value,
@@ -2262,7 +2260,6 @@ fn set_config_field_value(
                 }
                 return true;
             }
-        }
     }
 
     false

@@ -1,5 +1,6 @@
 #![recursion_limit = "1024"]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(test, allow(dead_code, unused_variables, unused_imports))]
 
 #[cfg(not(test))]
 mod app;
@@ -1636,7 +1637,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         cx.spawn(move |cx: &mut gpui::AsyncApp| {
             let cx = cx.clone();
             async move {
-                while let Some(_) = update_rx.recv().await {
+                while update_rx.recv().await.is_some() {
                     cx.update(|cx| {
                         win_w.update(cx, |_, _, cx| {
                             cx.notify();
@@ -1650,7 +1651,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         // Time-derived labels (for example, "12s ago" and reset countdowns) need an
         // explicit wake-up because GPUI otherwise redraws only in response to input or
         // state notifications. Avoid repainting while the tray popup is hidden.
-        let clock_window = win_w.clone();
+        let clock_window = win_w;
         cx.spawn(move |cx: &mut gpui::AsyncApp| {
             let cx = cx.clone();
             async move {
@@ -1964,18 +1965,16 @@ unsafe extern "system" fn main_window_subclass(
                 let scale = window_scale_factor();
                 let physical_w = (400.0 * scale) as i32;
                 let physical_h = (520.0 * scale) as i32;
-                unsafe {
-                    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        0,
-                        0,
-                        physical_w,
-                        physical_h,
-                        SWP_NOMOVE | SWP_NOZORDER,
-                    );
-                }
+                use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    physical_w,
+                    physical_h,
+                    SWP_NOMOVE | SWP_NOZORDER,
+                );
 
                 let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
                 let pos = compute_popup_position(win_w, win_h);
