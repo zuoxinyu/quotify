@@ -18,6 +18,7 @@ use gpui_component::{
 };
 use parking_lot::RwLock;
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, OnceLock, atomic::Ordering},
     time::Duration,
@@ -113,6 +114,12 @@ pub enum ProviderTestStatus {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WebViewLoginStatus {
+    LoggingIn,
+    Error(String),
+}
+
 #[derive(Default, Clone)]
 pub struct ProviderDragState {
     held_provider: Option<String>,
@@ -147,6 +154,7 @@ pub struct QuotifyApp {
     pub drag: ProviderDragState,
     pub update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
     pub provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
+    webview_login_status: Arc<parking_lot::Mutex<HashMap<String, WebViewLoginStatus>>>,
     pub selected_setting_provider: String,
     pub show_codex_reset_credits: bool,
 }
@@ -171,6 +179,7 @@ impl QuotifyApp {
             drag: ProviderDragState::default(),
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
             provider_test_status: Arc::new(parking_lot::Mutex::new(ProviderTestStatus::Idle)),
+            webview_login_status: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             selected_setting_provider: "openai".to_string(),
             show_codex_reset_credits: false,
         }
@@ -307,6 +316,38 @@ impl QuotifyApp {
             }
         })
         .detach();
+    }
+
+    fn trigger_webview_login(&self, provider: String, cx: &mut Context<Self>) {
+        if !crate::webview_login::supports_provider(&provider) {
+            return;
+        }
+
+        {
+            let mut statuses = self.webview_login_status.lock();
+            if matches!(statuses.get(&provider), Some(WebViewLoginStatus::LoggingIn)) {
+                return;
+            }
+            statuses.insert(provider.clone(), WebViewLoginStatus::LoggingIn);
+        }
+        cx.notify();
+
+        let statuses = self.webview_login_status.clone();
+        std::thread::spawn(move || {
+            let result = crate::webview_login::login_and_store_for_provider(&provider);
+            match result {
+                Ok(_) => {
+                    statuses.lock().remove(&provider);
+                    crate::tray::request_refresh();
+                }
+                Err(err) => {
+                    statuses
+                        .lock()
+                        .insert(provider, WebViewLoginStatus::Error(err.to_string()));
+                }
+            }
+            crate::trigger_gui_update();
+        });
     }
 
     fn trigger_check_update(&self, cx: &mut Context<Self>) {
@@ -683,7 +724,7 @@ impl QuotifyApp {
                         is_dark,
                         cx,
                     ))
-                    .child(self.render_card_body(data, trend, is_dark))
+                    .child(self.render_card_body(name, data, trend, is_dark, cx))
                     .when_some(reset_credits, |card, resets| {
                         card.child(
                             Collapsible::new()
@@ -891,14 +932,85 @@ impl QuotifyApp {
 
     fn render_card_body(
         &self,
+        provider: &str,
         data: &UsageData,
         trend: Option<crate::usage_history::ProviderTrend>,
         is_dark: bool,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(ref error) = data.error {
-            return Alert::error("provider-error", error.clone())
-                .small()
-                .into_any_element();
+            let login_message = crate::webview_login::login_required_message(error);
+            if let Some(login_message) = login_message
+                && crate::webview_login::supports_provider(provider)
+            {
+                let login_status = self.webview_login_status.lock().get(provider).cloned();
+                let logging_in = matches!(login_status, Some(WebViewLoginStatus::LoggingIn));
+                let login_error = match login_status {
+                    Some(WebViewLoginStatus::Error(error)) => Some(error),
+                    _ => None,
+                };
+                let provider = provider.to_string();
+                let app = cx.entity().downgrade();
+
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Alert::error(
+                            SharedString::from(format!("provider-login-required-{provider}")),
+                            login_message,
+                        )
+                        .small(),
+                    )
+                    .child(
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "provider-webview-login-{provider}"
+                                )))
+                                .primary()
+                                .small()
+                                .label(if logging_in {
+                                    "Waiting for login..."
+                                } else if login_error.is_some() {
+                                    "Retry login"
+                                } else {
+                                    "Log in"
+                                })
+                                .loading(logging_in)
+                                .disabled(logging_in)
+                                .on_click(move |_, _, cx| {
+                                    let provider = provider.clone();
+                                    app.update(cx, |this, cx| {
+                                        this.trigger_webview_login(provider, cx);
+                                    })
+                                    .ok();
+                                }),
+                            ),
+                    )
+                    .when_some(login_error, |body, error| {
+                        body.child(
+                            Alert::error(
+                                SharedString::from(format!(
+                                    "provider-webview-login-error-{}",
+                                    data.provider
+                                )),
+                                format!("Login failed: {error}"),
+                            )
+                            .small(),
+                        )
+                    })
+                    .into_any_element();
+            }
+
+            return Alert::error(
+                SharedString::from(format!("provider-error-{provider}")),
+                error.clone(),
+            )
+            .small()
+            .into_any_element();
         }
 
         let mut children = data
@@ -1256,6 +1368,7 @@ impl QuotifyApp {
         let start_with_windows_app = cx.entity().downgrade();
         let theme_app = cx.entity().downgrade();
         let backdrop_app = cx.entity().downgrade();
+        let auto_webview_app = cx.entity().downgrade();
         let secondary_text = if is_dark {
             gpui::rgba(0xffffff99)
         } else {
@@ -1410,6 +1523,35 @@ impl QuotifyApp {
                                                 }).ok();
                                             })
                                     }))
+                            )
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // WebView authentication policy
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Automatic WebView Login"))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Open WebView when authentication fails"))
+                            )
+                            .child(
+                                Switch::new("auto_webview_login")
+                                    .checked(self.config.general.auto_webview_login)
+                                    .on_click(move |checked, _window, cx| {
+                                        let checked = *checked;
+                                        auto_webview_app
+                                            .update(cx, |this, cx| {
+                                                this.config.general.auto_webview_login = checked;
+                                                this.save_config();
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    })
                             )
                     )
                     .child(Divider::horizontal())

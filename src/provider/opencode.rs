@@ -14,21 +14,30 @@ pub struct OpenCodeProvider {
     client: reqwest::Client,
     workspace_id: Option<String>,
     auth_cookie: Option<String>,
+    auto_webview_login: bool,
 }
 
 impl OpenCodeProvider {
     pub fn new(
         workspace_id: Option<String>,
         auth_cookie: Option<String>,
+        auto_webview_login: bool,
         proxy: Option<&str>,
     ) -> Self {
-        Self::new_with_name("opencode", workspace_id, auth_cookie, proxy)
+        Self::new_with_name(
+            "opencode",
+            workspace_id,
+            auth_cookie,
+            auto_webview_login,
+            proxy,
+        )
     }
 
     pub fn new_with_name(
         provider_name: &'static str,
         workspace_id: Option<String>,
         auth_cookie: Option<String>,
+        auto_webview_login: bool,
         proxy: Option<&str>,
     ) -> Self {
         Self {
@@ -36,6 +45,7 @@ impl OpenCodeProvider {
             client: http_client(proxy),
             workspace_id: workspace_id.and_then(|value| normalize_workspace_id(&value)),
             auth_cookie: auth_cookie.and_then(|value| normalize_auth_cookie(&value)),
+            auto_webview_login,
         }
     }
 
@@ -99,12 +109,34 @@ impl Provider for OpenCodeProvider {
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
-        let cookie_header = self.resolve_cookie_header().await?;
+        let cookie_header = match self.resolve_cookie_header().await {
+            Ok(cookie) => cookie,
+            Err(_) if self.auto_webview_login => {
+                tracing::info!("OpenCode credentials missing. Attempting WebView2 login...");
+                crate::webview_login::login_and_store_async("opencode").await?
+            }
+            Err(err) => {
+                return Err(crate::webview_login::login_required_error(self.name(), err));
+            }
+        };
 
-        let (windows, credits) = self
-            .fetch_via_server_cookie(&cookie_header)
-            .await
-            .context("Failed to fetch OpenCode Go usage")?;
+        let (windows, credits) = match self.fetch_via_server_cookie(&cookie_header).await {
+            Ok(result) => result,
+            Err(err) if is_webview_auth_failure(&err) && self.auto_webview_login => {
+                tracing::info!("OpenCode credentials rejected. Attempting WebView2 login...");
+                let fresh_cookie = crate::webview_login::login_and_store_async("opencode").await?;
+                self.fetch_via_server_cookie(&fresh_cookie)
+                    .await
+                    .context("Failed to fetch OpenCode Go usage after WebView login")?
+            }
+            Err(err) if is_webview_auth_failure(&err) => {
+                return Err(crate::webview_login::login_required_error(
+                    self.name(),
+                    "the saved credentials were rejected",
+                ));
+            }
+            Err(err) => return Err(err.context("Failed to fetch OpenCode Go usage")),
+        };
 
         Ok(UsageData {
             provider: self.name().to_string(),
@@ -114,6 +146,20 @@ impl Provider for OpenCodeProvider {
             error: None,
         })
     }
+}
+
+fn is_webview_auth_failure(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    [
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "returned html",
+        "did not contain usage data",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 impl OpenCodeProvider {
@@ -503,4 +549,22 @@ fn regex_extract_f64(text: &str, pattern: &str) -> Option<f64> {
     let caps = re.captures(text)?;
     let val_str = caps.get(1)?.as_str();
     val_str.parse::<f64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_webview_auth_failures() {
+        assert!(is_webview_auth_failure(&anyhow::anyhow!(
+            "OpenCode server error 401 Unauthorized"
+        )));
+        assert!(is_webview_auth_failure(&anyhow::anyhow!(
+            "OpenCode server returned HTML"
+        )));
+        assert!(!is_webview_auth_failure(&anyhow::anyhow!(
+            "connection timed out"
+        )));
+    }
 }

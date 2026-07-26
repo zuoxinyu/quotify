@@ -8,6 +8,7 @@ pub struct MimoProvider {
     api_key: String,
     service_token: Option<String>,
     cookie_header: Option<String>,
+    auto_webview_login: bool,
     client: reqwest::Client,
 }
 
@@ -16,12 +17,14 @@ impl MimoProvider {
         api_key: String,
         service_token: Option<String>,
         cookie_header: Option<String>,
+        auto_webview_login: bool,
         proxy: Option<&str>,
     ) -> Self {
         Self {
             api_key,
             service_token,
             cookie_header,
+            auto_webview_login,
             client: http_client(proxy),
         }
     }
@@ -61,16 +64,16 @@ impl MimoProvider {
             return Ok(format!("serviceToken={token}"));
         }
 
-        // 5. If everything fails, try to prompt webview login
-        tracing::info!("No MiMo credentials found. Attempting WebView2 login...");
-        let full_cookie =
-            tokio::task::spawn_blocking(crate::webview_login::login_and_get_cookie).await??;
-
-        if let Err(err) = crate::secrets::set("mimo", "cookie_header", &full_cookie) {
-            tracing::error!("Failed to store MiMo cookie in Windows Credential Manager: {err}");
+        // 5. If everything fails, prompt WebView login only when the user opted in.
+        if !self.auto_webview_login {
+            return Err(crate::webview_login::login_required_error(
+                self.name(),
+                "no valid credentials were found",
+            ));
         }
 
-        Ok(full_cookie)
+        tracing::info!("No MiMo credentials found. Attempting WebView2 login...");
+        crate::webview_login::login_and_store_async("mimo").await
     }
 }
 
@@ -162,13 +165,15 @@ impl Provider for MimoProvider {
         let mut current_cookie_header = cookie_header;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            tracing::info!("MiMo token expired. Attempting WebView2 login...");
-            let full_cookie =
-                tokio::task::spawn_blocking(crate::webview_login::login_and_get_cookie).await??;
-
-            if let Err(err) = crate::secrets::set("mimo", "cookie_header", &full_cookie) {
-                tracing::error!("Failed to store MiMo cookie in Windows Credential Manager: {err}");
+            if !self.auto_webview_login {
+                return Err(crate::webview_login::login_required_error(
+                    self.name(),
+                    "the saved credentials were rejected",
+                ));
             }
+
+            tracing::info!("MiMo token expired. Attempting WebView2 login...");
+            let full_cookie = crate::webview_login::login_and_store_async("mimo").await?;
 
             current_cookie_header = full_cookie;
 

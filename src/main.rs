@@ -531,6 +531,7 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 Some(Box::new(OllamaProvider::new(
                     config.ollama.api_key.clone(),
                     config.ollama.base_url.clone(),
+                    config.general.auto_webview_login,
                     proxy,
                 )))
             } else {
@@ -1000,6 +1001,7 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 Some(Box::new(OpenCodeProvider::new(
                     workspace_id,
                     auth_cookie,
+                    config.general.auto_webview_login,
                     proxy,
                 )))
             } else {
@@ -1036,6 +1038,7 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                     config.mimo.api_key.clone(),
                     service_token,
                     cookie_header,
+                    config.general.auto_webview_login,
                     proxy,
                 )))
             } else {

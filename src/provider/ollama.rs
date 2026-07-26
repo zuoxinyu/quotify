@@ -10,14 +10,21 @@ const DEFAULT_BASE_URL: &str = "https://ollama.com";
 pub struct OllamaProvider {
     api_key: String,
     base_url: String,
+    auto_webview_login: bool,
     client: reqwest::Client,
 }
 
 impl OllamaProvider {
-    pub fn new(api_key: String, base_url: String, proxy: Option<&str>) -> Self {
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        auto_webview_login: bool,
+        proxy: Option<&str>,
+    ) -> Self {
         Self {
             api_key,
             base_url,
+            auto_webview_login,
             client: http_client(proxy),
         }
     }
@@ -180,16 +187,16 @@ impl Provider for OllamaProvider {
 
         // If we don't have a cookie and also don't have a standard API key configured, trigger login
         if cookie.is_none() && self.resolve_api_key().is_none() {
+            if !self.auto_webview_login {
+                return Err(crate::webview_login::login_required_error(
+                    self.name(),
+                    "no valid credentials were found",
+                ));
+            }
+
             tracing::info!("Ollama: No credentials found, launching WebView login...");
-            match tokio::task::spawn_blocking(crate::webview_login::ollama_login_and_get_cookie)
-                .await?
-            {
+            match crate::webview_login::login_and_store_async("ollama").await {
                 Ok(fresh_cookie) => {
-                    if let Err(err) = crate::secrets::set("ollama", "auth_cookie", &fresh_cookie) {
-                        tracing::error!(
-                            "Failed to store Ollama cookie in Windows Credential Manager: {err}"
-                        );
-                    }
                     cookie = Some(fresh_cookie);
                 }
                 Err(err) => {
@@ -202,38 +209,33 @@ impl Provider for OllamaProvider {
             match self.fetch_settings_usage(&cookie_str).await {
                 Ok(data) => return Ok(data),
                 Err(err) => {
+                    if !self.auto_webview_login {
+                        if self.resolve_api_key().is_some() {
+                            return self.fetch_api_usage().await;
+                        }
+                        return Err(crate::webview_login::login_required_error(
+                            self.name(),
+                            "the saved credentials were rejected",
+                        ));
+                    }
+
                     tracing::warn!(
                         "Ollama settings page fetch failed: {err}. Retrying with WebView login..."
                     );
-                    match tokio::task::spawn_blocking(
-                        crate::webview_login::ollama_login_and_get_cookie,
-                    )
-                    .await?
-                    {
-                        Ok(fresh_cookie) => {
-                            if let Err(err) =
-                                crate::secrets::set("ollama", "auth_cookie", &fresh_cookie)
-                            {
-                                tracing::error!(
-                                    "Failed to store Ollama cookie in Windows Credential Manager: {err}"
+                    match crate::webview_login::login_and_store_async("ollama").await {
+                        Ok(fresh_cookie) => match self.fetch_settings_usage(&fresh_cookie).await {
+                            Ok(data) => return Ok(data),
+                            Err(err2) => {
+                                tracing::warn!(
+                                    "Ollama settings page fetch failed again with fresh cookie: {err2}"
                                 );
-                            }
-                            match self.fetch_settings_usage(&fresh_cookie).await {
-                                Ok(data) => return Ok(data),
-                                Err(err2) => {
-                                    tracing::warn!(
-                                        "Ollama settings page fetch failed again with fresh cookie: {err2}"
-                                    );
-                                    if self.resolve_api_key().is_some() {
-                                        return self.fetch_api_usage().await;
-                                    } else {
-                                        anyhow::bail!(
-                                            "Failed to fetch Ollama settings usage: {err2}"
-                                        );
-                                    }
+                                if self.resolve_api_key().is_some() {
+                                    return self.fetch_api_usage().await;
+                                } else {
+                                    anyhow::bail!("Failed to fetch Ollama settings usage: {err2}");
                                 }
                             }
-                        }
+                        },
                         Err(login_err) => {
                             tracing::warn!("Ollama WebView login retry failed: {login_err}");
                             if self.resolve_api_key().is_some() {

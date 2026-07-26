@@ -14,6 +14,8 @@ pub struct GeneralConfig {
     pub theme: String,
     #[serde(default = "default_backdrop")]
     pub backdrop: String,
+    #[serde(default = "default_auto_webview_login")]
+    pub auto_webview_login: bool,
     #[serde(default)]
     pub start_with_windows: bool,
 }
@@ -30,6 +32,10 @@ fn default_backdrop() -> String {
     "mica_alt".to_string()
 }
 
+fn default_auto_webview_login() -> bool {
+    true
+}
+
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -38,6 +44,7 @@ impl Default for GeneralConfig {
             provider_order: Vec::new(),
             theme: default_theme(),
             backdrop: default_backdrop(),
+            auto_webview_login: default_auto_webview_login(),
             start_with_windows: false,
         }
     }
@@ -355,6 +362,7 @@ mod tests {
         let gen_config: GeneralConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(gen_config.theme, "system");
         assert_eq!(gen_config.backdrop, "mica_alt");
+        assert!(gen_config.auto_webview_login);
 
         let toml_str_with_theme = r#"
             refresh_interval = 300
@@ -362,10 +370,12 @@ mod tests {
             provider_order = []
             theme = "dark"
             backdrop = "acrylic"
+            auto_webview_login = false
         "#;
         let gen_config2: GeneralConfig = toml::from_str(toml_str_with_theme).unwrap();
         assert_eq!(gen_config2.theme, "dark");
         assert_eq!(gen_config2.backdrop, "acrylic");
+        assert!(!gen_config2.auto_webview_login);
     }
 
     #[test]

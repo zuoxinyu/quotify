@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, Win32WindowHandle, WindowHandle,
     WindowsDisplayHandle,
@@ -22,6 +22,48 @@ pub enum LoginMode {
     Mimo,
     OpenCode,
     Ollama,
+}
+
+const LOGIN_REQUIRED_PREFIX: &str = "WebView login required";
+
+pub fn supports_provider(provider: &str) -> bool {
+    matches!(
+        provider.to_ascii_lowercase().as_str(),
+        "mimo" | "opencode" | "opencodego" | "ollama"
+    )
+}
+
+pub fn login_required_error(provider: &str, reason: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("{LOGIN_REQUIRED_PREFIX} for {provider}: {reason}")
+}
+
+pub fn login_required_message(error: &str) -> Option<String> {
+    error
+        .find(LOGIN_REQUIRED_PREFIX)
+        .map(|index| error[index..].to_string())
+}
+
+pub fn login_and_store_for_provider(provider: &str) -> Result<String> {
+    let provider = provider.to_ascii_lowercase();
+    let (secret_provider, secret_field, cookie) = match provider.as_str() {
+        "mimo" => ("mimo", "cookie_header", run_login_flow(LoginMode::Mimo)?),
+        "opencode" | "opencodego" => (
+            "opencode",
+            "auth_cookie",
+            run_login_flow(LoginMode::OpenCode)?,
+        ),
+        "ollama" => ("ollama", "auth_cookie", run_login_flow(LoginMode::Ollama)?),
+        _ => anyhow::bail!("Provider '{provider}' does not support WebView login"),
+    };
+
+    crate::secrets::set(secret_provider, secret_field, &cookie).with_context(|| {
+        format!("Failed to store {provider} WebView credentials in Windows Credential Manager")
+    })?;
+    Ok(cookie)
+}
+
+pub async fn login_and_store_async(provider: &'static str) -> Result<String> {
+    tokio::task::spawn_blocking(move || login_and_store_for_provider(provider)).await?
 }
 
 thread_local! {
@@ -329,5 +371,29 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
         ))
     } else {
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_supported_webview_providers() {
+        assert!(supports_provider("mimo"));
+        assert!(supports_provider("OpenCode"));
+        assert!(supports_provider("opencodego"));
+        assert!(supports_provider("OLLAMA"));
+        assert!(!supports_provider("codex"));
+    }
+
+    #[test]
+    fn marks_and_extracts_login_required_errors() {
+        let error = login_required_error("mimo", "credentials expired").to_string();
+        assert_eq!(
+            login_required_message(&error).as_deref(),
+            Some("WebView login required for mimo: credentials expired")
+        );
+        assert!(login_required_message("ordinary network error").is_none());
     }
 }
