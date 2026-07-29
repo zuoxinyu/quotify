@@ -6,6 +6,7 @@
 mod app;
 mod config;
 mod diagnostics;
+mod disclosure;
 mod icon;
 mod notifications;
 mod provider;
@@ -13,6 +14,7 @@ mod secrets;
 mod single_instance;
 mod startup;
 mod tray;
+mod trend_cache;
 mod usage_history;
 mod version;
 

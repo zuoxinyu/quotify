@@ -5,7 +5,6 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonVariants},
     chart::BarChart,
-    collapsible::Collapsible,
     divider::Divider,
     group_box::{GroupBox, GroupBoxVariants},
     input::{Input, InputEvent, InputState},
@@ -19,13 +18,17 @@ use gpui_component::{
 };
 use parking_lot::RwLock;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, OnceLock, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use crate::disclosure::DisclosureAnimation;
 use crate::provider::UsageData;
+
+const CODEX_RESET_DISCLOSURE_KEY: &str = "codex-reset-credits";
+const TREND_DISCLOSURE_HEIGHT: f32 = 142.0;
 
 static COMPONENT_THEME_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
 
@@ -269,8 +272,9 @@ pub struct QuotifyApp {
     webview_login_status: Arc<parking_lot::Mutex<HashMap<String, WebViewLoginStatus>>>,
     budget_input_errors: HashMap<String, String>,
     pub selected_setting_provider: String,
-    pub show_codex_reset_credits: bool,
-    expanded_trends: HashSet<String>,
+    disclosures: HashMap<String, DisclosureAnimation>,
+    disclosure_frame_at: Option<Instant>,
+    trend_cache: crate::trend_cache::TrendCache,
 }
 
 impl QuotifyApp {
@@ -296,8 +300,9 @@ impl QuotifyApp {
             webview_login_status: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             budget_input_errors: HashMap::new(),
             selected_setting_provider: "openai".to_string(),
-            show_codex_reset_credits: false,
-            expanded_trends: HashSet::new(),
+            disclosures: HashMap::new(),
+            disclosure_frame_at: None,
+            trend_cache: crate::trend_cache::TrendCache::new(),
         }
     }
 
@@ -377,6 +382,77 @@ impl QuotifyApp {
         }
         self.config.general.provider_order = full_order;
         true
+    }
+
+    fn disclosure(&self, key: &str) -> DisclosureAnimation {
+        self.disclosures.get(key).copied().unwrap_or_default()
+    }
+
+    fn toggle_disclosure(&mut self, key: String) {
+        let now = Instant::now();
+        if self
+            .disclosures
+            .values()
+            .any(DisclosureAnimation::is_animating)
+        {
+            self.advance_running_disclosures_to(now);
+        }
+        self.disclosures.entry(key).or_default().toggle();
+
+        if client_area_animations_enabled() {
+            self.disclosure_frame_at = Some(now);
+        } else {
+            self.finish_disclosure_animations();
+        }
+    }
+
+    fn advance_disclosure_animations(&mut self, window: &mut Window) {
+        if !self
+            .disclosures
+            .values()
+            .any(DisclosureAnimation::is_animating)
+        {
+            self.disclosures
+                .retain(|_, animation| animation.should_render_content());
+            self.disclosure_frame_at = None;
+            return;
+        }
+
+        let now = Instant::now();
+        self.advance_running_disclosures_to(now);
+
+        if self
+            .disclosures
+            .values()
+            .any(DisclosureAnimation::is_animating)
+        {
+            window.request_animation_frame();
+        } else {
+            self.disclosure_frame_at = None;
+        }
+    }
+
+    fn advance_running_disclosures_to(&mut self, now: Instant) {
+        let delta = self
+            .disclosure_frame_at
+            .replace(now)
+            .map(|previous| now.saturating_duration_since(previous))
+            .unwrap_or_default();
+
+        for animation in self.disclosures.values_mut() {
+            animation.advance(delta);
+        }
+        self.disclosures
+            .retain(|_, animation| animation.should_render_content());
+    }
+
+    fn finish_disclosure_animations(&mut self) {
+        for animation in self.disclosures.values_mut() {
+            animation.finish();
+        }
+        self.disclosures
+            .retain(|_, animation| animation.should_render_content());
+        self.disclosure_frame_at = None;
     }
 
     fn trigger_provider_test(&self, provider_id: String, cx: &mut Context<Self>) {
@@ -560,8 +636,38 @@ impl QuotifyApp {
     }
 }
 
+fn client_area_animations_enabled() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+        };
+
+        let mut enabled = windows::core::BOOL::from(true);
+        let result = unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                Some(std::ptr::from_mut(&mut enabled).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default(),
+            )
+        };
+        match result {
+            Ok(()) => enabled.as_bool(),
+            Err(err) => {
+                tracing::debug!("Failed to read Windows client-area animation setting: {err}");
+                true
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    true
+}
+
 impl Render for QuotifyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.advance_disclosure_animations(window);
         let active_page = crate::tray::ACTIVE_PAGE.load(Ordering::SeqCst);
 
         // Determine Theme colors
@@ -772,7 +878,7 @@ impl QuotifyApp {
             .into_any_element()
     }
 
-    fn render_dashboard(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_dashboard(&mut self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
         let data = self.data.read().clone();
         let all_providers = provider_display_order(&self.config);
         let visible_providers = all_providers
@@ -826,7 +932,7 @@ impl QuotifyApp {
     }
 
     fn render_provider_card(
-        &self,
+        &mut self,
         name: &str,
         display_name: SharedString,
         data: &UsageData,
@@ -843,12 +949,14 @@ impl QuotifyApp {
             .config
             .provider_budget(name)
             .or_else(|| crate::legacy_bedrock_budget(&self.config, name));
-        let trend = self
-            .history
-            .read()
-            .trend_for_with_budget(name, 7, effective_budget);
+        let trend = {
+            let history = self.history.read();
+            self.trend_cache
+                .get_or_compute(&history, name, 7, chrono::Utc::now(), effective_budget)
+        };
         let reset_credits = crate::provider::codex::reset_credits(data);
-        let show_reset_credits = reset_credits.is_some() && self.show_codex_reset_credits;
+        let reset_animation = self.disclosure(CODEX_RESET_DISCLOSURE_KEY);
+        let show_reset_credits = reset_credits.is_some() && reset_animation.target_is_open();
 
         div()
             .w_full()
@@ -868,11 +976,12 @@ impl QuotifyApp {
                     ))
                     .child(self.render_card_body(name, data, trend, is_dark, cx))
                     .when_some(reset_credits, |card, resets| {
-                        card.child(
-                            Collapsible::new()
-                                .open(show_reset_credits)
-                                .content(Self::render_codex_reset_details(&resets, is_dark)),
-                        )
+                        let (details, height) = Self::render_codex_reset_details(&resets, is_dark);
+                        card.child(Self::render_animated_disclosure(
+                            reset_animation,
+                            height,
+                            details,
+                        ))
                     }),
             )
             .on_mouse_down(
@@ -906,6 +1015,7 @@ impl QuotifyApp {
                         let dx = (event.position.x - start_pos.x) / px(1.0);
                         let dy = (event.position.y - start_pos.y) / px(1.0);
                         if dx.abs() + dy.abs() > 6.0 {
+                            this.finish_disclosure_animations();
                             this.drag.dragging = true;
                         }
                     }
@@ -1019,7 +1129,7 @@ impl QuotifyApp {
                         })
                         .on_click(move |_, _, cx| {
                             app.update(cx, |this, cx| {
-                                this.show_codex_reset_credits = !this.show_codex_reset_credits;
+                                this.toggle_disclosure(CODEX_RESET_DISCLOSURE_KEY.to_string());
                                 cx.notify();
                             })
                             .ok();
@@ -1119,7 +1229,7 @@ impl QuotifyApp {
         &self,
         provider: &str,
         data: &UsageData,
-        trend: Option<crate::usage_history::ProviderTrend>,
+        trend: Option<Arc<crate::trend_cache::CachedProviderTrend>>,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1209,7 +1319,7 @@ impl QuotifyApp {
             .collect::<Vec<_>>();
 
         if let Some(trend_val) = trend {
-            children.push(self.render_trend_section(provider, trend_val, is_dark, cx));
+            children.push(self.render_trend_section(provider, trend_val.as_ref(), is_dark, cx));
         }
 
         div()
@@ -1220,23 +1330,52 @@ impl QuotifyApp {
             .into_any_element()
     }
 
+    fn render_animated_disclosure(
+        animation: DisclosureAnimation,
+        expanded_height: f32,
+        content: AnyElement,
+    ) -> AnyElement {
+        let progress = animation.progress().clamp(0.0, 1.0);
+
+        div()
+            .w_full()
+            .h(px(expanded_height * progress))
+            .flex_none()
+            .overflow_hidden()
+            .when(animation.should_render_content(), |disclosure| {
+                disclosure.child(
+                    div()
+                        .w_full()
+                        .h(px(expanded_height))
+                        .flex_none()
+                        .opacity(progress)
+                        .child(content),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_trend_section(
         &self,
         provider: &str,
-        trend: crate::usage_history::ProviderTrend,
+        trend: &crate::trend_cache::CachedProviderTrend,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let provider_key = provider.to_ascii_lowercase();
-        let expanded = self.expanded_trends.contains(&provider_key);
-        let trend_text = format_trend_summary(&trend);
+        let disclosure_key = format!("trend:{provider_key}");
+        let animation = self.disclosure(&disclosure_key);
+        let expanded = animation.target_is_open();
+        let trend_text = format_trend_summary(&trend.trend);
         let app = cx.entity().downgrade();
-        let toggle_provider = provider_key.clone();
+        let toggle_key = disclosure_key.clone();
         let weak_text = if is_dark {
             gpui::rgba(0xffffff7f)
         } else {
             gpui::rgba(0x0000007f)
         };
+        let (histogram, histogram_height) =
+            Self::render_trend_histogram(&trend.histogram_buckets, is_dark);
 
         div()
             .mt_2()
@@ -1270,30 +1409,27 @@ impl QuotifyApp {
                     })
                     .on_click(move |_, _, cx| {
                         app.update(cx, |this, cx| {
-                            if !this.expanded_trends.insert(toggle_provider.clone()) {
-                                this.expanded_trends.remove(&toggle_provider);
-                            }
+                            this.toggle_disclosure(toggle_key.clone());
                             cx.notify();
                         })
                         .ok();
                     }),
             )
-            .child(
-                Collapsible::new()
-                    .open(expanded)
-                    .content(Self::render_trend_histogram(&trend, is_dark)),
-            )
+            .child(Self::render_animated_disclosure(
+                animation,
+                histogram_height,
+                histogram,
+            ))
             .into_any_element()
     }
 
     fn render_trend_histogram(
-        trend: &crate::usage_history::ProviderTrend,
+        buckets: &[crate::usage_history::ProviderTrendBucket],
         is_dark: bool,
-    ) -> AnyElement {
-        let buckets = trend.histogram_buckets(7);
-        let chart_state = crate::usage_history::classify_histogram_buckets(&buckets);
+    ) -> (AnyElement, f32) {
+        let chart_state = crate::usage_history::classify_histogram_buckets(buckets);
         let bars = buckets
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(index, bucket)| {
                 let latest = bucket
@@ -1316,14 +1452,19 @@ impl QuotifyApp {
         } else {
             gpui::rgba(0x0000007f)
         };
+        let disclosure_height = TREND_DISCLOSURE_HEIGHT;
 
-        div()
-            .pt_2()
+        let histogram = div()
+            .w_full()
+            .h(px(disclosure_height))
             .flex()
             .flex_col()
-            .gap_1()
             .child(
                 div()
+                    .flex()
+                    .items_end()
+                    .w_full()
+                    .h(px(24.0))
                     .text_size(px(9.0))
                     .text_color(weak_text)
                     .child("Latest sample per rolling 24h · relative scale"),
@@ -1362,7 +1503,7 @@ impl QuotifyApp {
                     .items_center()
                     .justify_center()
                     .w_full()
-                    .h(px(72.0))
+                    .h(px(118.0))
                     .text_size(px(10.0))
                     .text_color(weak_text)
                     .child("Available latest samples round to 0%")
@@ -1372,19 +1513,21 @@ impl QuotifyApp {
                     .items_center()
                     .justify_center()
                     .w_full()
-                    .h(px(72.0))
+                    .h(px(118.0))
                     .text_size(px(10.0))
                     .text_color(weak_text)
                     .child("Latest samples unavailable for these buckets")
                     .into_any_element(),
             })
-            .into_any_element()
+            .into_any_element();
+
+        (histogram, disclosure_height)
     }
 
     fn render_codex_reset_details(
         resets: &crate::provider::CodexResetCredits,
         is_dark: bool,
-    ) -> AnyElement {
+    ) -> (AnyElement, f32) {
         let weak_text = if is_dark {
             gpui::rgba(0xffffff7f)
         } else {
@@ -1424,6 +1567,8 @@ impl QuotifyApp {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .w_full()
+                    .h(px(28.0))
                     .gap_3()
                     .child(
                         div()
@@ -1448,18 +1593,33 @@ impl QuotifyApp {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let details_height = 29.0
+            + if rows.is_empty() {
+                36.0
+            } else {
+                rows.len() as f32 * 28.0
+            };
 
-        div()
+        let details = div()
+            .w_full()
+            .h(px(details_height))
             .flex()
             .flex_col()
-            .gap_2()
-            .pt_1()
-            .child(Divider::horizontal())
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .w_full()
+                    .h(px(9.0))
+                    .child(Divider::horizontal()),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
+                    .w_full()
+                    .h(px(20.0))
                     .text_size(px(10.0))
                     .text_color(weak_text)
                     .child("Reset credit")
@@ -1468,14 +1628,19 @@ impl QuotifyApp {
             .when(rows.is_empty(), |details| {
                 details.child(
                     div()
-                        .py_2()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .h(px(36.0))
                         .text_size(px(10.0))
                         .text_color(weak_text)
                         .child("No reset credit details returned."),
                 )
             })
             .children(rows)
-            .into_any_element()
+            .into_any_element();
+
+        (details, details_height)
     }
 
     fn render_progress_row(w: &crate::provider::UsageWindow, is_dark: bool) -> AnyElement {

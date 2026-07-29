@@ -177,15 +177,6 @@ impl UsageHistory {
             .unwrap_or_default()
     }
 
-    pub fn trend_for_with_budget(
-        &self,
-        provider: &str,
-        days: i64,
-        configured_budget: Option<f64>,
-    ) -> Option<ProviderTrend> {
-        self.trend_for_at_with_budget(provider, days, Utc::now(), configured_budget)
-    }
-
     pub fn trend_for_at_with_budget(
         &self,
         provider: &str,
