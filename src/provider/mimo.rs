@@ -73,7 +73,7 @@ impl MimoProvider {
         }
 
         tracing::info!("No MiMo credentials found. Attempting WebView2 login...");
-        crate::webview_login::login_and_store_async("mimo").await
+        crate::webview_login::login_and_store_async("mimo", false).await
     }
 }
 
@@ -173,7 +173,7 @@ impl Provider for MimoProvider {
             }
 
             tracing::info!("MiMo token expired. Attempting WebView2 login...");
-            let full_cookie = crate::webview_login::login_and_store_async("mimo").await?;
+            let full_cookie = crate::webview_login::login_and_store_async("mimo", true).await?;
 
             current_cookie_header = full_cookie;
 
@@ -194,6 +194,13 @@ impl Provider for MimoProvider {
                 .send()
                 .await
                 .context("Failed to connect to MiMo API on retry")?;
+
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(crate::webview_login::login_required_error(
+                    self.name(),
+                    "automatic login did not restore access",
+                ));
+            }
         }
 
         if !resp.status().is_success() {

@@ -334,7 +334,7 @@ impl QuotifyApp {
 
         let statuses = self.webview_login_status.clone();
         std::thread::spawn(move || {
-            let result = crate::webview_login::login_and_store_for_provider(&provider);
+            let result = crate::webview_login::login_and_store_for_provider(&provider, true);
             match result {
                 Ok(_) => {
                     statuses.lock().remove(&provider);
@@ -685,6 +685,7 @@ impl QuotifyApp {
             .flex_col()
             .justify_between()
             .w_full()
+            .pb(px(20.0))
             .gap_5()
             .children(cards)
             .into_any_element()

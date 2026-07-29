@@ -43,16 +43,24 @@ pub fn login_required_message(error: &str) -> Option<String> {
         .map(|index| error[index..].to_string())
 }
 
-pub fn login_and_store_for_provider(provider: &str) -> Result<String> {
+pub fn login_and_store_for_provider(provider: &str, force_reauth: bool) -> Result<String> {
     let provider = provider.to_ascii_lowercase();
     let (secret_provider, secret_field, cookie) = match provider.as_str() {
-        "mimo" => ("mimo", "cookie_header", run_login_flow(LoginMode::Mimo)?),
+        "mimo" => (
+            "mimo",
+            "cookie_header",
+            run_login_flow(LoginMode::Mimo, force_reauth)?,
+        ),
         "opencode" | "opencodego" => (
             "opencode",
             "auth_cookie",
-            run_login_flow(LoginMode::OpenCode)?,
+            run_login_flow(LoginMode::OpenCode, force_reauth)?,
         ),
-        "ollama" => ("ollama", "auth_cookie", run_login_flow(LoginMode::Ollama)?),
+        "ollama" => (
+            "ollama",
+            "auth_cookie",
+            run_login_flow(LoginMode::Ollama, force_reauth)?,
+        ),
         _ => anyhow::bail!("Provider '{provider}' does not support WebView login"),
     };
 
@@ -62,8 +70,20 @@ pub fn login_and_store_for_provider(provider: &str) -> Result<String> {
     Ok(cookie)
 }
 
-pub async fn login_and_store_async(provider: &'static str) -> Result<String> {
-    tokio::task::spawn_blocking(move || login_and_store_for_provider(provider)).await?
+pub async fn login_and_store_async(provider: &'static str, force_reauth: bool) -> Result<String> {
+    match tokio::task::spawn_blocking(move || login_and_store_for_provider(provider, force_reauth))
+        .await
+    {
+        Ok(Ok(cookie)) => Ok(cookie),
+        Ok(Err(err)) => Err(login_required_error(
+            provider,
+            format!("login was not completed: {err:#}"),
+        )),
+        Err(err) => Err(login_required_error(
+            provider,
+            format!("login task failed: {err}"),
+        )),
+    }
 }
 
 thread_local! {
@@ -71,6 +91,8 @@ thread_local! {
     static TX: RefCell<Option<mpsc::Sender<String>>> = const { RefCell::new(None) };
     static TICKS: RefCell<usize> = const { RefCell::new(0) };
     static MODE: RefCell<LoginMode> = const { RefCell::new(LoginMode::Mimo) };
+    static FORCE_REAUTH: RefCell<bool> = const { RefCell::new(false) };
+    static OPENCODE_AUTH_CALLBACK_SEEN: RefCell<bool> = const { RefCell::new(false) };
 }
 
 struct RawWindow {
@@ -127,8 +149,13 @@ unsafe extern "system" fn window_proc(
 
             WEBVIEW.with(|wv| {
                 if let Some(webview) = wv.borrow().as_ref() {
-                    // Try to get all cookies
-                    if let Ok(cookies) = webview.cookies() {
+                    let cookies = match mode {
+                        LoginMode::OpenCode => {
+                            webview.cookies_for_url("https://opencode.ai/")
+                        }
+                        _ => webview.cookies(),
+                    };
+                    if let Ok(cookies) = cookies {
                         let mut cookies_str = String::new();
                         let mut token_found = false;
                         let mut cookie_names: Vec<String> = Vec::new();
@@ -154,8 +181,20 @@ unsafe extern "system" fn window_proc(
                                 LoginMode::OpenCode => {
                                     // OpenCode uses cookie named "auth"
                                     if name.to_lowercase() == "auth" && !value.is_empty() {
-                                        tracing::info!("OpenCode: Detected auth cookie");
-                                        token_found = true;
+                                        let force_reauth =
+                                            FORCE_REAUTH.with(|value| *value.borrow());
+                                        let callback_seen = OPENCODE_AUTH_CALLBACK_SEEN
+                                            .with(|value| *value.borrow());
+                                        if !force_reauth || callback_seen {
+                                            tracing::info!(
+                                                "OpenCode: Detected authenticated session cookie"
+                                            );
+                                            token_found = true;
+                                        } else {
+                                            tracing::debug!(
+                                                "OpenCode: Ignoring auth cookie until the login callback completes"
+                                            );
+                                        }
                                     }
                                 }
                                 LoginMode::Ollama => {
@@ -235,22 +274,55 @@ unsafe extern "system" fn window_proc(
 }
 
 pub fn login_and_get_cookie() -> Result<String> {
-    run_login_flow(LoginMode::Mimo)
+    run_login_flow(LoginMode::Mimo, false)
 }
 
 pub fn opencode_login_and_get_cookie() -> Result<String> {
-    run_login_flow(LoginMode::OpenCode)
+    run_login_flow(LoginMode::OpenCode, false)
 }
 
 pub fn ollama_login_and_get_cookie() -> Result<String> {
-    run_login_flow(LoginMode::Ollama)
+    run_login_flow(LoginMode::Ollama, false)
 }
 
-fn run_login_flow(mode: LoginMode) -> Result<String> {
+fn is_login_cookie(mode: LoginMode, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    match mode {
+        LoginMode::Mimo => name.contains("servicetoken"),
+        LoginMode::OpenCode => name == "auth",
+        LoginMode::Ollama => name.contains("session") || name.contains("auth"),
+    }
+}
+
+fn login_url(mode: LoginMode) -> &'static str {
+    match mode {
+        LoginMode::Mimo => "https://platform.xiaomimimo.com",
+        LoginMode::OpenCode => "https://opencode.ai/auth",
+        LoginMode::Ollama => "https://ollama.com/signin",
+    }
+}
+
+fn cookie_scope_url(mode: LoginMode) -> &'static str {
+    match mode {
+        LoginMode::Mimo => "https://platform.xiaomimimo.com/",
+        LoginMode::OpenCode => "https://opencode.ai/",
+        LoginMode::Ollama => "https://ollama.com/",
+    }
+}
+
+fn is_opencode_auth_callback_url(url: &str) -> bool {
+    url.starts_with("https://opencode.ai/auth/callback")
+}
+
+fn run_login_flow(mode: LoginMode, force_reauth: bool) -> Result<String> {
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
         unsafe {
+            TICKS.with(|value| *value.borrow_mut() = 0);
+            FORCE_REAUTH.with(|value| *value.borrow_mut() = force_reauth);
+            OPENCODE_AUTH_CALLBACK_SEEN.with(|value| *value.borrow_mut() = false);
+
             let hinstance = GetModuleHandleW(None).unwrap_or_default();
             let class_name = match mode {
                 LoginMode::Mimo => w!("QuotifyMimoLoginClass"),
@@ -298,16 +370,21 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
             }
             let mut web_context = wry::WebContext::new(Some(data_dir));
 
-            let url = match mode {
-                LoginMode::Mimo => "https://platform.xiaomimimo.com",
-                LoginMode::OpenCode => "https://opencode.ai",
-                LoginMode::Ollama => "https://ollama.com/signin",
-            };
+            let url = login_url(mode);
 
+            let initial_url = if force_reauth { "about:blank" } else { url };
             let webview = WebViewBuilder::new_with_web_context(&mut web_context)
                 .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
-                .with_url(url)
+                .with_url(initial_url)
                 .with_devtools(true)
+                .with_navigation_handler(|url| {
+                    if is_opencode_auth_callback_url(&url) {
+                        tracing::info!("OpenCode: Authentication callback reached");
+                        OPENCODE_AUTH_CALLBACK_SEEN
+                            .with(|value| *value.borrow_mut() = true);
+                    }
+                    true
+                })
                 .with_new_window_req_handler(|new_url, _| {
                     tracing::info!("WebView requested new window for URL: {}", new_url);
                     WEBVIEW.with(|wv| {
@@ -319,6 +396,24 @@ fn run_login_flow(mode: LoginMode) -> Result<String> {
                 })
                 .build(&window)
                 .expect("Failed to build webview");
+
+            if force_reauth {
+                if let Ok(cookies) = webview.cookies_for_url(cookie_scope_url(mode)) {
+                    for cookie in cookies {
+                        if is_login_cookie(mode, cookie.name())
+                            && let Err(err) = webview.delete_cookie(&cookie)
+                        {
+                            tracing::warn!(
+                                "Failed to clear stale {:?} login cookie '{}': {err}",
+                                mode,
+                                cookie.name()
+                            );
+                        }
+                    }
+                }
+                let _ = webview.load_url(url);
+                let _ = ShowWindow(hwnd, SW_SHOW);
+            }
 
             // Initial bounds setting
             let mut rect = RECT::default();
@@ -395,5 +490,33 @@ mod tests {
             Some("WebView login required for mimo: credentials expired")
         );
         assert!(login_required_message("ordinary network error").is_none());
+    }
+
+    #[test]
+    fn identifies_provider_login_cookies() {
+        assert!(is_login_cookie(LoginMode::OpenCode, "auth"));
+        assert!(!is_login_cookie(LoginMode::OpenCode, "analytics"));
+        assert!(is_login_cookie(
+            LoginMode::Mimo,
+            "api-platform_serviceToken"
+        ));
+        assert!(is_login_cookie(
+            LoginMode::Ollama,
+            "__Host-next-auth.session-token"
+        ));
+    }
+
+    #[test]
+    fn only_accepts_opencode_auth_callback_as_login_completion() {
+        assert!(is_opencode_auth_callback_url(
+            "https://opencode.ai/auth/callback?code=example&state=example"
+        ));
+        assert!(!is_opencode_auth_callback_url("https://opencode.ai/zh/go"));
+        assert!(!is_opencode_auth_callback_url("https://opencode.ai/"));
+    }
+
+    #[test]
+    fn opencode_login_starts_at_the_auth_endpoint() {
+        assert_eq!(login_url(LoginMode::OpenCode), "https://opencode.ai/auth");
     }
 }

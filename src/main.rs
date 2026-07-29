@@ -1232,12 +1232,14 @@ async fn fetch_providers(
         match handle.await {
             Ok(Ok(data)) => results.push(data),
             Ok(Err(e)) => {
-                tracing::error!("Failed to fetch {}: {}", name, e);
-                results.push(provider_error_data(name, e.to_string()));
+                let error = format!("{e:#}");
+                tracing::error!("Failed to fetch {}: {}", name, error);
+                results.push(provider_error_data(name, error));
             }
             Err(e) => {
-                tracing::error!("Failed to join {} fetch task: {}", name, e);
-                results.push(provider_error_data(name, e.to_string()));
+                let error = format!("{e:#}");
+                tracing::error!("Failed to join {} fetch task: {}", name, error);
+                results.push(provider_error_data(name, error));
             }
         }
     }

@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
 
 const OPENCODE_SERVER_URL: &str = "https://opencode.ai/_server";
 const OPENCODE_WORKSPACES_FUNCTION_ID: &str =
-    "0c8d84b0a700eb0de440ca4c9105b42d6c9ede971d6bf592fa4f91bbeaaa1e6b";
+    "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f";
 const OPENCODE_SUBSCRIPTION_FUNCTION_ID: &str =
-    "7abeebee372f304e050aaaf92be863f4a86490e382f8c79db68fd94040d691b4";
+    "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
+static SERVER_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct OpenCodeProvider {
     provider_name: &'static str,
@@ -113,7 +115,7 @@ impl Provider for OpenCodeProvider {
             Ok(cookie) => cookie,
             Err(_) if self.auto_webview_login => {
                 tracing::info!("OpenCode credentials missing. Attempting WebView2 login...");
-                crate::webview_login::login_and_store_async("opencode").await?
+                crate::webview_login::login_and_store_async("opencode", false).await?
             }
             Err(err) => {
                 return Err(crate::webview_login::login_required_error(self.name(), err));
@@ -124,10 +126,17 @@ impl Provider for OpenCodeProvider {
             Ok(result) => result,
             Err(err) if is_webview_auth_failure(&err) && self.auto_webview_login => {
                 tracing::info!("OpenCode credentials rejected. Attempting WebView2 login...");
-                let fresh_cookie = crate::webview_login::login_and_store_async("opencode").await?;
-                self.fetch_via_server_cookie(&fresh_cookie)
-                    .await
-                    .context("Failed to fetch OpenCode Go usage after WebView login")?
+                let fresh_cookie =
+                    crate::webview_login::login_and_store_async("opencode", true).await?;
+                match self.fetch_via_server_cookie(&fresh_cookie).await {
+                    Ok(result) => result,
+                    Err(retry_err) => {
+                        return Err(crate::webview_login::login_required_error(
+                            self.name(),
+                            format!("automatic login did not restore access: {retry_err:#}"),
+                        ));
+                    }
+                }
             }
             Err(err) if is_webview_auth_failure(&err) => {
                 return Err(crate::webview_login::login_required_error(
@@ -172,7 +181,12 @@ impl OpenCodeProvider {
             workspace_id
         } else {
             let body = self
-                .post_server_function(cookie_header, OPENCODE_WORKSPACES_FUNCTION_ID, &[])
+                .call_server_function(
+                    cookie_header,
+                    OPENCODE_WORKSPACES_FUNCTION_ID,
+                    &[],
+                    "https://opencode.ai/",
+                )
                 .await
                 .context("Failed to fetch OpenCode workspaces")?;
             parse_workspace_id(&body).context("OpenCode workspace ID not found")?
@@ -188,10 +202,11 @@ impl OpenCodeProvider {
         }
 
         let body = self
-            .post_server_function(
+            .call_server_function(
                 cookie_header,
                 OPENCODE_SUBSCRIPTION_FUNCTION_ID,
                 &[serde_json::Value::String(workspace_id.clone())],
+                &format!("https://opencode.ai/workspace/{workspace_id}/go"),
             )
             .await
             .with_context(|| format!("Failed to fetch OpenCode subscription for {workspace_id}"))?;
@@ -255,13 +270,56 @@ impl OpenCodeProvider {
         Ok((windows, credits))
     }
 
-    async fn post_server_function(
+    async fn call_server_function(
         &self,
         cookie_header: &str,
         function_id: &str,
         args: &[serde_json::Value],
+        referer: &str,
     ) -> Result<String> {
         let args_json = serde_json::to_string(args)?;
+        let mut get_request = self
+            .client
+            .get(OPENCODE_SERVER_URL)
+            .query(&[("id", function_id)]);
+        if !args.is_empty() {
+            get_request = get_request.query(&[("args", args_json.as_str())]);
+        }
+
+        let get_request = get_request
+            .header("X-Server-Id", function_id)
+            .header(
+                "X-Server-Instance",
+                server_instance_id(),
+            )
+            .header("Cookie", cookie_header)
+            .header("Origin", "https://opencode.ai")
+            .header("Referer", referer)
+            .header(
+                "Accept",
+                "text/javascript, application/json;q=0.9, */*;q=0.8",
+            )
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+            );
+
+        let mut last_error = match get_request.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.text().await.unwrap_or_default();
+                if !looks_like_html(&body) {
+                    return Ok(body);
+                }
+                Some("OpenCode server returned HTML".to_string())
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                Some(format!("OpenCode server error {status}: {body}"))
+            }
+            Err(err) => Some(err.to_string()),
+        };
+
         let form_body = if args.is_empty() {
             vec![("id", function_id.to_string())]
         } else {
@@ -277,7 +335,6 @@ impl OpenCodeProvider {
             ServerPayload::Form(form_body),
         ];
 
-        let mut last_error = None;
         for payload in attempts {
             let mut request = self
                 .client
@@ -285,7 +342,7 @@ impl OpenCodeProvider {
                 .header("x-server-id", function_id)
                 .header("Cookie", cookie_header)
                 .header("Origin", "https://opencode.ai")
-                .header("Referer", "https://opencode.ai/")
+                .header("Referer", referer)
                 .header(
                     "Accept",
                     "text/javascript, application/json, text/plain, */*",
@@ -303,7 +360,7 @@ impl OpenCodeProvider {
             match request.send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let body = resp.text().await.unwrap_or_default();
-                    if body.starts_with("<!DOCTYPE") || body.starts_with("<html") {
+                    if looks_like_html(&body) {
                         last_error = Some("OpenCode server returned HTML".to_string());
                     } else {
                         return Ok(body);
@@ -325,6 +382,17 @@ impl OpenCodeProvider {
             last_error.unwrap_or_else(|| "OpenCode server call failed".to_string())
         )
     }
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html")
+}
+
+fn server_instance_id() -> String {
+    let timestamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let counter = SERVER_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("server-fn:quotify-{timestamp:x}-{counter:x}")
 }
 
 enum ServerPayload {

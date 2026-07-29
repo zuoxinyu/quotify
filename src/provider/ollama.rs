@@ -195,7 +195,7 @@ impl Provider for OllamaProvider {
             }
 
             tracing::info!("Ollama: No credentials found, launching WebView login...");
-            match crate::webview_login::login_and_store_async("ollama").await {
+            match crate::webview_login::login_and_store_async("ollama", false).await {
                 Ok(fresh_cookie) => {
                     cookie = Some(fresh_cookie);
                 }
@@ -222,7 +222,7 @@ impl Provider for OllamaProvider {
                     tracing::warn!(
                         "Ollama settings page fetch failed: {err}. Retrying with WebView login..."
                     );
-                    match crate::webview_login::login_and_store_async("ollama").await {
+                    match crate::webview_login::login_and_store_async("ollama", true).await {
                         Ok(fresh_cookie) => match self.fetch_settings_usage(&fresh_cookie).await {
                             Ok(data) => return Ok(data),
                             Err(err2) => {
@@ -232,7 +232,10 @@ impl Provider for OllamaProvider {
                                 if self.resolve_api_key().is_some() {
                                     return self.fetch_api_usage().await;
                                 } else {
-                                    anyhow::bail!("Failed to fetch Ollama settings usage: {err2}");
+                                    return Err(crate::webview_login::login_required_error(
+                                        self.name(),
+                                        format!("automatic login did not restore access: {err2:#}"),
+                                    ));
                                 }
                             }
                         },
