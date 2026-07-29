@@ -18,7 +18,7 @@ mod version;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gpui::prelude::*;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use provider::{
     Provider, UsageData, abacus::AbacusProvider, alibabatoken::AlibabaTokenProvider,
     amp::AmpProvider, antigravity::AntigravityProvider, augment::AugmentProvider,
@@ -36,7 +36,11 @@ use provider::{
     windsurf::WindsurfProvider, zai::ZaiProvider,
 };
 use std::{
-    sync::{Arc, OnceLock, atomic::Ordering},
+    cell::RefCell,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -58,7 +62,14 @@ static BACKDROP_DARK_MODE: std::sync::atomic::AtomicBool =
 static BACKDROP_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
 pub static SYSTEM_SLEEPING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static IGNORE_INACTIVE_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+static FLYOUT_STATE: AtomicU8 = AtomicU8::new(FlyoutState::Hidden as u8);
+static NEXT_FLYOUT_TIMER_ID: AtomicUsize = AtomicUsize::new(0x5155);
+const FLYOUT_WIDTH_DIP: f32 = 400.0;
+const FLYOUT_HEIGHT_DIP: f32 = 520.0;
+const FLYOUT_GAP_PX: i32 = 16;
+const FLYOUT_SHOW_DURATION: Duration = Duration::from_millis(180);
+const FLYOUT_HIDE_DURATION: Duration = Duration::from_millis(150);
+const FLYOUT_TIMER_INTERVAL_MS: u32 = 10;
 pub const PROVIDER_ORDER: [&str; 42] = [
     "codex",
     "openai",
@@ -104,8 +115,27 @@ pub const PROVIDER_ORDER: [&str; 42] = [
     "mimo",
 ];
 
-fn inactive_guard() -> &'static Mutex<Option<Instant>> {
-    IGNORE_INACTIVE_UNTIL.get_or_init(|| Mutex::new(None))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum FlyoutState {
+    Hidden,
+    Showing,
+    Visible,
+    Hiding,
+}
+
+fn flyout_state() -> FlyoutState {
+    match FLYOUT_STATE.load(Ordering::SeqCst) {
+        value if value == FlyoutState::Showing as u8 => FlyoutState::Showing,
+        value if value == FlyoutState::Visible as u8 => FlyoutState::Visible,
+        value if value == FlyoutState::Hiding as u8 => FlyoutState::Hiding,
+        _ => FlyoutState::Hidden,
+    }
+}
+
+fn set_flyout_state(state: FlyoutState) {
+    FLYOUT_STATE.store(state as u8, Ordering::SeqCst);
+    tray::WINDOW_VISIBLE.store(state != FlyoutState::Hidden, Ordering::SeqCst);
 }
 
 fn normalize_backdrop_setting(setting: &str) -> &'static str {
@@ -1556,19 +1586,20 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
 
         let win_w = 400.0_f32;
         let win_h = 520.0_f32;
-        let pos = hidden_popup_position();
 
         let window_options = gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
                 origin: gpui::Point {
-                    x: gpui::px(pos[0] as f32),
-                    y: gpui::px(pos[1] as f32),
+                    x: gpui::px(0.0),
+                    y: gpui::px(0.0),
                 },
                 size: gpui::size(gpui::px(win_w), gpui::px(win_h)),
             })),
             titlebar: None,
-            focus: true,
-            show: true,
+            focus: false,
+            // GPUI still creates the native HWND, root view, renderer, and first frame
+            // when show is false. Win32 owns every later visibility transition.
+            show: false,
             kind: gpui::WindowKind::PopUp,
             is_movable: false,
             is_resizable: false,
@@ -1603,20 +1634,25 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         });
 
         let root_view = view.clone();
+        let created_hwnd = Arc::new(OnceLock::new());
+        let created_hwnd_for_builder = created_hwnd.clone();
         let win_w = cx
             .open_window(window_options, move |window, cx| {
-                // Get window handle and store it in OnceLock
+                // Resolve and prepare the native window, but publish it only after
+                // open_window has installed the root and completed its first draw.
                 use raw_window_handle::HasWindowHandle;
                 if let Ok(handle) = window.window_handle() {
                     if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw()
                     {
                         let hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
                         tracing::info!("Successfully resolved Win32 HWND: {:?}", hwnd.0);
-                        let _ = tray::MAIN_HWND.set(tray::SendHWND::new(hwnd));
                         unsafe {
                             use windows::Win32::UI::Shell::SetWindowSubclass;
+                            use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
+                            let _ = SetWindowTextW(hwnd, windows::core::w!("Quotify"));
                             let _ = SetWindowSubclass(hwnd, Some(main_window_subclass), 1, 0);
                         }
+                        let _ = created_hwnd_for_builder.set(tray::SendHWND::new(hwnd));
                     } else {
                         tracing::warn!("Resolved window handle but it is not Win32");
                     }
@@ -1645,19 +1681,12 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             })
             .expect("failed to observe window appearance");
 
-        // Operations such as SetWindowPos synchronously emit GPUI callbacks. Run them
-        // after the current App borrow is released, and tolerate delayed HWND publication.
+        // Operations such as DWM setup synchronously emit native callbacks. Run them
+        // only after open_window has completed the root installation and first draw.
+        let created_hwnd = created_hwnd.get().copied();
         std::thread::spawn(move || {
-            let shwnd = (0..100).find_map(|_| {
-                let hwnd = tray::MAIN_HWND.get().copied();
-                if hwnd.is_none() {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                hwnd
-            });
-
-            let Some(shwnd) = shwnd else {
-                tracing::error!("Timed out waiting for the GPUI HWND");
+            let Some(shwnd) = created_hwnd else {
+                tracing::error!("GPUI did not publish a native HWND");
                 return;
             };
 
@@ -1667,8 +1696,12 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             // Quotify drops its opaque fallback fill and reveals the DWM backdrop.
             trigger_gui_update();
             apply_rounded_window_region(hwnd);
-            move_popup_offscreen(hwnd);
-            set_dwm_cloak(hwnd, true);
+            let _ = tray::MAIN_HWND.set(shwnd);
+
+            if tray::QUIT_REQUESTED.load(Ordering::SeqCst) {
+                let _ = shwnd.post_message(tray::WM_APP_QUIT, WPARAM(0), LPARAM(0));
+                return;
+            }
 
             #[cfg(debug_assertions)]
             if std::env::var_os("QUOTIFY_SHOW_ON_START").is_some() {
@@ -1727,144 +1760,668 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     Ok(())
 }
 
-fn compute_popup_position(win_w: f32, win_h: f32) -> [f32; 2] {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RectPx {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl RectPx {
+    fn width(self) -> i32 {
+        self.right - self.left
+    }
+
+    fn height(self) -> i32 {
+        self.bottom - self.top
+    }
+
+    fn center(self) -> [i32; 2] {
+        [self.left + self.width() / 2, self.top + self.height() / 2]
+    }
+
+    fn intersects(self, other: Self) -> bool {
+        self.left < other.right
+            && self.right > other.left
+            && self.top < other.bottom
+            && self.bottom > other.top
+    }
+}
+
+impl From<windows::Win32::Foundation::RECT> for RectPx {
+    fn from(rect: windows::Win32::Foundation::RECT) -> Self {
+        Self {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskbarEdge {
+    Left,
+    Top,
+    Right,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FlyoutPlacement {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    gap: i32,
+    edge: TaskbarEdge,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FlyoutAnimation {
+    generation: u64,
+    phase: FlyoutState,
+    from: [i32; 2],
+    to: [i32; 2],
+    started_at: Instant,
+    duration: Duration,
+}
+
+#[derive(Default)]
+struct FlyoutController {
+    placement: Option<FlyoutPlacement>,
+    animation: Option<FlyoutAnimation>,
+    timer_id: Option<usize>,
+    generation: u64,
+    quit_after_hide: bool,
+}
+
+std::thread_local! {
+    static FLYOUT_CONTROLLER: RefCell<FlyoutController> =
+        RefCell::new(FlyoutController::default());
+}
+
+fn nearest_monitor_edge(monitor: RectPx, anchor: [i32; 2]) -> TaskbarEdge {
+    let distances = [
+        (anchor[0] - monitor.left).abs(),
+        (anchor[1] - monitor.top).abs(),
+        (monitor.right - anchor[0]).abs(),
+        (monitor.bottom - anchor[1]).abs(),
+    ];
+    let index = distances
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(index, _)| index)
+        .unwrap_or(3);
+    match index {
+        0 => TaskbarEdge::Left,
+        1 => TaskbarEdge::Top,
+        2 => TaskbarEdge::Right,
+        _ => TaskbarEdge::Bottom,
+    }
+}
+
+fn taskbar_edge_from_rect(monitor: RectPx, taskbar: RectPx) -> TaskbarEdge {
+    if taskbar.width() >= taskbar.height() {
+        let top_distance = (taskbar.top - monitor.top).abs();
+        let bottom_distance = (monitor.bottom - taskbar.bottom).abs();
+        if top_distance <= bottom_distance {
+            TaskbarEdge::Top
+        } else {
+            TaskbarEdge::Bottom
+        }
+    } else {
+        let left_distance = (taskbar.left - monitor.left).abs();
+        let right_distance = (monitor.right - taskbar.right).abs();
+        if left_distance <= right_distance {
+            TaskbarEdge::Left
+        } else {
+            TaskbarEdge::Right
+        }
+    }
+}
+
+fn taskbar_edge_from_work_area(monitor: RectPx, work_area: RectPx) -> Option<TaskbarEdge> {
+    let insets = [
+        (work_area.left - monitor.left, TaskbarEdge::Left),
+        (work_area.top - monitor.top, TaskbarEdge::Top),
+        (monitor.right - work_area.right, TaskbarEdge::Right),
+        (monitor.bottom - work_area.bottom, TaskbarEdge::Bottom),
+    ];
+    insets
+        .into_iter()
+        .filter(|(inset, _)| *inset > 0)
+        .max_by_key(|(inset, _)| *inset)
+        .map(|(_, edge)| edge)
+}
+
+fn clamp_to_span(value: i32, minimum: i32, maximum: i32) -> i32 {
+    if maximum < minimum {
+        minimum
+    } else {
+        value.clamp(minimum, maximum)
+    }
+}
+
+fn scale_dip(dip: f32, dpi: u32) -> i32 {
+    (dip * dpi.max(96) as f32 / 96.0).round() as i32
+}
+
+fn layout_flyout(
+    monitor: RectPx,
+    work_area: RectPx,
+    taskbar: Option<RectPx>,
+    anchor: [i32; 2],
+    popup_size: [i32; 2],
+    gap: i32,
+    edge: TaskbarEdge,
+) -> FlyoutPlacement {
+    let taskbar = taskbar.filter(|rect| rect.intersects(monitor));
+    let width = popup_size[0].min((work_area.width() - gap * 2).max(1));
+    let height = popup_size[1].min((work_area.height() - gap * 2).max(1));
+
+    let x_min = work_area.left + gap;
+    let x_max = work_area.right - width - gap;
+    let y_min = work_area.top + gap;
+    let y_max = work_area.bottom - height - gap;
+
+    let (preferred_x, preferred_y) = match edge {
+        TaskbarEdge::Bottom => {
+            let boundary = taskbar
+                .map(|rect| rect.top)
+                .unwrap_or_else(|| work_area.bottom.min(monitor.bottom));
+            (anchor[0] - width / 2, boundary - gap - height)
+        }
+        TaskbarEdge::Top => {
+            let boundary = taskbar
+                .map(|rect| rect.bottom)
+                .unwrap_or_else(|| work_area.top.max(monitor.top));
+            (anchor[0] - width / 2, boundary + gap)
+        }
+        TaskbarEdge::Left => {
+            let boundary = taskbar
+                .map(|rect| rect.right)
+                .unwrap_or_else(|| work_area.left.max(monitor.left));
+            (boundary + gap, anchor[1] - height / 2)
+        }
+        TaskbarEdge::Right => {
+            let boundary = taskbar
+                .map(|rect| rect.left)
+                .unwrap_or_else(|| work_area.right.min(monitor.right));
+            (boundary - gap - width, anchor[1] - height / 2)
+        }
+    };
+    let x = clamp_to_span(preferred_x, x_min, x_max);
+    let y = clamp_to_span(preferred_y, y_min, y_max);
+
+    FlyoutPlacement {
+        x,
+        y,
+        width,
+        height,
+        gap,
+        edge,
+    }
+}
+
+fn hidden_flyout_origin(placement: FlyoutPlacement) -> [i32; 2] {
+    match placement.edge {
+        TaskbarEdge::Bottom => [placement.x, placement.y + placement.height + placement.gap],
+        TaskbarEdge::Top => [placement.x, placement.y - placement.height - placement.gap],
+        TaskbarEdge::Left => [placement.x - placement.width - placement.gap, placement.y],
+        TaskbarEdge::Right => [placement.x + placement.width + placement.gap, placement.y],
+    }
+}
+
+#[cfg(test)]
+mod flyout_layout_tests {
+    use super::*;
+
+    const MONITOR: RectPx = RectPx {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    const POPUP: [i32; 2] = [400, 520];
+
+    #[test]
+    fn positions_flyout_above_bottom_taskbar_with_sixteen_pixel_gap() {
+        let placement = layout_flyout(
+            MONITOR,
+            RectPx {
+                bottom: 1040,
+                ..MONITOR
+            },
+            Some(RectPx {
+                left: 0,
+                top: 1040,
+                right: 1920,
+                bottom: 1080,
+            }),
+            [1880, 1060],
+            POPUP,
+            16,
+            TaskbarEdge::Bottom,
+        );
+
+        assert_eq!((placement.x, placement.y), (1504, 504));
+    }
+
+    #[test]
+    fn positions_flyout_for_top_left_and_right_taskbars() {
+        let top = layout_flyout(
+            MONITOR,
+            RectPx { top: 40, ..MONITOR },
+            Some(RectPx {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 40,
+            }),
+            [1000, 20],
+            POPUP,
+            16,
+            TaskbarEdge::Top,
+        );
+        assert_eq!((top.x, top.y), (800, 56));
+
+        let left = layout_flyout(
+            MONITOR,
+            RectPx {
+                left: 48,
+                ..MONITOR
+            },
+            Some(RectPx {
+                left: 0,
+                top: 0,
+                right: 48,
+                bottom: 1080,
+            }),
+            [24, 540],
+            POPUP,
+            16,
+            TaskbarEdge::Left,
+        );
+        assert_eq!((left.x, left.y), (64, 280));
+
+        let right = layout_flyout(
+            MONITOR,
+            RectPx {
+                right: 1872,
+                ..MONITOR
+            },
+            Some(RectPx {
+                left: 1872,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }),
+            [1896, 540],
+            POPUP,
+            16,
+            TaskbarEdge::Right,
+        );
+        assert_eq!((right.x, right.y), (1456, 280));
+    }
+
+    #[test]
+    fn preserves_negative_virtual_screen_coordinates() {
+        let monitor = RectPx {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        let placement = layout_flyout(
+            monitor,
+            RectPx {
+                bottom: 1040,
+                ..monitor
+            },
+            Some(RectPx {
+                left: -1920,
+                top: 1040,
+                right: 0,
+                bottom: 1080,
+            }),
+            [-40, 1060],
+            POPUP,
+            16,
+            TaskbarEdge::Bottom,
+        );
+
+        assert_eq!((placement.x, placement.y), (-416, 504));
+    }
+
+    #[test]
+    fn keeps_the_taskbar_gap_at_sixteen_physical_pixels_for_every_dpi() {
+        let monitor = RectPx {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2160,
+        };
+        let work_area = RectPx {
+            bottom: 2080,
+            ..monitor
+        };
+        let taskbar = RectPx {
+            left: 0,
+            top: 2080,
+            right: 3840,
+            bottom: 2160,
+        };
+
+        for dpi in [96, 120, 144, 192] {
+            let placement = layout_flyout(
+                monitor,
+                work_area,
+                Some(taskbar),
+                [3800, 2120],
+                [
+                    scale_dip(FLYOUT_WIDTH_DIP, dpi),
+                    scale_dip(FLYOUT_HEIGHT_DIP, dpi),
+                ],
+                FLYOUT_GAP_PX,
+                TaskbarEdge::Bottom,
+            );
+            assert_eq!(taskbar.top - (placement.y + placement.height), 16);
+        }
+    }
+
+    #[test]
+    fn derives_taskbar_edges_from_the_returned_rectangle() {
+        assert_eq!(
+            taskbar_edge_from_rect(
+                MONITOR,
+                RectPx {
+                    right: 48,
+                    ..MONITOR
+                }
+            ),
+            TaskbarEdge::Left
+        );
+        assert_eq!(
+            taskbar_edge_from_rect(
+                MONITOR,
+                RectPx {
+                    bottom: 40,
+                    ..MONITOR
+                }
+            ),
+            TaskbarEdge::Top
+        );
+        assert_eq!(
+            taskbar_edge_from_rect(
+                MONITOR,
+                RectPx {
+                    left: 1872,
+                    ..MONITOR
+                }
+            ),
+            TaskbarEdge::Right
+        );
+        assert_eq!(
+            taskbar_edge_from_rect(
+                MONITOR,
+                RectPx {
+                    top: 1040,
+                    ..MONITOR
+                }
+            ),
+            TaskbarEdge::Bottom
+        );
+    }
+
+    #[test]
+    fn hides_the_window_fully_behind_each_taskbar_edge() {
+        let placement = |edge| FlyoutPlacement {
+            x: 100,
+            y: 200,
+            width: 400,
+            height: 520,
+            gap: 16,
+            edge,
+        };
+
+        assert_eq!(
+            hidden_flyout_origin(placement(TaskbarEdge::Bottom)),
+            [100, 736]
+        );
+        assert_eq!(
+            hidden_flyout_origin(placement(TaskbarEdge::Top)),
+            [100, -336]
+        );
+        assert_eq!(
+            hidden_flyout_origin(placement(TaskbarEdge::Left)),
+            [-316, 200]
+        );
+        assert_eq!(
+            hidden_flyout_origin(placement(TaskbarEdge::Right)),
+            [516, 200]
+        );
+    }
+
+    #[test]
+    fn preserves_animation_timing_and_shortens_reversals() {
+        assert_eq!(
+            remaining_animation_duration([0, 0], [0, 536], 536, FLYOUT_SHOW_DURATION),
+            Duration::from_millis(180)
+        );
+        assert_eq!(
+            remaining_animation_duration([0, 268], [0, 536], 536, FLYOUT_SHOW_DURATION),
+            Duration::from_millis(90)
+        );
+        assert_eq!(
+            remaining_animation_duration([0, 536], [0, 0], 536, FLYOUT_HIDE_DURATION),
+            Duration::from_millis(150)
+        );
+    }
+
+    #[test]
+    fn animation_curves_keep_exact_endpoints() {
+        assert_eq!(animation_easing(FlyoutState::Showing, 0.0), 0.0);
+        assert_eq!(animation_easing(FlyoutState::Showing, 1.0), 1.0);
+        assert_eq!(animation_easing(FlyoutState::Hiding, 0.0), 0.0);
+        assert_eq!(animation_easing(FlyoutState::Hiding, 1.0), 1.0);
+        assert_eq!(interpolate_origin([10, 20], [110, 220], 0.0), [10, 20]);
+        assert_eq!(interpolate_origin([10, 20], [110, 220], 1.0), [110, 220]);
+    }
+
+    #[test]
+    fn auto_hidden_taskbar_uses_the_monitor_edge() {
+        let placement = layout_flyout(
+            MONITOR,
+            MONITOR,
+            None,
+            [960, 1079],
+            POPUP,
+            16,
+            TaskbarEdge::Bottom,
+        );
+
+        assert_eq!((placement.x, placement.y), (760, 544));
+    }
+
+    #[test]
+    fn oversized_flyout_does_not_panic() {
+        let placement = layout_flyout(
+            RectPx {
+                left: 0,
+                top: 0,
+                right: 300,
+                bottom: 200,
+            },
+            RectPx {
+                left: 0,
+                top: 0,
+                right: 300,
+                bottom: 160,
+            },
+            Some(RectPx {
+                left: 0,
+                top: 160,
+                right: 300,
+                bottom: 200,
+            }),
+            [280, 180],
+            POPUP,
+            16,
+            TaskbarEdge::Bottom,
+        );
+
+        assert_eq!(
+            (placement.x, placement.y, placement.width, placement.height),
+            (16, 16, 268, 128)
+        );
+    }
+}
+
+fn tray_icon_rect() -> Option<RectPx> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
+
+        let shwnd = crate::tray::TRAY_HWND.get().copied()?;
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: shwnd.raw(),
+            uID: 1,
+            guidItem: Default::default(),
+        };
+        unsafe { Shell_NotifyIconGetRect(&identifier).ok().map(Into::into) }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+fn system_taskbar() -> Option<RectPx> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Shell::{ABM_GETTASKBARPOS, APPBARDATA, SHAppBarMessage};
+
+        let mut data = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            ..Default::default()
+        };
+        if unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) } == 0 {
+            return None;
+        }
+        Some(data.rc.into())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+fn compute_popup_placement(hwnd: HWND) -> FlyoutPlacement {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::Graphics::Gdi::{
             GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
         };
-        use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
-        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        };
 
-        let mut pt = POINT { x: 0, y: 0 };
-        unsafe {
-            let _ = GetCursorPos(&mut pt);
-        }
-
-        // Try to get actual tray icon rect
-        if let Some(&shwnd) = crate::tray::TRAY_HWND.get() {
-            let identifier = NOTIFYICONIDENTIFIER {
-                cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-                hWnd: shwnd.raw(),
-                uID: 1,
-                guidItem: Default::default(),
-            };
+        let icon = tray_icon_rect();
+        let mut anchor = icon.map(RectPx::center).unwrap_or([0, 0]);
+        if icon.is_none() {
+            let mut cursor = POINT::default();
             unsafe {
-                if let Ok(rect) = Shell_NotifyIconGetRect(&identifier) {
-                    // Use icon center as the reference point instead of arbitrary cursor pos
-                    pt.x = rect.left + (rect.right - rect.left) / 2;
-                    pt.y = rect.top + (rect.bottom - rect.top) / 2;
+                if GetCursorPos(&mut cursor).is_ok() {
+                    anchor = [cursor.x, cursor.y];
                 }
             }
         }
 
-        unsafe {
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..std::mem::zeroed()
+        let monitor_handle = unsafe {
+            MonitorFromPoint(
+                POINT {
+                    x: anchor[0],
+                    y: anchor[1],
+                },
+                MONITOR_DEFAULTTONEAREST,
+            )
+        };
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !unsafe { GetMonitorInfoW(monitor_handle, &mut monitor_info) }.as_bool() {
+            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+            let width = scale_dip(FLYOUT_WIDTH_DIP, dpi);
+            let height = scale_dip(FLYOUT_HEIGHT_DIP, dpi);
+            let gap = FLYOUT_GAP_PX;
+            return FlyoutPlacement {
+                x: anchor[0] - width / 2,
+                y: anchor[1] - height - gap,
+                width,
+                height,
+                gap,
+                edge: TaskbarEdge::Bottom,
             };
-            if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-                let work = mi.rcWork;
-                let monitor = mi.rcMonitor;
-                let margin = 20.0;
-
-                // Determine taskbar position by comparing work area to monitor area
-                if work.bottom < monitor.bottom {
-                    // Taskbar is at the bottom
-                    let mut x = pt.x as f32 - win_w / 2.0;
-                    x = x.clamp(
-                        work.left as f32 + margin,
-                        (work.right as f32 - win_w - margin).max(work.left as f32),
-                    );
-                    let y = work.bottom as f32 - win_h - margin;
-                    return [x, y];
-                } else if work.top > monitor.top {
-                    // Taskbar is at the top
-                    let mut x = pt.x as f32 - win_w / 2.0;
-                    x = x.clamp(
-                        work.left as f32 + margin,
-                        (work.right as f32 - win_w - margin).max(work.left as f32),
-                    );
-                    let y = work.top as f32 + margin;
-                    return [x, y];
-                } else if work.left > monitor.left {
-                    // Taskbar is on the left
-                    let x = work.left as f32 + margin;
-                    let mut y = pt.y as f32 - win_h / 2.0;
-                    y = y.clamp(
-                        work.top as f32 + margin,
-                        (work.bottom as f32 - win_h - margin).max(work.top as f32),
-                    );
-                    return [x, y];
-                } else if work.right < monitor.right {
-                    // Taskbar is on the right
-                    let x = work.right as f32 - win_w - margin;
-                    let mut y = pt.y as f32 - win_h / 2.0;
-                    y = y.clamp(
-                        work.top as f32 + margin,
-                        (work.bottom as f32 - win_h - margin).max(work.top as f32),
-                    );
-                    return [x, y];
-                } else {
-                    // Taskbar might be auto-hidden (work == monitor)
-                    // Determine the edge based on the tray icon position `pt` relative to `monitor`
-                    let mon_w = (monitor.right - monitor.left) as f32;
-                    let mon_h = (monitor.bottom - monitor.top) as f32;
-                    let pt_x_rel = (pt.x - monitor.left) as f32;
-                    let pt_y_rel = (pt.y - monitor.top) as f32;
-
-                    if pt_y_rel < mon_h / 4.0 {
-                        // Taskbar is at the top
-                        let mut x = pt.x as f32 - win_w / 2.0;
-                        x = x.clamp(
-                            monitor.left as f32 + margin,
-                            (monitor.right as f32 - win_w - margin).max(monitor.left as f32),
-                        );
-                        let y = monitor.top as f32 + margin;
-                        return [x, y];
-                    } else if pt_x_rel < mon_w / 4.0 {
-                        // Taskbar is on the left
-                        let x = monitor.left as f32 + margin;
-                        let mut y = pt.y as f32 - win_h / 2.0;
-                        y = y.clamp(
-                            monitor.top as f32 + margin,
-                            (monitor.bottom as f32 - win_h - margin).max(monitor.top as f32),
-                        );
-                        return [x, y];
-                    } else if pt_x_rel > mon_w * 0.75 {
-                        // Taskbar is on the right
-                        let x = monitor.right as f32 - win_w - margin;
-                        let mut y = pt.y as f32 - win_h / 2.0;
-                        y = y.clamp(
-                            monitor.top as f32 + margin,
-                            (monitor.bottom as f32 - win_h - margin).max(monitor.top as f32),
-                        );
-                        return [x, y];
-                    } else {
-                        // Taskbar is at the bottom (default fallback)
-                        let mut x = pt.x as f32 - win_w / 2.0;
-                        x = x.clamp(
-                            monitor.left as f32 + margin,
-                            (monitor.right as f32 - win_w - margin).max(monitor.left as f32),
-                        );
-                        let y = monitor.bottom as f32 - win_h - margin;
-                        return [x, y];
-                    }
-                }
-            }
         }
 
-        [
-            (pt.x as f32 - win_w / 2.0).max(0.0),
-            (pt.y as f32 - win_h).max(0.0),
-        ]
+        let monitor: RectPx = monitor_info.rcMonitor.into();
+        let work_area: RectPx = monitor_info.rcWork.into();
+
+        // Move the still-hidden window onto the tray icon's monitor before asking
+        // Windows for its DPI. GPUI receives WM_DPICHANGED synchronously here.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                work_area.left,
+                work_area.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let popup_size = [
+            scale_dip(FLYOUT_WIDTH_DIP, dpi),
+            scale_dip(FLYOUT_HEIGHT_DIP, dpi),
+        ];
+        let gap = FLYOUT_GAP_PX;
+
+        // Notification icons in the overflow flyout are not physically inside
+        // the taskbar rectangle, but they still belong to the system taskbar.
+        let taskbar = system_taskbar().filter(|rect| rect.intersects(monitor));
+        let edge = taskbar
+            .map(|rect| taskbar_edge_from_rect(monitor, rect))
+            .or_else(|| {
+                icon.is_none()
+                    .then(|| taskbar_edge_from_work_area(monitor, work_area))
+                    .flatten()
+            })
+            .unwrap_or_else(|| nearest_monitor_edge(monitor, anchor));
+
+        layout_flyout(monitor, work_area, taskbar, anchor, popup_size, gap, edge)
     }
+
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (win_w, win_h);
-        [100.0, 100.0]
+        let _ = hwnd;
+        FlyoutPlacement {
+            x: 100,
+            y: 100,
+            width: FLYOUT_WIDTH_DIP as i32,
+            height: FLYOUT_HEIGHT_DIP as i32,
+            gap: FLYOUT_GAP_PX,
+            edge: TaskbarEdge::Bottom,
+        }
     }
 }
 
@@ -2019,74 +2576,53 @@ unsafe extern "system" fn main_window_subclass(
     unsafe {
         use windows::Win32::UI::Shell::DefSubclassProc;
         use windows::Win32::UI::WindowsAndMessaging::{
-            SW_HIDE, SetForegroundWindow, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
-            WM_DESTROY, WM_DWMCOMPOSITIONCHANGED, WM_SIZE,
+            WA_INACTIVE, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DWMCOMPOSITIONCHANGED, WM_KEYDOWN,
+            WM_SIZE, WM_TIMER,
         };
 
         match msg {
-            tray::WM_APP_SHOW => {
-                let target_page = wparam.0 as u32;
-                let current_page = tray::ACTIVE_PAGE.load(Ordering::SeqCst);
-
-                if tray::WINDOW_VISIBLE.load(Ordering::SeqCst) {
-                    if target_page == current_page {
-                        hide_popup_window(hwnd);
-                        return LRESULT(0);
-                    } else {
-                        tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
-                        trigger_gui_update();
-                        let _ = SetForegroundWindow(hwnd);
-                        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-                        let _ = SetFocus(Some(hwnd));
-                        return LRESULT(0);
-                    }
+            tray::WM_APP_TOGGLE => {
+                if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
+                    hide_popup_window(hwnd);
+                } else {
+                    tray::ACTIVE_PAGE.store(wparam.0 as u32, Ordering::SeqCst);
+                    show_popup_window(hwnd);
+                    trigger_gui_update();
                 }
-
-                tray::ACTIVE_PAGE.store(target_page, Ordering::SeqCst);
-
-                let scale = window_scale_factor();
-                let physical_w = (400.0 * scale) as i32;
-                let physical_h = (520.0 * scale) as i32;
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
-                };
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    physical_w,
-                    physical_h,
-                    SWP_NOMOVE | SWP_NOZORDER,
-                );
-
-                let (win_w, win_h) =
-                    actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
-                let pos = compute_popup_position(win_w, win_h);
-                *inactive_guard().lock() = Some(Instant::now() + Duration::from_millis(350));
-                apply_rounded_window_region(hwnd);
-                set_dwm_cloak(hwnd, false);
-                show_popup_window(hwnd, pos);
-                let _ = SetForegroundWindow(hwnd);
-
-                use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-                let _ = SetFocus(Some(hwnd));
-
+                LRESULT(0)
+            }
+            tray::WM_APP_SHOW => {
+                tray::ACTIVE_PAGE.store(wparam.0 as u32, Ordering::SeqCst);
+                if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
+                    if !activate_popup_window(hwnd) {
+                        hide_popup_window(hwnd);
+                    }
+                } else {
+                    show_popup_window(hwnd);
+                }
                 trigger_gui_update();
-
+                LRESULT(0)
+            }
+            tray::WM_APP_HIDE => {
+                hide_popup_window(hwnd);
                 LRESULT(0)
             }
             WM_ACTIVATE => {
                 let active_state = (wparam.0 & 0xFFFF) as u32;
-                if active_state == WA_INACTIVE {
-                    let ignore_inactive = inactive_guard()
-                        .lock()
-                        .is_some_and(|until| Instant::now() < until);
-                    if !ignore_inactive && !is_pointer_on_tray_icon() {
-                        hide_popup_window(hwnd);
-                    }
+                if active_state == WA_INACTIVE
+                    && matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible)
+                    && !is_pointer_on_tray_icon()
+                {
+                    hide_popup_window(hwnd);
                 }
                 DefSubclassProc(hwnd, msg, wparam, lparam)
+            }
+            WM_KEYDOWN
+                if wparam.0
+                    == windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0 as usize =>
+            {
+                hide_popup_window(hwnd);
+                LRESULT(0)
             }
             WM_CLOSE => {
                 hide_popup_window(hwnd);
@@ -2121,12 +2657,14 @@ unsafe extern "system" fn main_window_subclass(
                 apply_rounded_window_region(hwnd);
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
+            WM_TIMER if handle_flyout_timer(hwnd, wparam.0) => LRESULT(0),
             tray::WM_APP_QUIT => {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                quit_popup_window(hwnd);
                 LRESULT(0)
             }
             WM_DESTROY => {
+                reset_flyout_controller(hwnd);
+                set_flyout_state(FlyoutState::Hidden);
                 let _ = windows::Win32::UI::Shell::RemoveWindowSubclass(
                     hwnd,
                     Some(main_window_subclass),
@@ -2139,223 +2677,401 @@ unsafe extern "system" fn main_window_subclass(
     }
 }
 
-fn window_scale_factor() -> f32 {
+fn activate_popup_window(hwnd: HWND) -> bool {
     #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSX, ReleaseDC};
-        unsafe {
-            let hdc = GetDC(None);
-            if !hdc.0.is_null() {
-                let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSX);
-                let _ = ReleaseDC(None, hdc);
-                return (dpi as f32 / 96.0).max(1.0);
-            }
-        }
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+        GetForegroundWindow() == hwnd
     }
-    1.0
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+        true
+    }
 }
 
-fn actual_window_size(hwnd: HWND) -> Option<(f32, f32)> {
+fn movement_distance(from: [i32; 2], to: [i32; 2]) -> i32 {
+    (from[0] - to[0]).abs().max((from[1] - to[1]).abs())
+}
+
+fn remaining_animation_duration(
+    from: [i32; 2],
+    to: [i32; 2],
+    full_distance: i32,
+    full_duration: Duration,
+) -> Duration {
+    let remaining = movement_distance(from, to);
+    if remaining == 0 {
+        return Duration::from_millis(1);
+    }
+
+    let ratio = remaining as f64 / full_distance.max(1) as f64;
+    let millis = (full_duration.as_millis() as f64 * ratio)
+        .round()
+        .clamp(1.0, full_duration.as_millis() as f64) as u64;
+    Duration::from_millis(millis)
+}
+
+fn animation_easing(phase: FlyoutState, progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    match phase {
+        FlyoutState::Showing => 1.0 - (1.0 - progress).powi(3),
+        FlyoutState::Hiding => progress.powi(3),
+        _ => progress,
+    }
+}
+
+fn interpolate_origin(from: [i32; 2], to: [i32; 2], progress: f32) -> [i32; 2] {
+    [
+        (from[0] as f32 + (to[0] - from[0]) as f32 * progress).round() as i32,
+        (from[1] as f32 + (to[1] - from[1]) as f32 * progress).round() as i32,
+    ]
+}
+
+fn current_window_origin(hwnd: HWND, fallback: [i32; 2]) -> [i32; 2] {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::RECT;
         use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
-        if hwnd.0.is_null() {
-            return None;
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
+            return [rect.left, rect.top];
+        }
+    }
+
+    let _ = hwnd;
+    fallback
+}
+
+fn begin_flyout_animation(phase: FlyoutState, from: [i32; 2], to: [i32; 2], full_distance: i32) {
+    let full_duration = match phase {
+        FlyoutState::Showing => FLYOUT_SHOW_DURATION,
+        FlyoutState::Hiding => FLYOUT_HIDE_DURATION,
+        _ => Duration::from_millis(1),
+    };
+    let duration = remaining_animation_duration(from, to, full_distance, full_duration);
+
+    FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        controller.generation = controller.generation.wrapping_add(1);
+        controller.animation = Some(FlyoutAnimation {
+            generation: controller.generation,
+            phase,
+            from,
+            to,
+            started_at: Instant::now(),
+            duration,
+        });
+    });
+}
+
+fn ensure_flyout_timer(hwnd: HWND) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::SetTimer;
+
+        if FLYOUT_CONTROLLER.with(|controller| controller.borrow().timer_id.is_some()) {
+            return true;
         }
 
-        let mut rect = RECT::default();
-        unsafe {
-            if GetWindowRect(hwnd, &mut rect).is_ok() {
-                let width = rect.right - rect.left;
-                let height = rect.bottom - rect.top;
-                if width > 0 && height > 0 {
-                    return Some((width as f32, height as f32));
-                }
-            }
+        let requested_id = NEXT_FLYOUT_TIMER_ID.fetch_add(1, Ordering::SeqCst);
+        let timer_id =
+            unsafe { SetTimer(Some(hwnd), requested_id, FLYOUT_TIMER_INTERVAL_MS, None) };
+        if timer_id == 0 {
+            tracing::error!("Failed to create flyout animation timer");
+            return false;
         }
-        None
+        FLYOUT_CONTROLLER.with(|controller| {
+            controller.borrow_mut().timer_id = Some(timer_id);
+        });
+        true
     }
+
     #[cfg(not(target_os = "windows"))]
     {
         let _ = hwnd;
-        None
+        false
     }
 }
 
-static CURRENT_ANIMATION_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-fn show_popup_window(hwnd: HWND, final_pos: [f32; 2]) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SW_SHOW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
-        };
-
-        tray::WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-        let scale = window_scale_factor();
-        let physical_w = (400.0 * scale) as i32;
-        let physical_h = (520.0 * scale) as i32;
-
-        let (_win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0 * scale, 520.0 * scale));
-        let anchor_y = popup_anchor_y().unwrap_or(final_pos[1] + 1.0);
-        let start_y = if anchor_y < final_pos[1] {
-            final_pos[1] - win_h
-        } else {
-            final_pos[1] + win_h
-        };
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                final_pos[0] as i32,
-                start_y as i32,
-                physical_w,
-                physical_h,
-                SWP_NOZORDER,
-            );
-            let _ = ShowWindow(hwnd, SW_SHOW);
-        }
-
-        let send_hwnd = tray::SendHWND::new(hwnd);
-        let anim_id = CURRENT_ANIMATION_ID.fetch_add(1, Ordering::SeqCst) + 1;
-
-        std::thread::spawn(move || {
-            let hwnd = send_hwnd.raw();
-            let steps = 18; // Butter-smooth 180ms animation
-            for frame in 1..=steps {
-                if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
-                    return; // Aborted
-                }
-                let t = frame as f32 / steps as f32;
-                let eased = 1.0 - (1.0 - t).powi(3); // Decelerating ease-out curve
-                let y = start_y + (final_pos[1] - start_y) * eased;
-                unsafe {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        final_pos[0] as i32,
-                        y as i32,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW,
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-
-            if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
-                return; // Aborted
-            }
-
-            // Show animation finished, make the window topmost (always-on-top)
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
-                };
-                let _ = SetWindowPos(
-                    hwnd,
-                    Some(HWND_TOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
-        });
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (hwnd, final_pos);
-    }
-}
-
-fn hidden_popup_position() -> [i32; 2] {
-    [-32000, -32000]
-}
-
-fn move_popup_offscreen(hwnd: HWND) {
+fn set_popup_topmost(hwnd: HWND, topmost: bool) {
     #[cfg(target_os = "windows")]
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
-            HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos,
+            HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
         };
-        let pos = hidden_popup_position();
+
+        let insert_after = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
         let _ = SetWindowPos(
             hwnd,
-            Some(HWND_NOTOPMOST),
-            pos[0],
-            pos[1],
+            Some(insert_after),
             0,
             0,
-            SWP_NOSIZE | SWP_NOACTIVATE,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = hwnd;
+        let _ = (hwnd, topmost);
     }
 }
 
-fn set_dwm_cloak(hwnd: HWND, cloaked: bool) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+fn animation_generation_is_current(generation: u64) -> bool {
+    FLYOUT_CONTROLLER.with(|controller| controller.borrow().generation == generation)
+}
 
-        let value: i32 = if cloaked { 1 } else { 0 };
-        unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_CLOAK,
-                &value as *const _ as *const _,
-                std::mem::size_of::<i32>() as u32,
-            );
+fn finalize_flyout_animation(hwnd: HWND, animation: FlyoutAnimation) {
+    if !animation_generation_is_current(animation.generation) {
+        return;
+    }
+
+    match animation.phase {
+        FlyoutState::Showing => {
+            set_popup_topmost(hwnd, true);
+            if animation_generation_is_current(animation.generation) {
+                set_flyout_state(FlyoutState::Visible);
+                tracing::debug!("Flyout show animation completed");
+            }
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (hwnd, cloaked);
-    }
-}
-
-fn popup_anchor_y() -> Option<f32> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
-        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-        if let Some(&shwnd) = crate::tray::TRAY_HWND.get() {
-            let identifier = NOTIFYICONIDENTIFIER {
-                cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-                hWnd: shwnd.raw(),
-                uID: 1,
-                guidItem: Default::default(),
-            };
+        FlyoutState::Hiding => {
+            #[cfg(target_os = "windows")]
             unsafe {
-                if let Ok(rect) = Shell_NotifyIconGetRect(&identifier) {
-                    return Some((rect.top + (rect.bottom - rect.top) / 2) as f32);
+                use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            set_popup_topmost(hwnd, false);
+
+            if !animation_generation_is_current(animation.generation) {
+                return;
+            }
+            let quit_after_hide = FLYOUT_CONTROLLER.with(|controller| {
+                let mut controller = controller.borrow_mut();
+                let quit_after_hide = controller.quit_after_hide;
+                controller.placement = None;
+                controller.quit_after_hide = false;
+                quit_after_hide
+            });
+            set_flyout_state(FlyoutState::Hidden);
+            tracing::debug!("Flyout hide animation completed");
+
+            if quit_after_hide {
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    if let Err(err) = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd) {
+                        tracing::error!("Failed to destroy flyout after exit animation: {err}");
+                    }
                 }
             }
         }
+        _ => {}
+    }
+}
 
-        let mut pt = POINT { x: 0, y: 0 };
+fn finish_flyout_animation_now(hwnd: HWND) {
+    let (timer_id, animation) = FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        (controller.timer_id.take(), controller.animation.take())
+    });
+
+    #[cfg(target_os = "windows")]
+    if let Some(timer_id) = timer_id {
         unsafe {
-            if GetCursorPos(&mut pt).is_ok() {
-                return Some(pt.y as f32);
-            }
+            use windows::Win32::UI::WindowsAndMessaging::KillTimer;
+            let _ = KillTimer(Some(hwnd), timer_id);
         }
-        None
+    }
+
+    let Some(animation) = animation else {
+        return;
+    };
+    #[cfg(target_os = "windows")]
+    let move_result = unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        };
+        SetWindowPos(
+            hwnd,
+            None,
+            animation.to[0],
+            animation.to[1],
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    #[cfg(target_os = "windows")]
+    if let Err(err) = move_result {
+        tracing::error!("Failed to finish flyout animation: {err}");
+        let destroy_after_hide =
+            FLYOUT_CONTROLLER.with(|controller| controller.borrow().quit_after_hide);
+        hide_popup_immediately(hwnd, destroy_after_hide);
+        return;
+    }
+    finalize_flyout_animation(hwnd, animation);
+}
+
+fn handle_flyout_timer(hwnd: HWND, timer_id: usize) -> bool {
+    let frame = FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        if controller.timer_id != Some(timer_id) {
+            return None;
+        }
+        let animation = controller.animation?;
+        let progress = (animation.started_at.elapsed().as_secs_f32()
+            / animation.duration.as_secs_f32())
+        .clamp(0.0, 1.0);
+        let origin = interpolate_origin(
+            animation.from,
+            animation.to,
+            animation_easing(animation.phase, progress),
+        );
+        let complete = progress >= 1.0;
+        if complete {
+            controller.animation = None;
+            controller.timer_id = None;
+        }
+        Some((animation, origin, complete))
+    });
+
+    let Some((animation, origin, complete)) = frame else {
+        return false;
+    };
+
+    #[cfg(target_os = "windows")]
+    let move_result = unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            KillTimer, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        };
+        if complete {
+            let _ = KillTimer(Some(hwnd), timer_id);
+        }
+        SetWindowPos(
+            hwnd,
+            None,
+            origin[0],
+            origin[1],
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+
+    #[cfg(target_os = "windows")]
+    if let Err(err) = move_result {
+        tracing::error!("Failed to move flyout animation frame: {err}");
+        let destroy_after_hide =
+            FLYOUT_CONTROLLER.with(|controller| controller.borrow().quit_after_hide);
+        hide_popup_immediately(hwnd, destroy_after_hide);
+        return true;
+    }
+
+    if complete {
+        finalize_flyout_animation(hwnd, animation);
+    }
+    true
+}
+
+fn show_popup_window(hwnd: HWND) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
+        };
+
+        if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
+            if !activate_popup_window(hwnd) {
+                hide_popup_window(hwnd);
+            }
+            return;
+        }
+
+        let quitting = FLYOUT_CONTROLLER.with(|controller| controller.borrow().quit_after_hide);
+        if quitting {
+            return;
+        }
+
+        let state = flyout_state();
+        let placement = if state == FlyoutState::Hiding {
+            FLYOUT_CONTROLLER
+                .with(|controller| controller.borrow().placement)
+                .unwrap_or_else(|| compute_popup_placement(hwnd))
+        } else {
+            compute_popup_placement(hwnd)
+        };
+        let final_origin = [placement.x, placement.y];
+        let hidden_origin = hidden_flyout_origin(placement);
+        let from = if state == FlyoutState::Hidden {
+            hidden_origin
+        } else {
+            current_window_origin(hwnd, hidden_origin)
+        };
+
+        tracing::debug!(
+            "Showing flyout at ({}, {}) size {}x{} with {}px gap from {:?} taskbar",
+            placement.x,
+            placement.y,
+            placement.width,
+            placement.height,
+            placement.gap,
+            placement.edge
+        );
+
+        FLYOUT_CONTROLLER.with(|controller| {
+            let mut controller = controller.borrow_mut();
+            controller.placement = Some(placement);
+            controller.quit_after_hide = false;
+        });
+        begin_flyout_animation(
+            FlyoutState::Showing,
+            from,
+            final_origin,
+            movement_distance(hidden_origin, final_origin),
+        );
+        set_flyout_state(FlyoutState::Showing);
+
+        let result = unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_NOTOPMOST),
+                from[0],
+                from[1],
+                placement.width,
+                placement.height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        };
+        if let Err(err) = result {
+            tracing::error!("Failed to show flyout: {err}");
+            hide_popup_immediately(hwnd, false);
+            return;
+        }
+
+        apply_rounded_window_region(hwnd);
+        if !ensure_flyout_timer(hwnd) {
+            finish_flyout_animation_now(hwnd);
+        }
+        if !activate_popup_window(hwnd) {
+            tracing::warn!("Windows refused to activate the flyout; hiding it again");
+            hide_popup_window(hwnd);
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        None
+        let _ = hwnd;
     }
 }
 
@@ -2363,18 +3079,10 @@ fn is_pointer_on_tray_icon() -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::POINT;
-        use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-        let Some(&shwnd) = crate::tray::TRAY_HWND.get() else {
+        let Some(rect) = tray_icon_rect() else {
             return false;
-        };
-
-        let identifier = NOTIFYICONIDENTIFIER {
-            cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-            hWnd: shwnd.raw(),
-            uID: 1,
-            guidItem: Default::default(),
         };
 
         let mut pt = POINT { x: 0, y: 0 };
@@ -2382,10 +3090,6 @@ fn is_pointer_on_tray_icon() -> bool {
             if GetCursorPos(&mut pt).is_err() {
                 return false;
             }
-
-            let Ok(rect) = Shell_NotifyIconGetRect(&identifier) else {
-                return false;
-            };
 
             let padding = 6;
             pt.x >= rect.left - padding
@@ -2404,14 +3108,38 @@ fn is_pointer_on_tray_icon() -> bool {
 fn hide_popup_window(hwnd: HWND) {
     #[cfg(target_os = "windows")]
     {
-        *inactive_guard().lock() = None;
-        tray::WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+        };
 
-        // BEFORE the slide-down animation starts, make it standard (NOTOPMOST) so it slides behind the taskbar
+        if matches!(flyout_state(), FlyoutState::Hidden | FlyoutState::Hiding) {
+            return;
+        }
+
+        let placement = FLYOUT_CONTROLLER
+            .with(|controller| controller.borrow().placement)
+            .unwrap_or_else(|| compute_popup_placement(hwnd));
+        let final_origin = [placement.x, placement.y];
+        let hidden_origin = hidden_flyout_origin(placement);
+        let from = current_window_origin(hwnd, final_origin);
+        tracing::debug!(
+            "Hiding flyout toward ({}, {}) behind {:?} taskbar",
+            hidden_origin[0],
+            hidden_origin[1],
+            placement.edge
+        );
+
+        FLYOUT_CONTROLLER.with(|controller| {
+            controller.borrow_mut().placement = Some(placement);
+        });
+        begin_flyout_animation(
+            FlyoutState::Hiding,
+            from,
+            hidden_origin,
+            movement_distance(final_origin, hidden_origin),
+        );
+        set_flyout_state(FlyoutState::Hiding);
         unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{
-                HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
-            };
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_NOTOPMOST),
@@ -2422,59 +3150,94 @@ fn hide_popup_window(hwnd: HWND) {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
-
-        let send_hwnd = tray::SendHWND::new(hwnd);
-        let anim_id = CURRENT_ANIMATION_ID.fetch_add(1, Ordering::SeqCst) + 1;
-
-        let (win_w, win_h) = actual_window_size(hwnd).unwrap_or((400.0, 520.0));
-        let final_pos = compute_popup_position(win_w, win_h);
-        let anchor_y = popup_anchor_y().unwrap_or(final_pos[1] + 1.0);
-        let start_y = if anchor_y < final_pos[1] {
-            final_pos[1] - win_h
-        } else {
-            final_pos[1] + win_h
-        };
-
-        std::thread::spawn(move || {
-            let hwnd = send_hwnd.raw();
-            use windows::Win32::UI::WindowsAndMessaging::{SWP_NOSIZE, SWP_NOZORDER, SetWindowPos};
-
-            let steps = 15; // Smooth 150ms animation
-            for frame in 1..=steps {
-                if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
-                    return; // Aborted by a new show/hide animation
-                }
-                let t = frame as f32 / steps as f32;
-                // Easing curve: ease-in (starts slow, speeds up towards taskbar)
-                let eased = t.powi(3);
-                let y = final_pos[1] + (start_y - final_pos[1]) * eased;
-
-                unsafe {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        final_pos[0] as i32,
-                        y as i32,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOZORDER,
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-
-            if CURRENT_ANIMATION_ID.load(Ordering::SeqCst) != anim_id {
-                return; // Aborted
-            }
-
-            move_popup_offscreen(hwnd);
-            set_dwm_cloak(hwnd, true);
-        });
+        if !ensure_flyout_timer(hwnd) {
+            finish_flyout_animation_now(hwnd);
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         let _ = hwnd;
+    }
+}
+
+fn hide_popup_immediately(hwnd: HWND, destroy_after_hide: bool) {
+    let timer_id = FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        controller.generation = controller.generation.wrapping_add(1);
+        controller.animation = None;
+        controller.placement = None;
+        controller.quit_after_hide = false;
+        controller.timer_id.take()
+    });
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, KillTimer, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SetWindowPos, ShowWindow,
+        };
+
+        if let Some(timer_id) = timer_id {
+            let _ = KillTimer(Some(hwnd), timer_id);
+        }
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+
+    set_flyout_state(FlyoutState::Hidden);
+
+    if destroy_after_hide {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            if let Err(err) = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd) {
+                tracing::error!("Failed to destroy hidden flyout: {err}");
+            }
+        }
+    }
+}
+
+fn quit_popup_window(hwnd: HWND) {
+    if flyout_state() == FlyoutState::Hidden {
+        hide_popup_immediately(hwnd, true);
+        return;
+    }
+
+    FLYOUT_CONTROLLER.with(|controller| {
+        controller.borrow_mut().quit_after_hide = true;
+    });
+    if flyout_state() != FlyoutState::Hiding {
+        hide_popup_window(hwnd);
+    }
+}
+
+fn reset_flyout_controller(hwnd: HWND) {
+    let timer_id = FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        let timer_id = controller.timer_id.take();
+        *controller = FlyoutController::default();
+        timer_id
+    });
+
+    #[cfg(target_os = "windows")]
+    if let Some(timer_id) = timer_id {
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::KillTimer;
+            let _ = KillTimer(Some(hwnd), timer_id);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (hwnd, timer_id);
     }
 }
 pub mod webview_login;

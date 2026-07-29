@@ -20,6 +20,8 @@ pub const WM_TRAYICON: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1
 pub const WM_APP_SHOW: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 pub const WM_APP_UPDATE_DATA: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 3;
 pub const WM_APP_QUIT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 4;
+pub const WM_APP_TOGGLE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 5;
+pub const WM_APP_HIDE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 6;
 
 pub const IDM_SHOW: usize = 1;
 pub const IDM_REFRESH: usize = 2;
@@ -59,6 +61,7 @@ pub static MAIN_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static TRAY_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
+pub static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static ACTIVE_PAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CURRENT_HICON: Mutex<Option<SendHICON>> = Mutex::new(None);
 static CURRENT_TOOLTIP: Mutex<String> = Mutex::new(String::new());
@@ -110,10 +113,14 @@ unsafe extern "system" fn tray_wnd_proc(
                 match event {
                     WM_LBUTTONUP => {
                         if let Some(&shwnd) = MAIN_HWND.get() {
-                            let _ = shwnd.post_message(WM_APP_SHOW, WPARAM(0), LPARAM(0));
+                            let _ = shwnd.post_message(WM_APP_TOGGLE, WPARAM(0), LPARAM(0));
                         }
                     }
                     WM_RBUTTONUP => {
+                        if let Some(&shwnd) = MAIN_HWND.get() {
+                            let _ = shwnd.post_message(WM_APP_HIDE, WPARAM(0), LPARAM(0));
+                        }
+
                         let mut pt = POINT { x: 0, y: 0 };
                         let _ = GetCursorPos(&mut pt);
 
@@ -170,6 +177,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     IDM_QUIT => {
+                        QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
                         if let Some(&shwnd) = MAIN_HWND.get() {
                             let _ = shwnd.post_message(WM_APP_QUIT, WPARAM(0), LPARAM(0));
                         }
