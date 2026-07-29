@@ -1,6 +1,6 @@
 [package]
 name = "quotify"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Windows system tray AI provider quota monitor"
 license = "MIT"
@@ -29,7 +29,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-base64 = "0.22"
+base64 = "0.23"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security_Credentials",
@@ -55,7 +55,7 @@ parking_lot = "0.12"
 raw-window-handle = "0.6"
 rust-embed = { version = "8", features = ["debug-embed"] }
 wry = "0.55.1"
-webview2-com = "0.38.2"
+webview2-com = "0.39"
 
 [build-dependencies]
 embed-resource = "3.0"
