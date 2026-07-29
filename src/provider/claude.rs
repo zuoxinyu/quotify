@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
+use super::{
+    API_BUDGET_WINDOW_DAYS, CreditsInfo, Provider, UsageData, UsageWindow,
+    completed_utc_day_window, http_client,
+};
 
 pub struct ClaudeProvider {
     credentials_path: Option<String>,
@@ -79,6 +82,36 @@ struct ClaudeSettingsEnv {
 struct StatsCacheFile {
     #[serde(default)]
     model_usage: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCostReportResponse {
+    #[serde(default)]
+    data: Vec<AdminCostBucket>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    next_page: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCostBucket {
+    starting_at: String,
+    #[serde(default)]
+    results: Vec<AdminCostResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCostResult {
+    amount: serde_json::Value,
+    currency: String,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct AdminCostTotals {
+    last_full_day: f64,
+    seven_days: f64,
+    thirty_days: f64,
 }
 
 fn parse_usage_windows(usage: &serde_json::Value) -> Vec<UsageWindow> {
@@ -331,6 +364,38 @@ impl ClaudeProvider {
         self.read_settings()
     }
 
+    fn configured_admin_api_key(&self) -> Option<(String, Option<String>)> {
+        if let Some(api_key) = self
+            .api_key
+            .as_ref()
+            .filter(|key| is_admin_api_key(key))
+            .cloned()
+        {
+            return Some((api_key, None));
+        }
+
+        let base_url = || {
+            std::env::var("ANTHROPIC_BASE_URL")
+                .ok()
+                .filter(|url| !url.is_empty())
+        };
+
+        if let Ok(admin_key) = std::env::var("ANTHROPIC_ADMIN_KEY")
+            && !admin_key.is_empty()
+        {
+            return Some((admin_key, base_url()));
+        }
+
+        if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY")
+            && is_admin_api_key(&api_key)
+        {
+            return Some((api_key, base_url()));
+        }
+
+        self.read_settings()
+            .filter(|(api_key, _)| is_admin_api_key(api_key))
+    }
+
     fn read_settings_env() -> Option<(String, Option<String>)> {
         if let Ok(admin_key) = std::env::var("ANTHROPIC_ADMIN_KEY")
             && !admin_key.is_empty()
@@ -360,6 +425,7 @@ impl Provider for ClaudeProvider {
         let mut windows = Vec::new();
         let mut credits = None;
         let mut source = "unknown";
+        let admin_api_key = self.configured_admin_api_key();
 
         // Method 1: Try OAuth token (manual config / env var / credentials file)
         let oauth_token = self
@@ -416,14 +482,40 @@ impl Provider for ClaudeProvider {
                 .or_else(|| self.read_api_key());
 
             if let Some((api_key, base_url)) = api_key_and_url {
-                match self.fetch_via_api_key(&api_key, base_url.as_deref()).await {
-                    Ok(w) => {
-                        windows = w;
-                        source = "api_key";
+                let is_selected_admin_key = admin_api_key
+                    .as_ref()
+                    .is_some_and(|(admin_key, _)| admin_key == &api_key);
+
+                if !is_selected_admin_key {
+                    match self.fetch_via_api_key(&api_key, base_url.as_deref()).await {
+                        Ok(w) => {
+                            windows = w;
+                            source = "api_key";
+                        }
+                        Err(e) => {
+                            tracing::debug!("Claude API key fetch failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::debug!("Claude API key fetch failed: {e}");
-                    }
+                }
+            }
+        }
+
+        // Admin API costs complement OAuth/session subscription quota. An explicitly
+        // configured Admin key should not be ignored merely because quota fetches
+        // succeeded through another authentication method.
+        if let Some((api_key, base_url)) = admin_api_key {
+            let base_url = base_url.as_deref().unwrap_or("https://api.anthropic.com");
+            match self.fetch_via_admin_api(&api_key, base_url).await {
+                Ok(cost_windows) => {
+                    merge_admin_cost_windows(&mut windows, cost_windows);
+                    source = if source == "unknown" {
+                        "admin_api"
+                    } else {
+                        "quota+admin_api"
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!("Claude Admin cost fetch failed: {e}");
                 }
             }
         }
@@ -616,7 +708,7 @@ impl ClaudeProvider {
         base_url: Option<&str>,
     ) -> Result<Vec<UsageWindow>> {
         let base = base_url.unwrap_or("https://api.anthropic.com");
-        if api_key.starts_with("sk-ant-admin-") {
+        if is_admin_api_key(api_key) {
             return self.fetch_via_admin_api(api_key, base).await;
         }
 
@@ -648,84 +740,58 @@ impl ClaudeProvider {
     }
 
     async fn fetch_via_admin_api(&self, api_key: &str, base_url: &str) -> Result<Vec<UsageWindow>> {
-        let ending_at = Utc::now();
-        let starting_at = ending_at - chrono::Duration::days(30);
+        // Daily buckets are UTC-aligned. Query the latest 30 complete buckets so
+        // neither edge is silently dropped by a partial-day timestamp.
+        let (starting_at, ending_at) = completed_utc_day_window(Utc::now());
+        let mut totals = AdminCostTotals::default();
+        let mut page = None;
+        let mut seen_pages = std::collections::HashSet::new();
 
-        let url = format!(
-            "{}/v1/organizations/cost_report",
-            base_url.trim_end_matches('/')
-        );
+        loop {
+            let url = admin_cost_report_url(base_url, &starting_at, &ending_at, page.as_deref())?;
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .query(&[
-                ("starting_at", starting_at.to_rfc3339()),
-                ("ending_at", ending_at.to_rfc3339()),
-            ])
-            .send()
-            .await
-            .context("Failed to fetch Claude cost report via Admin API")?;
+            let resp = self
+                .client
+                .get(url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+                .context("Failed to fetch Claude cost report via Admin API")?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Claude Admin API error: {status} - {body}");
-        }
-
-        #[derive(Debug, serde::Deserialize)]
-        struct AdminCostReportResponse {
-            data: Option<Vec<AdminCostItem>>,
-        }
-
-        #[derive(Debug, serde::Deserialize)]
-        struct AdminCostItem {
-            bucket_start_time: String,
-            cost_usd: serde_json::Value,
-        }
-
-        let report: AdminCostReportResponse = resp
-            .json()
-            .await
-            .context("Failed to parse Claude cost report response")?;
-
-        let mut today_cost = 0.0;
-        let mut seven_day_cost = 0.0;
-        let mut thirty_day_cost = 0.0;
-
-        let now = Utc::now();
-        let start_of_today = now
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_local_timezone(Utc)
-            .unwrap();
-        let start_of_seven_days = now - chrono::Duration::days(7);
-
-        if let Some(items) = report.data {
-            for item in items {
-                let cost = parse_cost_usd(&item.cost_usd);
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&item.bucket_start_time) {
-                    let dt_utc = dt.to_utc();
-                    if dt_utc >= start_of_today {
-                        today_cost += cost;
-                    }
-                    if dt_utc >= start_of_seven_days {
-                        seven_day_cost += cost;
-                    }
-                    thirty_day_cost += cost;
-                }
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Claude Admin API error: {status} - {body}");
             }
+
+            let report: AdminCostReportResponse = resp
+                .json()
+                .await
+                .context("Failed to parse Claude cost report response")?;
+
+            totals += parse_admin_cost_report(&report, ending_at);
+
+            if !report.has_more {
+                break;
+            }
+
+            let next_page = report
+                .next_page
+                .filter(|next_page| !next_page.is_empty())
+                .context("Claude Admin cost report has_more without next_page")?;
+            if !seen_pages.insert(next_page.clone()) {
+                anyhow::bail!("Claude Admin cost report repeated a pagination cursor");
+            }
+            page = Some(next_page);
         }
 
-        let windows = vec![
+        Ok(vec![
             UsageWindow {
-                label: "Today's Spend".to_string(),
+                label: "Last Full Day Spend".to_string(),
                 used_percent: 0.0,
                 limit: None,
-                used: Some(today_cost),
+                used: Some(totals.last_full_day),
                 unit: Some("USD".to_string()),
                 resets_at: None,
             },
@@ -733,7 +799,7 @@ impl ClaudeProvider {
                 label: "7d Spend".to_string(),
                 used_percent: 0.0,
                 limit: None,
-                used: Some(seven_day_cost),
+                used: Some(totals.seven_days),
                 unit: Some("USD".to_string()),
                 resets_at: None,
             },
@@ -741,14 +807,100 @@ impl ClaudeProvider {
                 label: "30d Spend".to_string(),
                 used_percent: 0.0,
                 limit: None,
-                used: Some(thirty_day_cost),
+                used: Some(totals.thirty_days),
                 unit: Some("USD".to_string()),
                 resets_at: None,
             },
-        ];
-
-        Ok(windows)
+        ])
     }
+}
+
+impl std::ops::AddAssign for AdminCostTotals {
+    fn add_assign(&mut self, rhs: Self) {
+        self.last_full_day += rhs.last_full_day;
+        self.seven_days += rhs.seven_days;
+        self.thirty_days += rhs.thirty_days;
+    }
+}
+
+fn is_admin_api_key(api_key: &str) -> bool {
+    api_key.starts_with("sk-ant-admin01-") || api_key.starts_with("sk-ant-admin-")
+}
+
+fn admin_cost_report_url(
+    base_url: &str,
+    starting_at: &DateTime<Utc>,
+    ending_at: &DateTime<Utc>,
+    page: Option<&str>,
+) -> Result<reqwest::Url> {
+    let endpoint = format!(
+        "{}/v1/organizations/cost_report",
+        base_url.trim_end_matches('/')
+    );
+    let mut url = reqwest::Url::parse(&endpoint)
+        .with_context(|| format!("Invalid Claude Admin API URL: {endpoint}"))?;
+
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("starting_at", &starting_at.to_rfc3339())
+            .append_pair("ending_at", &ending_at.to_rfc3339())
+            .append_pair("bucket_width", "1d")
+            .append_pair("limit", &(API_BUDGET_WINDOW_DAYS + 1).to_string());
+        if let Some(page) = page {
+            query.append_pair("page", page);
+        }
+    }
+
+    Ok(url)
+}
+
+fn parse_admin_cost_report(
+    report: &AdminCostReportResponse,
+    ending_at: DateTime<Utc>,
+) -> AdminCostTotals {
+    let start_of_last_full_day = ending_at - chrono::Duration::days(1);
+    let start_of_seven_days = ending_at - chrono::Duration::days(7);
+    let start_of_thirty_days = ending_at - chrono::Duration::days(API_BUDGET_WINDOW_DAYS);
+    let mut totals = AdminCostTotals::default();
+
+    for bucket in &report.data {
+        let Ok(starting_at) = DateTime::parse_from_rfc3339(&bucket.starting_at) else {
+            continue;
+        };
+        let starting_at = starting_at.to_utc();
+        if starting_at < start_of_thirty_days || starting_at >= ending_at {
+            continue;
+        }
+
+        let cost = bucket
+            .results
+            .iter()
+            .filter(|result| result.currency.eq_ignore_ascii_case("USD"))
+            .filter_map(|result| parse_cost_usd(&result.amount))
+            .sum::<f64>();
+
+        totals.thirty_days += cost;
+        if starting_at >= start_of_seven_days {
+            totals.seven_days += cost;
+        }
+        if starting_at >= start_of_last_full_day {
+            totals.last_full_day += cost;
+        }
+    }
+
+    totals
+}
+
+fn merge_admin_cost_windows(windows: &mut Vec<UsageWindow>, cost_windows: Vec<UsageWindow>) {
+    const COST_WINDOW_LABELS: [&str; 4] = [
+        "Today's Spend",
+        "Last Full Day Spend",
+        "7d Spend",
+        "30d Spend",
+    ];
+    windows.retain(|window| !COST_WINDOW_LABELS.contains(&window.label.as_str()));
+    windows.extend(cost_windows);
 }
 
 fn normalize_session_key(value: &str) -> Option<String> {
@@ -780,14 +932,150 @@ fn normalize_session_key(value: &str) -> Option<String> {
     }
 }
 
-fn parse_cost_usd(v: &serde_json::Value) -> f64 {
-    if let Some(s) = v.as_str() {
-        s.parse::<f64>().unwrap_or(0.0)
-    } else if let Some(f) = v.as_f64() {
-        f
-    } else if let Some(i) = v.as_i64() {
-        i as f64
+fn parse_cost_usd(value: &serde_json::Value) -> Option<f64> {
+    let cents = if let Some(s) = value.as_str() {
+        s.parse::<f64>().ok()
     } else {
-        0.0
+        value.as_f64()
+    }?;
+
+    cents.is_finite().then_some(cents / 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn recognizes_official_admin_api_key_prefix() {
+        assert!(is_admin_api_key("sk-ant-admin01-example"));
+        assert!(is_admin_api_key("sk-ant-admin-legacy"));
+        assert!(!is_admin_api_key("sk-ant-api03-example"));
+    }
+
+    #[test]
+    fn parses_bucketed_cost_results_from_cents() {
+        let report: AdminCostReportResponse = serde_json::from_value(json!({
+            "data": [
+                {
+                    "starting_at": "2026-07-28T00:00:00Z",
+                    "ending_at": "2026-07-29T00:00:00Z",
+                    "results": [
+                        {"amount": "100.00", "currency": "USD"},
+                        {"amount": "999.00", "currency": "EUR"}
+                    ]
+                },
+                {
+                    "starting_at": "2026-07-25T00:00:00Z",
+                    "ending_at": "2026-07-26T00:00:00Z",
+                    "results": [
+                        {"amount": "250.50", "currency": "usd"}
+                    ]
+                },
+                {
+                    "starting_at": "2026-07-15T00:00:00Z",
+                    "ending_at": "2026-07-16T00:00:00Z",
+                    "results": [
+                        {"amount": 50, "currency": "USD"}
+                    ]
+                },
+                {
+                    "starting_at": "2026-06-28T00:00:00Z",
+                    "ending_at": "2026-06-29T00:00:00Z",
+                    "results": [
+                        {"amount": "900.00", "currency": "USD"}
+                    ]
+                }
+            ],
+            "has_more": true,
+            "next_page": "page_next"
+        }))
+        .unwrap();
+        let ending_at = Utc.with_ymd_and_hms(2026, 7, 29, 0, 0, 0).unwrap();
+
+        let totals = parse_admin_cost_report(&report, ending_at);
+
+        assert!((totals.last_full_day - 1.0).abs() < f64::EPSILON);
+        assert!((totals.seven_days - 3.505).abs() < 1e-12);
+        assert!((totals.thirty_days - 4.005).abs() < 1e-12);
+        assert!(report.has_more);
+        assert_eq!(report.next_page.as_deref(), Some("page_next"));
+    }
+
+    #[test]
+    fn constructs_daily_paginated_cost_report_request() {
+        let starting_at = Utc.with_ymd_and_hms(2026, 6, 29, 0, 0, 0).unwrap();
+        let ending_at = Utc.with_ymd_and_hms(2026, 7, 29, 0, 0, 0).unwrap();
+
+        let url = admin_cost_report_url(
+            "https://api.anthropic.com/",
+            &starting_at,
+            &ending_at,
+            Some("page/next+opaque"),
+        )
+        .unwrap();
+        let query = url
+            .query_pairs()
+            .into_owned()
+            .collect::<BTreeMap<String, String>>();
+
+        assert_eq!(url.path(), "/v1/organizations/cost_report");
+        assert_eq!(
+            query.get("starting_at").map(String::as_str),
+            Some("2026-06-29T00:00:00+00:00")
+        );
+        assert_eq!(
+            query.get("ending_at").map(String::as_str),
+            Some("2026-07-29T00:00:00+00:00")
+        );
+        assert_eq!(query.get("bucket_width").map(String::as_str), Some("1d"));
+        assert_eq!(query.get("limit").map(String::as_str), Some("31"));
+        assert_eq!(
+            query.get("page").map(String::as_str),
+            Some("page/next+opaque")
+        );
+    }
+
+    #[test]
+    fn admin_cost_merge_preserves_subscription_quota_windows() {
+        let mut windows = vec![
+            UsageWindow {
+                label: "Session (5h)".to_string(),
+                used_percent: 42.0,
+                limit: None,
+                used: None,
+                unit: None,
+                resets_at: None,
+            },
+            UsageWindow {
+                label: "30d Spend".to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: Some(1.0),
+                unit: Some("USD".to_string()),
+                resets_at: None,
+            },
+        ];
+        let cost_windows = vec![UsageWindow {
+            label: "30d Spend".to_string(),
+            used_percent: 0.0,
+            limit: None,
+            used: Some(12.34),
+            unit: Some("USD".to_string()),
+            resets_at: None,
+        }];
+
+        merge_admin_cost_windows(&mut windows, cost_windows);
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Session (5h)");
+        assert_eq!(windows[0].used_percent, 42.0);
+        assert_eq!(windows[1].label, "30d Spend");
+        assert_eq!(windows[1].used, Some(12.34));
     }
 }

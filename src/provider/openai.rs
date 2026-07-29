@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
+use super::{
+    API_BUDGET_WINDOW_DAYS, CreditsInfo, Provider, UsageData, UsageWindow,
+    completed_utc_day_window, http_client,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -63,7 +66,12 @@ impl Provider for OpenAiProvider {
         match self.fetch_costs(&base_url, &headers).await {
             Ok(data) => Ok(data),
             Err(cost_err) => match self.fetch_credit_grants(&base_url, &headers).await {
-                Ok(data) => Ok(data),
+                Ok(data) => {
+                    tracing::warn!(
+                        "OpenAI costs API failed; using legacy credit grants without budget spend data: {cost_err}"
+                    );
+                    Ok(data)
+                }
                 Err(credit_err) => anyhow::bail!(
                     "OpenAI costs API failed: {cost_err}; legacy credit grants failed: {credit_err}"
                 ),
@@ -74,8 +82,7 @@ impl Provider for OpenAiProvider {
 
 impl OpenAiProvider {
     async fn fetch_costs(&self, base_url: &str, headers: &HeaderMap) -> Result<UsageData> {
-        let end = Utc::now();
-        let start = end - Duration::days(7);
+        let (start, end) = completed_utc_day_window(Utc::now());
         let resp = self
             .client
             .get(format!("{base_url}/v1/organization/costs"))
@@ -83,7 +90,8 @@ impl OpenAiProvider {
             .query(&[
                 ("start_time", start.timestamp().to_string()),
                 ("end_time", end.timestamp().to_string()),
-                ("limit", "7".to_string()),
+                ("bucket_width", "1d".to_string()),
+                ("limit", API_BUDGET_WINDOW_DAYS.to_string()),
             ])
             .send()
             .await
@@ -104,7 +112,7 @@ impl OpenAiProvider {
         Ok(UsageData {
             provider: self.name().to_string(),
             windows: vec![UsageWindow {
-                label: "Cost 7d".to_string(),
+                label: "Cost 30d".to_string(),
                 used_percent: 0.0,
                 limit: None,
                 used: Some(total_cost),
@@ -196,4 +204,40 @@ fn number_field(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
             .get(*key)
             .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn cost_window_covers_the_last_thirty_complete_utc_days() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap();
+        let (start, end) = completed_utc_day_window(now);
+
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 6, 29, 0, 0, 0).unwrap());
+        assert_eq!(end, Utc.with_ymd_and_hms(2026, 7, 29, 0, 0, 0).unwrap());
+        assert_eq!(API_BUDGET_WINDOW_DAYS, 30);
+    }
+
+    #[test]
+    fn sums_nested_cost_amounts_without_counting_unrelated_values() {
+        let response = serde_json::json!({
+            "data": [
+                {
+                    "results": [
+                        {"amount": {"value": 1.25, "currency": "usd"}},
+                        {"amount": {"value": "2.75", "currency": "usd"}}
+                    ]
+                },
+                {
+                    "amount": {"value": 3.5},
+                    "unrelated": 99
+                }
+            ]
+        });
+
+        assert_eq!(sum_cost_values(&response), 7.5);
+    }
 }

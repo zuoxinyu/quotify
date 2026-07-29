@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use windows::Win32::Foundation::ERROR_NOT_FOUND;
 use windows::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
     CredWriteW,
@@ -107,15 +108,18 @@ pub fn set(provider: &str, field: &str, value: &str) -> Result<()> {
 
 fn delete_raw(provider: &str, field: &str) -> Result<()> {
     let target = wide_null(&target(provider, field));
-    let _ = unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, Some(0)) };
-    Ok(())
+    match unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, Some(0)) } {
+        Ok(()) => Ok(()),
+        Err(err) if err.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) => Ok(()),
+        Err(err) => Err(err).context("Failed to delete Windows credential"),
+    }
 }
 
 #[allow(dead_code)]
 pub fn delete(provider: &str, field: &str) -> Result<()> {
-    let _ = delete_raw(provider, field);
+    delete_raw(provider, field)?;
     for i in 0..20 {
-        let _ = delete_raw(provider, &format!("{field}/part{i}"));
+        delete_raw(provider, &format!("{field}/part{i}"))?;
     }
     Ok(())
 }
@@ -234,7 +238,21 @@ pub fn hydrate_config(config: &mut crate::config::AppConfig) {
     hydrate_api_key(&mut config.kimi, "kimi", &["KIMI_AUTH_TOKEN"]);
     hydrate_api_key(&mut config.kilo, "kilo", &["KILO_API_KEY"]);
     hydrate_api_key(&mut config.augment, "augment", &["AUGMENT_SESSION_TOKEN"]);
-    hydrate_api_key(&mut config.bedrock, "bedrock", &["CODEXBAR_BEDROCK_BUDGET"]);
+    if config.provider_budget("bedrock").is_none() {
+        let legacy_config_value = config.bedrock.api_key.clone();
+        let legacy_value = (!legacy_config_value.trim().is_empty())
+            .then_some(legacy_config_value)
+            .or_else(|| {
+                let value = get_or_env("bedrock", "api_key", &["CODEXBAR_BEDROCK_BUDGET"]);
+                (!value.trim().is_empty()).then_some(value)
+            });
+        if let Some(budget) = legacy_value.as_deref().and_then(parse_positive_budget) {
+            config.set_provider_budget("bedrock", Some(budget));
+        }
+    }
+    // Bedrock's historical `api_key` field stored a budget, not a credential.
+    // Keep the runtime field empty so future saves migrate it to provider_budgets.
+    config.bedrock.api_key.clear();
     hydrate_api_key(
         &mut config.vertexai,
         "vertexai",
@@ -320,7 +338,6 @@ pub fn store_and_scrub_config(config: &mut crate::config::AppConfig) {
     store_api_key(&mut config.kimi, "kimi");
     store_api_key(&mut config.kilo, "kilo");
     store_api_key(&mut config.augment, "augment");
-    store_api_key(&mut config.bedrock, "bedrock");
     store_api_key(&mut config.vertexai, "vertexai");
     store_api_key(&mut config.stepfun, "stepfun");
     store_api_key(&mut config.abacus, "abacus");
@@ -349,6 +366,14 @@ fn hydrate_api_key(config: &mut crate::config::ApiKeyProviderConfig, provider: &
     config.api_key = get_or_env(provider, "api_key", env);
 }
 
+fn parse_positive_budget(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
 fn store_api_key(config: &mut crate::config::ApiKeyProviderConfig, provider: &str) {
     set_secret_from_input(provider, "api_key", &mut config.api_key);
 }
@@ -356,6 +381,15 @@ fn store_api_key(config: &mut crate::config::ApiKeyProviderConfig, provider: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_budget_parser_accepts_only_positive_finite_values() {
+        assert_eq!(parse_positive_budget(" 125.50 "), Some(125.5));
+        assert_eq!(parse_positive_budget("0"), None);
+        assert_eq!(parse_positive_budget("-10"), None);
+        assert_eq!(parse_positive_budget("NaN"), None);
+        assert_eq!(parse_positive_budget("not-a-number"), None);
+    }
 
     #[test]
     fn test_write_credential() {

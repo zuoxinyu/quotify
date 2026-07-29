@@ -45,6 +45,95 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub const PROVIDER_CATALOG: &[(&str, &str)] = &[
+    ("codex", "Codex"),
+    ("openai", "OpenAI"),
+    ("opencode", "OpenCode"),
+    ("claude", "Claude"),
+    ("gemini", "Gemini"),
+    ("antigravity", "Antigravity"),
+    ("deepseek", "DeepSeek"),
+    ("openrouter", "OpenRouter"),
+    ("moonshot", "Moonshot"),
+    ("elevenlabs", "ElevenLabs"),
+    ("doubao", "Doubao"),
+    ("zai", "z.ai"),
+    ("venice", "Venice"),
+    ("crof", "Crof"),
+    ("synthetic", "Synthetic"),
+    ("warp", "Warp"),
+    ("groqcloud", "GroqCloud"),
+    ("deepgram", "Deepgram"),
+    ("llmproxy", "LLM Proxy"),
+    ("codebuff", "Codebuff"),
+    ("kiro", "Kiro"),
+    ("copilot", "Copilot"),
+    ("azureopenai", "Azure OpenAI"),
+    ("ollama", "Ollama"),
+    ("minimax", "MiniMax"),
+    ("jetbrains", "JetBrains AI"),
+    ("kimi", "Kimi"),
+    ("kilo", "Kilo Code"),
+    ("augment", "Augment"),
+    ("bedrock", "AWS Bedrock"),
+    ("vertexai", "Vertex AI"),
+    ("stepfun", "StepFun"),
+    ("abacus", "Abacus AI"),
+    ("alibabatoken", "Alibaba Token"),
+    ("t3chat", "T3 Chat"),
+    ("amp", "Amp"),
+    ("mistral", "Mistral"),
+    ("grok", "Grok"),
+    ("cursor", "Cursor"),
+    ("droid", "Factory Droid"),
+    ("windsurf", "Windsurf"),
+    ("mimo", "MiMo"),
+];
+
+pub fn display_name(provider: &str) -> &str {
+    PROVIDER_CATALOG
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(provider))
+        .map(|(_, display_name)| *display_name)
+        .unwrap_or(provider)
+}
+
+pub fn supports_api_budget(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "openai" | "claude" | "bedrock"
+    )
+}
+
+pub fn is_budget_spend_window(provider: &str, label: &str, unit: Option<&str>) -> bool {
+    if !unit.is_some_and(|unit| unit.eq_ignore_ascii_case("usd")) {
+        return false;
+    }
+
+    let label = label
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect::<String>();
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "openai" | "bedrock" => label == "cost30d",
+        "claude" => label == "30dspend",
+        _ => false,
+    }
+}
+
+pub const API_BUDGET_WINDOW_DAYS: i64 = 30;
+
+pub fn completed_utc_day_window(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+    let end = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time")
+        .and_utc();
+    let start = end - chrono::Duration::days(API_BUDGET_WINDOW_DAYS);
+    (start, end)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageWindow {
     pub label: String,

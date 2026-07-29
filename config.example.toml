@@ -56,6 +56,24 @@ provider_order = [
   "windsurf",
 ]
 
+[notifications]
+enabled = false                       # Master switch; all Windows notifications are off by default
+monthly_resets = false                # Notify after a provider's monthly quota reset is detected
+weekly_resets = false                 # Notify after a provider's weekly quota reset is detected
+five_hour_resets = false              # Notify after a provider's 5-hour quota reset is detected
+usage_threshold_enabled = false       # Notify when usage reaches the configured percentage
+usage_threshold_percent = 80.0        # Threshold from 1 to 100; inactive while the option above is false
+silent_refresh_failures = false       # Notify when a background refresh fails
+
+[provider_budgets]
+# Non-sensitive 30-day budgets. Uncomment positive USD amounts as needed.
+# If CODEXBAR_BEDROCK_BUDGET is set, unset it before disabling Bedrock's budget here.
+# Budget progress is available only when the provider returns actual 30-day USD spend.
+# Currently supported: OpenAI, Claude Admin API, and AWS Bedrock.
+# openai = 100.0
+# claude = 100.0
+# bedrock = 100.0
+
 [network]
 proxy = ""                          # Optional explicit proxy: http://127.0.0.1:7890 or socks5://127.0.0.1:7890
 
@@ -211,7 +229,7 @@ base_url = ""                       # Reserved
 
 [bedrock]
 enabled = false
-api_key = ""                        # Optional monthly budget in USD; env: CODEXBAR_BEDROCK_BUDGET
+api_key = ""                        # Legacy budget field; leave empty and use [provider_budgets].bedrock
 base_url = ""                       # Reserved; uses AWS CLI Cost Explorer and AWS_* env/profile credentials
 
 [vertexai]

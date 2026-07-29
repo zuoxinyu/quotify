@@ -244,7 +244,7 @@ struct ProviderSelectFieldState {
     _subscription: Subscription,
 }
 
-struct RefreshSliderFieldState {
+struct SliderFieldState {
     slider: Entity<SliderState>,
     _subscription: Subscription,
 }
@@ -260,6 +260,7 @@ pub struct QuotifyApp {
     pub update_status: Arc<parking_lot::Mutex<UpdateStatus>>,
     pub provider_test_status: Arc<parking_lot::Mutex<ProviderTestStatus>>,
     webview_login_status: Arc<parking_lot::Mutex<HashMap<String, WebViewLoginStatus>>>,
+    budget_input_errors: HashMap<String, String>,
     pub selected_setting_provider: String,
     pub show_codex_reset_credits: bool,
 }
@@ -285,6 +286,7 @@ impl QuotifyApp {
             update_status: Arc::new(parking_lot::Mutex::new(UpdateStatus::Idle)),
             provider_test_status: Arc::new(parking_lot::Mutex::new(ProviderTestStatus::Idle)),
             webview_login_status: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            budget_input_errors: HashMap::new(),
             selected_setting_provider: "openai".to_string(),
             show_codex_reset_credits: false,
         }
@@ -298,8 +300,18 @@ impl QuotifyApp {
         } else {
             config_to_save.save()
         };
-        if let Err(err) = res {
-            tracing::error!("Failed to save config: {err}");
+        match res {
+            Ok(()) => {
+                // The old Bedrock budget lived in Credential Manager under an
+                // `api_key` name. Once the non-secret config has been saved,
+                // remove that obsolete fallback so clearing the budget sticks.
+                if let Err(err) = crate::secrets::delete("bedrock", "api_key") {
+                    tracing::warn!("Failed to remove legacy Bedrock budget credential: {err}");
+                }
+            }
+            Err(err) => {
+                tracing::error!("Failed to save config: {err}");
+            }
         }
     }
 
@@ -386,7 +398,15 @@ impl QuotifyApp {
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()?;
-                        rt.block_on(provider.fetch_usage())
+                        let mut data = rt.block_on(provider.fetch_usage())?;
+                        let budget_unavailable =
+                            crate::apply_provider_budget(&config, &mut data);
+                        if budget_unavailable {
+                            anyhow::bail!(
+                                "A 30-day budget is configured, but this provider did not return a 30-day USD spend window"
+                            );
+                        }
+                        Ok::<UsageData, anyhow::Error>(data)
                     })
                     .await;
 
@@ -991,6 +1011,60 @@ impl QuotifyApp {
                 )
                 .into_any_element()
         });
+        let budget_tag = data
+            .windows
+            .iter()
+            .find(|window| {
+                crate::provider::is_budget_spend_window(
+                    &data.provider,
+                    &window.label,
+                    window.unit.as_deref(),
+                )
+            })
+            .and_then(|window| window.used.zip(window.limit))
+            .filter(|(used, limit)| {
+                used.is_finite() && *used >= 0.0 && limit.is_finite() && *limit > 0.0
+            })
+            .map(|(used, limit)| {
+                Tag::info()
+                    .small()
+                    .outline()
+                    .child(format!(
+                        "Budget: {} USD left",
+                        format_credits_balance((limit - used).max(0.0))
+                    ))
+                    .into_any_element()
+            });
+        let budget_configured = self.config.provider_budget(name).is_some();
+        let budget_unavailable_tag =
+            (budget_configured && budget_tag.is_none() && data.error.is_none()).then(|| {
+                Tag::secondary()
+                    .small()
+                    .outline()
+                    .child("Budget unavailable")
+                    .into_any_element()
+            });
+        let credits_tag = data.credits.as_ref().map(|credits| {
+            let text = format!(
+                "{} {}",
+                format_credits_balance(credits.balance),
+                credits.currency
+            );
+            Tag::info().small().outline().child(text).into_any_element()
+        });
+        let mut status_tags = Vec::new();
+        if let Some(reset_tag) = reset_tag {
+            status_tags.push(reset_tag);
+        } else {
+            if let Some(credits_tag) = credits_tag {
+                status_tags.push(credits_tag);
+            }
+            if let Some(budget_tag) = budget_tag {
+                status_tags.push(budget_tag);
+            } else if let Some(budget_unavailable_tag) = budget_unavailable_tag {
+                status_tags.push(budget_unavailable_tag);
+            }
+        }
 
         div()
             .flex()
@@ -1021,18 +1095,7 @@ impl QuotifyApp {
                         div().into_any_element()
                     }),
             )
-            .child(if let Some(reset_tag) = reset_tag {
-                reset_tag
-            } else if let Some(ref credits) = data.credits {
-                let text = format!(
-                    "{} {}",
-                    format_credits_balance(credits.balance),
-                    credits.currency
-                );
-                Tag::info().small().outline().child(text).into_any_element()
-            } else {
-                div().into_any_element()
-            })
+            .child(div().flex().items_center().gap_1().children(status_tags))
             .into_any_element()
     }
 
@@ -1459,6 +1522,7 @@ impl QuotifyApp {
             .flex_col()
             .gap_4()
             .child(self.render_general_settings(is_dark, window, cx))
+            .child(self.render_notification_settings(is_dark, window, cx))
             .child(self.render_provider_settings(is_dark, window, cx))
             .child(self.render_settings_footer())
             .child(div().h(px(20.0)))
@@ -1514,7 +1578,7 @@ impl QuotifyApp {
                     })
                     .ok();
             });
-            RefreshSliderFieldState {
+            SliderFieldState {
                 slider,
                 _subscription,
             }
@@ -1533,6 +1597,8 @@ impl QuotifyApp {
                         // Theme Select
                         div()
                             .flex()
+                            .w_full()
+                            .overflow_hidden()
                             .items_center()
                             .justify_between()
                             .child(
@@ -1731,6 +1797,260 @@ impl QuotifyApp {
             .into_any_element()
     }
 
+    fn render_notification_settings(
+        &self,
+        is_dark: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let settings = &self.config.notifications;
+        let enabled = settings.enabled;
+        let secondary_text = if is_dark {
+            gpui::rgba(0xffffff99)
+        } else {
+            gpui::rgba(0x00000099)
+        };
+
+        let master_app = cx.entity().downgrade();
+        let monthly_app = cx.entity().downgrade();
+        let weekly_app = cx.entity().downgrade();
+        let five_hour_app = cx.entity().downgrade();
+        let threshold_toggle_app = cx.entity().downgrade();
+        let failure_app = cx.entity().downgrade();
+
+        let threshold_value = settings.threshold_percent() as f32;
+        let threshold_slider_app = cx.entity().downgrade();
+        let threshold_slider =
+            window.use_keyed_state("notification-threshold-slider", cx, move |_, cx| {
+                let slider = cx.new(|_| {
+                    SliderState::new()
+                        .min(1.0)
+                        .max(100.0)
+                        .step(1.0)
+                        .default_value(threshold_value)
+                });
+                let _subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
+                    let SliderEvent::Change(value) = event;
+                    let threshold = value.end().round().clamp(1.0, 100.0) as f64;
+                    threshold_slider_app
+                        .update(cx, |this, cx| {
+                            if this.config.notifications.usage_threshold_percent != threshold {
+                                this.config.notifications.usage_threshold_percent = threshold;
+                                this.save_config();
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                });
+                SliderFieldState {
+                    slider,
+                    _subscription,
+                }
+            });
+        let threshold_slider = threshold_slider.read(cx).slider.clone();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(13.0))
+                    .child("Notifications"),
+            )
+            .child(
+                GroupBox::new()
+                    .fill()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w(px(205.0))
+                                    .max_w(px(205.0))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .pr_3()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_size(px(12.0))
+                                            .child("Windows Notifications"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(secondary_text)
+                                            .whitespace_normal()
+                                            .child(
+                                                "Disabled by default; respects Windows quiet hours",
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Switch::new("notifications-enabled")
+                                    .flex_none()
+                                    .checked(enabled)
+                                    .on_click(move |checked, _, cx| {
+                                        let checked = *checked;
+                                        master_app
+                                            .update(cx, |this, cx| {
+                                                this.config.notifications.enabled = checked;
+                                                this.save_config();
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                    )
+                    .child(Divider::horizontal())
+                    .child(notification_switch_row(
+                        "Monthly quota reset",
+                        "After a provider's monthly quota resets",
+                        "notify-monthly-reset",
+                        settings.monthly_resets,
+                        !enabled,
+                        move |checked, cx| {
+                            monthly_app
+                                .update(cx, |this, cx| {
+                                    this.config.notifications.monthly_resets = checked;
+                                    this.save_config();
+                                    cx.notify();
+                                })
+                                .ok();
+                        },
+                    ))
+                    .child(notification_switch_row(
+                        "Weekly quota reset",
+                        "After a provider's weekly quota resets",
+                        "notify-weekly-reset",
+                        settings.weekly_resets,
+                        !enabled,
+                        move |checked, cx| {
+                            weekly_app
+                                .update(cx, |this, cx| {
+                                    this.config.notifications.weekly_resets = checked;
+                                    this.save_config();
+                                    cx.notify();
+                                })
+                                .ok();
+                        },
+                    ))
+                    .child(notification_switch_row(
+                        "5-hour quota reset",
+                        "Session and rolling 5-hour windows",
+                        "notify-five-hour-reset",
+                        settings.five_hour_resets,
+                        !enabled,
+                        move |checked, cx| {
+                            five_hour_app
+                                .update(cx, |this, cx| {
+                                    this.config.notifications.five_hour_resets = checked;
+                                    this.save_config();
+                                    cx.notify();
+                                })
+                                .ok();
+                        },
+                    ))
+                    .child(Divider::horizontal())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .w(px(205.0))
+                                            .max_w(px(205.0))
+                                            .flex_none()
+                                            .overflow_hidden()
+                                            .pr_3()
+                                            .child(
+                                                div().text_size(px(11.0)).child("Usage threshold"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(secondary_text)
+                                                    .whitespace_normal()
+                                                    .child("Once when usage crosses the threshold"),
+                                            ),
+                                    )
+                                    .child(
+                                        Switch::new("notify-usage-threshold")
+                                            .flex_none()
+                                            .checked(settings.usage_threshold_enabled)
+                                            .disabled(!enabled)
+                                            .on_click(move |checked, _, cx| {
+                                                let checked = *checked;
+                                                threshold_toggle_app
+                                                    .update(cx, |this, cx| {
+                                                        this.config
+                                                            .notifications
+                                                            .usage_threshold_enabled = checked;
+                                                        this.save_config();
+                                                        cx.notify();
+                                                    })
+                                                    .ok();
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        Slider::new(&threshold_slider)
+                                            .horizontal()
+                                            .disabled(!enabled || !settings.usage_threshold_enabled)
+                                            .flex_1()
+                                            .h(px(28.0)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(42.0))
+                                            .text_align(TextAlign::Right)
+                                            .text_size(px(11.0))
+                                            .child(format!("{}%", settings.threshold_percent())),
+                                    ),
+                            ),
+                    )
+                    .child(Divider::horizontal())
+                    .child(notification_switch_row(
+                        "Silent refresh failures",
+                        "When an automatic refresh starts failing",
+                        "notify-silent-refresh-failure",
+                        settings.silent_refresh_failures,
+                        !enabled,
+                        move |checked, cx| {
+                            failure_app
+                                .update(cx, |this, cx| {
+                                    this.config.notifications.silent_refresh_failures = checked;
+                                    this.save_config();
+                                    cx.notify();
+                                })
+                                .ok();
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
     fn render_provider_settings(
         &self,
         is_dark: bool,
@@ -1890,12 +2210,29 @@ impl QuotifyApp {
                         if matches!(event, InputEvent::Change) {
                             let value = input.read(cx).value().to_string();
                             app.update(cx, |this, cx| {
-                                if set_config_field_value(
+                                let saved = set_config_field_value(
                                     &mut this.config,
                                     &subscription_field,
                                     value.clone(),
-                                ) {
+                                );
+                                if saved {
+                                    this.budget_input_errors.remove(&subscription_field);
+                                    if let Some(provider) =
+                                        subscription_field.strip_suffix("_budget")
+                                        && let Some(data) =
+                                            this.data.write().iter_mut().find(|data| {
+                                                data.provider.eq_ignore_ascii_case(provider)
+                                            })
+                                    {
+                                        crate::apply_provider_budget(&this.config, data);
+                                    }
                                     this.save_config();
+                                } else if subscription_field.ends_with("_budget") {
+                                    this.budget_input_errors.insert(
+                                        subscription_field.clone(),
+                                        "Enter a positive USD amount, or leave the field empty."
+                                            .to_string(),
+                                    );
                                 }
                                 cx.notify();
                             })
@@ -2236,6 +2573,19 @@ impl QuotifyApp {
                     .into_any_element(),
                 );
             }
+            "bedrock" => {
+                widgets.push(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(if is_dark {
+                            gpui::rgba(0xffffff99)
+                        } else {
+                            gpui::rgba(0x00000099)
+                        })
+                        .child("Uses the AWS CLI credential chain and Cost Explorer.")
+                        .into_any_element(),
+                );
+            }
             "opencodego" => {
                 widgets.push(
                     div()
@@ -2283,6 +2633,57 @@ impl QuotifyApp {
                         window,
                         cx,
                     )
+                    .into_any_element(),
+                );
+            }
+        }
+
+        if crate::provider::supports_api_budget(&provider_id) {
+            let budget_field = format!("{provider_id}_budget");
+            widgets.push(
+                self.render_input_field(
+                    is_dark,
+                    SharedString::from(budget_field.clone()),
+                    "30-Day API Budget (USD)".into(),
+                    "e.g. 100; leave empty to disable".into(),
+                    false,
+                    window,
+                    cx,
+                )
+                .into_any_element(),
+            );
+            widgets.push(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(if is_dark {
+                        gpui::rgba(0xffffff99)
+                    } else {
+                        gpui::rgba(0x00000099)
+                    })
+                    .child("Uses the latest 30 complete UTC days of USD spend.")
+                    .into_any_element(),
+            );
+            if provider_id == "bedrock"
+                && std::env::var("CODEXBAR_BEDROCK_BUDGET")
+                    .ok()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                widgets.push(
+                    Alert::info(
+                        "bedrock-budget-environment-override",
+                        "CODEXBAR_BEDROCK_BUDGET is set and remains active until the environment variable is removed.",
+                    )
+                    .small()
+                    .into_any_element(),
+                );
+            }
+            if let Some(message) = self.budget_input_errors.get(&budget_field) {
+                widgets.push(
+                    Alert::error(
+                        SharedString::from(format!("{provider_id}-budget-error")),
+                        message.clone(),
+                    )
+                    .small()
                     .into_any_element(),
                 );
             }
@@ -2365,6 +2766,48 @@ impl QuotifyApp {
     }
 }
 
+fn notification_switch_row(
+    title: &'static str,
+    description: &'static str,
+    id: &'static str,
+    checked: bool,
+    disabled: bool,
+    on_change: impl Fn(bool, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .flex()
+        .w_full()
+        .overflow_hidden()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(205.0))
+                .max_w(px(205.0))
+                .flex_none()
+                .overflow_hidden()
+                .pr_3()
+                .child(div().text_size(px(11.0)).child(title))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(gpui::rgba(0x808080cc))
+                        .whitespace_normal()
+                        .child(description),
+                ),
+        )
+        .child(
+            Switch::new(id)
+                .flex_none()
+                .checked(checked)
+                .disabled(disabled)
+                .on_click(move |checked, _, cx| on_change(*checked, cx)),
+        )
+        .into_any_element()
+}
+
 fn fluent_icon(glyph: &'static str, size: f32) -> AnyElement {
     div()
         .flex()
@@ -2393,50 +2836,7 @@ fn update_tray_icon_for_active_provider(provider_name: &str, data: &Arc<RwLock<V
 }
 
 fn provider_catalog() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("codex", "Codex"),
-        ("openai", "OpenAI"),
-        ("opencode", "OpenCode"),
-        ("claude", "Claude"),
-        ("gemini", "Gemini"),
-        ("antigravity", "Antigravity"),
-        ("deepseek", "DeepSeek"),
-        ("openrouter", "OpenRouter"),
-        ("moonshot", "Moonshot"),
-        ("elevenlabs", "ElevenLabs"),
-        ("doubao", "Doubao"),
-        ("zai", "z.ai"),
-        ("venice", "Venice"),
-        ("crof", "Crof"),
-        ("synthetic", "Synthetic"),
-        ("warp", "Warp"),
-        ("groqcloud", "GroqCloud"),
-        ("deepgram", "Deepgram"),
-        ("llmproxy", "LLM Proxy"),
-        ("codebuff", "Codebuff"),
-        ("kiro", "Kiro"),
-        ("copilot", "Copilot"),
-        ("azureopenai", "Azure OpenAI"),
-        ("ollama", "Ollama"),
-        ("minimax", "MiniMax"),
-        ("jetbrains", "JetBrains AI"),
-        ("kimi", "Kimi"),
-        ("kilo", "Kilo Code"),
-        ("augment", "Augment"),
-        ("bedrock", "AWS Bedrock"),
-        ("vertexai", "Vertex AI"),
-        ("stepfun", "StepFun"),
-        ("abacus", "Abacus AI"),
-        ("alibabatoken", "Alibaba Token"),
-        ("t3chat", "T3 Chat"),
-        ("amp", "Amp"),
-        ("mistral", "Mistral"),
-        ("grok", "Grok"),
-        ("cursor", "Cursor"),
-        ("droid", "Factory Droid"),
-        ("windsurf", "Windsurf"),
-        ("mimo", "MiMo"),
-    ]
+    crate::provider::PROVIDER_CATALOG
 }
 
 fn provider_display_order(config: &crate::config::AppConfig) -> Vec<(String, &'static str)> {
@@ -2522,6 +2922,13 @@ fn config_field_value(config: &crate::config::AppConfig, field: &str) -> String 
         _ => {}
     }
 
+    if let Some(provider) = field.strip_suffix("_budget") {
+        return config
+            .provider_budget(provider)
+            .map(|budget| budget.to_string())
+            .unwrap_or_default();
+    }
+
     if let Some(provider) = field.strip_suffix("_key")
         && let Some(config) = api_key_provider_config(config, provider)
     {
@@ -2546,6 +2953,22 @@ fn set_config_field_value(
     field: &str,
     value: String,
 ) -> bool {
+    if let Some(provider) = field.strip_suffix("_budget") {
+        let value = value.trim();
+        if value.is_empty() {
+            config.set_provider_budget(provider, None);
+            return true;
+        }
+        if let Ok(budget) = value.parse::<f64>()
+            && budget.is_finite()
+            && budget > 0.0
+        {
+            config.set_provider_budget(provider, Some(budget));
+            return true;
+        }
+        return false;
+    }
+
     let target = match field {
         "proxy" => Some(&mut config.network.proxy),
         "deepseek_key" => Some(&mut config.deepseek.api_key),

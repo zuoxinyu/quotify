@@ -7,6 +7,7 @@ mod app;
 mod config;
 mod diagnostics;
 mod icon;
+mod notifications;
 mod provider;
 mod secrets;
 mod single_instance;
@@ -658,9 +659,7 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 || std::env::var("AWS_PROFILE").is_ok()
                 || std::env::var("CODEXBAR_BEDROCK_BUDGET").is_ok()
             {
-                Some(Box::new(BedrockProvider::new(
-                    config.bedrock.api_key.clone(),
-                )))
+                Some(Box::new(BedrockProvider::new()))
             } else {
                 None
             }
@@ -1082,12 +1081,7 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
     }
 }
 
-async fn fetch_all_providers(
-    config: &config::AppConfig,
-    data: Arc<RwLock<Vec<UsageData>>>,
-    last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
-    history: Arc<RwLock<usage_history::UsageHistory>>,
-) {
+async fn fetch_all_providers(config: &config::AppConfig) -> Vec<UsageData> {
     let all_providers = PROVIDER_ORDER;
 
     let provider_names: Vec<String> = all_providers
@@ -1102,15 +1096,74 @@ async fn fetch_all_providers(
         provider_names
     };
 
-    let results = fetch_providers(config, provider_names).await;
+    fetch_providers(config, provider_names).await
+}
 
-    *data.write() = results;
-    *last_refresh.write() = chrono::Utc::now();
+fn publish_provider_results(
+    config: &config::AppConfig,
+    mut results: Vec<UsageData>,
+    data: &Arc<RwLock<Vec<UsageData>>>,
+    last_refresh: &Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
+    history: &Arc<RwLock<usage_history::UsageHistory>>,
+    silent_refresh: bool,
+) {
+    let mut budget_refresh_failures = std::collections::BTreeSet::new();
+    for result in &mut results {
+        if apply_provider_budget(config, result) {
+            budget_refresh_failures.insert(result.provider.trim().to_ascii_lowercase());
+        }
+    }
+    let fetched_at = chrono::Utc::now();
+    let notification_events = {
+        let history = history.read();
+        let mut events = notifications::evaluate(
+            &config.notifications,
+            &history,
+            &results,
+            fetched_at,
+            silent_refresh,
+        );
+        events.extend(notifications::evaluate_budget_refresh_failures(
+            &config.notifications,
+            &history.budget_refresh_failures,
+            &budget_refresh_failures,
+            silent_refresh,
+        ));
+        events
+    };
+
+    *data.write() = results.clone();
+    *last_refresh.write() = fetched_at;
     {
         let mut history = history.write();
-        history.append(data.read().clone());
+        history.append(results);
+        history.budget_refresh_failures = budget_refresh_failures;
         if let Err(err) = history.save() {
             tracing::error!("Failed to save usage history: {err}");
+        }
+    }
+
+    if let Some((title, body)) = notifications::aggregate(&notification_events) {
+        let severity = if notification_events.iter().any(|event| {
+            matches!(
+                event,
+                notifications::NotificationEvent::SilentRefreshFailed { .. }
+            )
+        }) {
+            tray::NotificationSeverity::Error
+        } else if notification_events.iter().any(|event| {
+            matches!(
+                event,
+                notifications::NotificationEvent::UsageThresholdExceeded { .. }
+                    | notifications::NotificationEvent::BudgetRefreshFailed { .. }
+            )
+        }) {
+            tray::NotificationSeverity::Warning
+        } else {
+            tray::NotificationSeverity::Info
+        };
+        if let Err(err) = tray::send_native_notification(title, body, severity) {
+            tracing::warn!("Failed to queue Windows notification: {err}");
         }
     }
 }
@@ -1208,7 +1261,10 @@ async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -
         }
     });
 
-    let results = fetch_providers(config, provider_names).await;
+    let mut results = fetch_providers(config, provider_names).await;
+    for result in &mut results {
+        apply_provider_budget(config, result);
+    }
 
     let json = serde_json::to_string_pretty(&results)?;
     println!("{json}");
@@ -1275,6 +1331,162 @@ async fn fetch_providers(
     }
 
     results
+}
+
+/// Applies a configured API budget. Returns `true` when the provider refresh
+/// itself succeeded but did not include usable 30-day spend data.
+pub(crate) fn apply_provider_budget(config: &config::AppConfig, data: &mut UsageData) -> bool {
+    let provider = data.provider.trim().to_ascii_lowercase();
+    if !provider::supports_api_budget(&provider) {
+        return false;
+    }
+
+    for window in data.windows.iter_mut().filter(|window| {
+        provider::is_budget_spend_window(&provider, &window.label, window.unit.as_deref())
+    }) {
+        window.limit = None;
+        window.used_percent = 0.0;
+    }
+
+    let budget = config
+        .provider_budget(&provider)
+        .or_else(|| legacy_bedrock_budget(config, &provider));
+    let Some(budget) = budget else {
+        return false;
+    };
+    if data.error.is_some() {
+        return false;
+    }
+
+    let Some(window) = data.windows.iter_mut().find(|window| {
+        provider::is_budget_spend_window(&provider, &window.label, window.unit.as_deref())
+    }) else {
+        return true;
+    };
+    let Some(used) = window.used.filter(|used| used.is_finite() && *used >= 0.0) else {
+        return true;
+    };
+
+    window.limit = Some(budget);
+    window.used_percent = (used / budget * 100.0).clamp(0.0, 100.0);
+    false
+}
+
+fn legacy_bedrock_budget(config: &config::AppConfig, provider: &str) -> Option<f64> {
+    if provider != "bedrock" {
+        return None;
+    }
+
+    (!config.bedrock.api_key.trim().is_empty())
+        .then_some(config.bedrock.api_key.as_str())
+        .and_then(parse_positive_budget)
+        .or_else(|| {
+            std::env::var("CODEXBAR_BEDROCK_BUDGET")
+                .ok()
+                .as_deref()
+                .and_then(parse_positive_budget)
+        })
+}
+
+fn parse_positive_budget(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
+#[cfg(test)]
+mod provider_budget_tests {
+    use super::*;
+
+    fn usage(provider: &str, label: &str, used: f64, unit: &str) -> UsageData {
+        UsageData {
+            provider: provider.to_string(),
+            windows: vec![provider::UsageWindow {
+                label: label.to_string(),
+                used_percent: 0.0,
+                limit: None,
+                used: Some(used),
+                unit: Some(unit.to_string()),
+                resets_at: None,
+            }],
+            credits: None,
+            fetched_at: chrono::Utc::now(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn configured_budget_is_applied_to_monthly_spend() {
+        let mut config = config::AppConfig::default();
+        config.set_provider_budget("openai", Some(100.0));
+        let mut data = usage("openai", "Cost 30d", 42.5, "USD");
+
+        assert!(!apply_provider_budget(&config, &mut data));
+
+        assert_eq!(data.windows[0].limit, Some(100.0));
+        assert_eq!(data.windows[0].used_percent, 42.5);
+        assert!(data.credits.is_none());
+    }
+
+    #[test]
+    fn changing_or_clearing_a_budget_recomputes_cached_spend_data() {
+        let mut config = config::AppConfig::default();
+        config.set_provider_budget("openai", Some(100.0));
+        let mut data = usage("openai", "Cost 30d", 50.0, "USD");
+        assert!(!apply_provider_budget(&config, &mut data));
+        assert_eq!(data.windows[0].used_percent, 50.0);
+
+        config.set_provider_budget("openai", Some(200.0));
+        assert!(!apply_provider_budget(&config, &mut data));
+        assert_eq!(data.windows[0].limit, Some(200.0));
+        assert_eq!(data.windows[0].used_percent, 25.0);
+
+        config.set_provider_budget("openai", None);
+        assert!(!apply_provider_budget(&config, &mut data));
+        assert_eq!(data.windows[0].limit, None);
+        assert_eq!(data.windows[0].used_percent, 0.0);
+    }
+
+    #[test]
+    fn budget_does_not_relabel_balance_only_or_non_monthly_data() {
+        let mut config = config::AppConfig::default();
+        config.set_provider_budget("openai", Some(100.0));
+        let mut credits = usage("openai", "Credits", 25.0, "USD");
+        let mut wrong_unit = usage("openai", "Cost 30d", 25.0, "tokens");
+
+        assert!(apply_provider_budget(&config, &mut credits));
+        assert!(apply_provider_budget(&config, &mut wrong_unit));
+
+        assert_eq!(credits.windows[0].limit, None);
+        assert!(credits.credits.is_none());
+        assert_eq!(wrong_unit.windows[0].limit, None);
+        assert!(wrong_unit.credits.is_none());
+    }
+
+    #[test]
+    fn claude_budget_targets_only_the_thirty_day_admin_window() {
+        let mut config = config::AppConfig::default();
+        config.set_provider_budget("claude", Some(50.0));
+        let mut data = usage("claude", "30d Spend", 75.0, "usd");
+
+        assert!(!apply_provider_budget(&config, &mut data));
+
+        assert_eq!(data.windows[0].limit, Some(50.0));
+        assert_eq!(data.windows[0].used_percent, 100.0);
+        assert!(data.credits.is_none());
+    }
+
+    #[test]
+    fn provider_error_owns_the_failure_notification_when_budget_is_configured() {
+        let mut config = config::AppConfig::default();
+        config.set_provider_budget("openai", Some(100.0));
+        let mut data = usage("openai", "Error", 0.0, "");
+        data.error = Some("unavailable".to_string());
+
+        assert!(!apply_provider_budget(&config, &mut data));
+    }
 }
 
 fn provider_error_data(provider: String, error: String) -> UsageData {
@@ -1487,21 +1699,36 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 continue;
             }
-            let forced = tray::REFRESH_REQUESTED.swap(false, Ordering::SeqCst);
+            let refresh_request = tray::take_refresh_request();
             let now = std::time::Instant::now();
             let elapsed = last_fetch.map(|last| now.saturating_duration_since(last));
-            if forced || elapsed.is_none_or(|elapsed| elapsed >= refresh_interval_duration) {
-                let current_config = load_runtime_config(config_path_bg.as_ref(), &config_bg);
+            if refresh_request.is_some()
+                || elapsed.is_none_or(|elapsed| elapsed >= refresh_interval_duration)
+            {
+                let silent_refresh = !matches!(
+                    refresh_request,
+                    Some(tray::RefreshRequestOrigin::UserInitiated)
+                );
+                let fetch_config = load_runtime_config(config_path_bg.as_ref(), &config_bg);
+                let results = bg_rt.block_on(fetch_all_providers(&fetch_config));
+
+                // Provider requests can be slow. Reload lightweight presentation
+                // and notification settings after they finish so turning
+                // notifications off, or changing a budget mid-refresh, takes
+                // effect before anything is published.
+                let current_config = load_runtime_config(config_path_bg.as_ref(), &fetch_config);
                 let current_active_provider =
                     current_config.general.active_provider.trim().to_string();
                 *active_provider_bg.write() = current_active_provider;
 
-                bg_rt.block_on(fetch_all_providers(
+                publish_provider_results(
                     &current_config,
-                    data_bg.clone(),
-                    last_refresh_bg.clone(),
-                    history_bg.clone(),
-                ));
+                    results,
+                    &data_bg,
+                    &last_refresh_bg,
+                    &history_bg,
+                    silent_refresh,
+                );
 
                 // Regenerate HICON
                 let d = data_bg.read();
@@ -1559,7 +1786,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     if !SYSTEM_SLEEPING.load(Ordering::SeqCst) {
                         tracing::info!("Network change detected, requesting refresh.");
-                        tray::request_refresh();
+                        tray::request_automatic_refresh();
                     }
                 } else {
                     std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2644,7 +2871,7 @@ unsafe extern "system" fn main_window_subclass(
                     // PBT_APMRESUMEAUTOMATIC
                     tracing::info!("System resumed from sleep. Triggering refresh.");
                     SYSTEM_SLEEPING.store(false, Ordering::SeqCst);
-                    tray::request_refresh();
+                    tray::request_automatic_refresh();
                 }
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }

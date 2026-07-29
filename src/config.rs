@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
@@ -46,6 +46,52 @@ impl Default for GeneralConfig {
             backdrop: default_backdrop(),
             auto_webview_login: default_auto_webview_login(),
             start_with_windows: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub monthly_resets: bool,
+    #[serde(default)]
+    pub weekly_resets: bool,
+    #[serde(default)]
+    pub five_hour_resets: bool,
+    #[serde(default)]
+    pub usage_threshold_enabled: bool,
+    #[serde(default = "default_usage_threshold_percent")]
+    pub usage_threshold_percent: f64,
+    #[serde(default)]
+    pub silent_refresh_failures: bool,
+}
+
+fn default_usage_threshold_percent() -> f64 {
+    80.0
+}
+
+impl NotificationConfig {
+    pub fn threshold_percent(&self) -> f64 {
+        if self.usage_threshold_percent.is_finite() {
+            self.usage_threshold_percent.clamp(1.0, 100.0)
+        } else {
+            default_usage_threshold_percent()
+        }
+    }
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            monthly_resets: false,
+            weekly_resets: false,
+            five_hour_resets: false,
+            usage_threshold_enabled: false,
+            usage_threshold_percent: default_usage_threshold_percent(),
+            silent_refresh_failures: false,
         }
     }
 }
@@ -143,6 +189,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
     #[serde(default)]
+    pub notifications: NotificationConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_budgets: BTreeMap<String, f64>,
+    #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
     pub deepseek: DeepSeekConfig,
@@ -231,6 +281,35 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    pub fn provider_budget(&self, provider: &str) -> Option<f64> {
+        let provider = provider.trim();
+        self.provider_budgets
+            .get(&provider.to_ascii_lowercase())
+            .or_else(|| {
+                self.provider_budgets
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(provider))
+                    .map(|(_, value)| value)
+            })
+            .copied()
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    pub fn set_provider_budget(&mut self, provider: &str, budget: Option<f64>) {
+        let provider = provider.trim().to_ascii_lowercase();
+        if provider.is_empty() {
+            return;
+        }
+
+        self.provider_budgets
+            .retain(|name, _| !name.eq_ignore_ascii_case(&provider));
+        if let Some(budget) = budget.filter(|value| value.is_finite() && *value > 0.0) {
+            self.provider_budgets.insert(provider, budget);
+        } else {
+            self.provider_budgets.remove(&provider);
+        }
+    }
+
     pub fn config_path() -> PathBuf {
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -376,6 +455,43 @@ mod tests {
         assert_eq!(gen_config2.theme, "dark");
         assert_eq!(gen_config2.backdrop, "acrylic");
         assert!(!gen_config2.auto_webview_login);
+    }
+
+    #[test]
+    fn notification_defaults_are_fully_disabled() {
+        let config: AppConfig = toml::from_str("[general]\nrefresh_interval = 300").unwrap();
+
+        assert!(!config.notifications.enabled);
+        assert!(!config.notifications.monthly_resets);
+        assert!(!config.notifications.weekly_resets);
+        assert!(!config.notifications.five_hour_resets);
+        assert!(!config.notifications.usage_threshold_enabled);
+        assert!(!config.notifications.silent_refresh_failures);
+        assert_eq!(config.notifications.threshold_percent(), 80.0);
+    }
+
+    #[test]
+    fn provider_budgets_only_accept_positive_finite_values() {
+        let mut config = AppConfig::default();
+        config.set_provider_budget("OpenAI", Some(125.5));
+        config.set_provider_budget("bedrock", Some(f64::NAN));
+
+        assert_eq!(config.provider_budget("openai"), Some(125.5));
+        assert_eq!(config.provider_budget("OPENAI"), Some(125.5));
+        assert_eq!(config.provider_budget("bedrock"), None);
+
+        config.set_provider_budget("openai", None);
+        assert_eq!(config.provider_budget("openai"), None);
+    }
+
+    #[test]
+    fn provider_budget_keys_are_case_insensitive_when_loaded_from_toml() {
+        let mut config: AppConfig = toml::from_str("[provider_budgets]\nOpenAI = 75.0\n").unwrap();
+
+        assert_eq!(config.provider_budget("openai"), Some(75.0));
+        config.set_provider_budget("OPENAI", Some(90.0));
+        assert_eq!(config.provider_budgets.len(), 1);
+        assert_eq!(config.provider_budgets.get("openai"), Some(&90.0));
     }
 
     #[test]

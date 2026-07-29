@@ -23,6 +23,7 @@ Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) 
 * **Windows Credential Manager Security**: API keys, session tokens, and browser cookies are securely stored using Windows Credential Manager (`quotify/<provider>/<field>`), ensuring no secrets are stored in plain text.
 * **Smart Local History Caching**: Usage snapshots are cached locally in `%APPDATA%\quotify\usage-history.json` so you can instantly view your last fetched usage stats while background fetch is running.
 * **Interactive Drag-to-Reorder**: Reorder provider cards directly in the UI with a simple long-press and drag action. Your custom order is automatically updated in the config file.
+* **Native Windows Notifications**: Optionally receive quota-reset, usage-threshold, and silent background-refresh failure notifications through Windows. Notifications are completely disabled by default.
 * **Windows Desktop Facilities**: Supports running as a single instance, automatically registering to start with Windows, and writing rotating daily diagnostic logs to `%APPDATA%\quotify\logs`.
 * **CDP Cookie Synchronizer**: Includes a PowerShell script to fetch and sync session cookies via Chrome DevTools Protocol (CDP) for providers that require active browser sessions.
 
@@ -113,6 +114,38 @@ The configuration directory is located at:
 
 * **`quotify.toml`**: Stores non-sensitive settings like refresh intervals, proxy setup, and active provider ordering. See `config.example.toml` for options.
 * **Credential Manager**: Secret fields (API keys, cookies) configured via the settings UI are saved securely under Windows Credential Manager.
+
+### Windows Notifications
+
+All notifications are disabled by default. Set the master `enabled` switch and then opt in to only the events you want:
+
+```toml
+[notifications]
+enabled = false
+monthly_resets = false
+weekly_resets = false
+five_hour_resets = false
+usage_threshold_enabled = false
+usage_threshold_percent = 80.0
+silent_refresh_failures = false
+```
+
+Reset notifications are emitted after a refresh detects that a provider's monthly, weekly, or 5-hour quota has reset. Threshold notifications use the provider's reported usage percentage. `silent_refresh_failures` covers failed background refreshes that would otherwise have no visible UI. Windows notification and quiet-hours settings are respected.
+
+### 30-Day API Budgets
+
+30-day budgets are ordinary, non-sensitive configuration values and remain in `quotify.toml`; they are not stored in Credential Manager. Only positive USD amounts are used:
+
+```toml
+[provider_budgets]
+openai = 100.0
+claude = 100.0
+bedrock = 100.0
+```
+
+Budget progress is currently supported for OpenAI, the Claude Admin API, and AWS Bedrock, and only when the provider returns actual USD spend for the latest 30 complete UTC days. Subscription quota data or balance-only responses are not treated as spending. If spend data is unavailable, the card shows `Budget unavailable`; opted-in silent-refresh failure notifications fire once on that failure edge.
+
+Omitting a provider removes its configured budget. The legacy `CODEXBAR_BEDROCK_BUDGET` environment variable remains accepted as an external fallback, but `[provider_budgets].bedrock` is preferred. Unset the environment variable as well when you want to disable a budget that was supplied through it.
 
 > [!TIP]
 > **Explicit Network Proxying**  

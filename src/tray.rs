@@ -1,10 +1,12 @@
 use parking_lot::{Condvar, Mutex};
+use std::collections::VecDeque;
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
-use windows::Win32::Foundation::POINT;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use windows::Win32::Foundation::{ERROR_INVALID_WINDOW_HANDLE, POINT};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
+    NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -22,11 +24,33 @@ pub const WM_APP_UPDATE_DATA: u32 = windows::Win32::UI::WindowsAndMessaging::WM_
 pub const WM_APP_QUIT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 4;
 pub const WM_APP_TOGGLE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 5;
 pub const WM_APP_HIDE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 6;
+pub const WM_APP_NOTIFY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 7;
 
 pub const IDM_SHOW: usize = 1;
 pub const IDM_REFRESH: usize = 2;
 pub const IDM_QUIT: usize = 3;
 pub const IDM_ABOUT: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeNotification {
+    pub title: String,
+    pub body: String,
+    pub severity: NotificationSeverity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RefreshRequestOrigin {
+    Automatic = 1,
+    UserInitiated = 2,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SendHWND(HWND);
@@ -59,12 +83,13 @@ unsafe impl Sync for SendHICON {}
 
 pub static MAIN_HWND: OnceLock<SendHWND> = OnceLock::new();
 pub static TRAY_HWND: OnceLock<SendHWND> = OnceLock::new();
-pub static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
+static REFRESH_REQUESTED: AtomicU8 = AtomicU8::new(0);
 pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
 pub static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static ACTIVE_PAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CURRENT_HICON: Mutex<Option<SendHICON>> = Mutex::new(None);
 static CURRENT_TOOLTIP: Mutex<String> = Mutex::new(String::new());
+static PENDING_NOTIFICATIONS: Mutex<VecDeque<NativeNotification>> = Mutex::new(VecDeque::new());
 static REFRESH_SIGNAL: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
 
 fn refresh_signal() -> &'static (Mutex<()>, Condvar) {
@@ -72,14 +97,58 @@ fn refresh_signal() -> &'static (Mutex<()>, Condvar) {
 }
 
 pub fn request_refresh() {
-    REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-    refresh_signal().1.notify_one();
+    request_refresh_with_origin(RefreshRequestOrigin::UserInitiated);
+}
+
+pub fn request_automatic_refresh() {
+    request_refresh_with_origin(RefreshRequestOrigin::Automatic);
+}
+
+fn request_refresh_with_origin(origin: RefreshRequestOrigin) {
+    let (lock, cvar) = refresh_signal();
+    let _guard = lock.lock();
+    REFRESH_REQUESTED.fetch_max(origin as u8, Ordering::SeqCst);
+    cvar.notify_one();
+}
+
+pub fn take_refresh_request() -> Option<RefreshRequestOrigin> {
+    match REFRESH_REQUESTED.swap(0, Ordering::SeqCst) {
+        value if value == RefreshRequestOrigin::Automatic as u8 => {
+            Some(RefreshRequestOrigin::Automatic)
+        }
+        value if value == RefreshRequestOrigin::UserInitiated as u8 => {
+            Some(RefreshRequestOrigin::UserInitiated)
+        }
+        _ => None,
+    }
 }
 
 pub fn wait_for_refresh_or_timeout(timeout: std::time::Duration) {
     let (lock, cvar) = refresh_signal();
     let mut guard = lock.lock();
-    cvar.wait_for(&mut guard, timeout);
+    if REFRESH_REQUESTED.load(Ordering::SeqCst) == 0 {
+        cvar.wait_for(&mut guard, timeout);
+    }
+}
+
+pub fn send_native_notification(
+    title: impl Into<String>,
+    body: impl Into<String>,
+    severity: NotificationSeverity,
+) -> windows::core::Result<()> {
+    let tray_hwnd = TRAY_HWND.get().copied().ok_or_else(|| {
+        windows::core::Error::new(
+            windows::core::HRESULT::from_win32(ERROR_INVALID_WINDOW_HANDLE.0),
+            "Tray window is not initialized",
+        )
+    })?;
+
+    PENDING_NOTIFICATIONS.lock().push_back(NativeNotification {
+        title: title.into(),
+        body: body.into(),
+        severity,
+    });
+    tray_hwnd.post_message(WM_APP_NOTIFY, WPARAM(0), LPARAM(0))
 }
 
 unsafe extern "system" fn tray_wnd_proc(
@@ -109,11 +178,16 @@ unsafe extern "system" fn tray_wnd_proc(
         match msg {
             WM_CREATE => LRESULT(0),
             WM_TRAYICON => {
-                let event = lparam.0 as u32;
+                let event = (lparam.0 as u32) & 0xFFFF;
                 match event {
-                    WM_LBUTTONUP => {
+                    WM_LBUTTONUP | NIN_BALLOONUSERCLICK => {
                         if let Some(&shwnd) = MAIN_HWND.get() {
-                            let _ = shwnd.post_message(WM_APP_TOGGLE, WPARAM(0), LPARAM(0));
+                            let message = if event == NIN_BALLOONUSERCLICK {
+                                WM_APP_SHOW
+                            } else {
+                                WM_APP_TOGGLE
+                            };
+                            let _ = shwnd.post_message(message, WPARAM(0), LPARAM(0));
                         }
                     }
                     WM_RBUTTONUP => {
@@ -160,6 +234,18 @@ unsafe extern "system" fn tray_wnd_proc(
                 }
                 LRESULT(0)
             }
+            WM_APP_NOTIFY => {
+                loop {
+                    let notification = PENDING_NOTIFICATIONS.lock().pop_front();
+                    let Some(notification) = notification else {
+                        break;
+                    };
+                    if let Err(err) = show_native_notification(hwnd, &notification) {
+                        tracing::warn!("Failed to show native notification: {err}");
+                    }
+                }
+                LRESULT(0)
+            }
             WM_COMMAND => {
                 let id = wparam.0 & 0xFFFF;
                 match id {
@@ -198,11 +284,60 @@ unsafe extern "system" fn tray_wnd_proc(
 }
 
 fn tooltip_utf16(tooltip: &str) -> [u16; 128] {
-    let mut tip_utf16 = [0u16; 128];
-    let encoded: Vec<u16> = tooltip.encode_utf16().collect();
-    let len = encoded.len().min(127);
-    tip_utf16[..len].copy_from_slice(&encoded[..len]);
-    tip_utf16
+    utf16_null_terminated(tooltip)
+}
+
+fn utf16_null_terminated<const N: usize>(value: &str) -> [u16; N] {
+    let mut output = [0u16; N];
+    let mut written = 0;
+
+    for ch in value.chars() {
+        if ch == '\0' {
+            break;
+        }
+
+        let encoded_len = ch.len_utf16();
+        if written + encoded_len >= N {
+            break;
+        }
+
+        let mut encoded = [0u16; 2];
+        let encoded = ch.encode_utf16(&mut encoded);
+        output[written..written + encoded.len()].copy_from_slice(encoded);
+        written += encoded.len();
+    }
+
+    output
+}
+
+fn show_native_notification(
+    hwnd: HWND,
+    notification: &NativeNotification,
+) -> windows::core::Result<()> {
+    let info_flags = match notification.severity {
+        NotificationSeverity::Info => NIIF_INFO,
+        NotificationSeverity::Warning => NIIF_WARNING,
+        NotificationSeverity::Error => NIIF_ERROR,
+    } | NIIF_RESPECT_QUIET_TIME;
+
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_INFO,
+        szInfo: utf16_null_terminated(&notification.body),
+        szInfoTitle: utf16_null_terminated(&notification.title),
+        dwInfoFlags: info_flags,
+        ..Default::default()
+    };
+
+    unsafe {
+        if Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from_thread())
+        }
+    }
 }
 
 fn register_tray_icon(hwnd: HWND, hicon: HICON, tooltip: &str) -> windows::core::Result<()> {
@@ -342,5 +477,75 @@ impl TrayController {
                 "Failed to update tray icon ({update_err}); re-register failed: {register_err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RefreshRequestOrigin, request_automatic_refresh, request_refresh, take_refresh_request,
+        utf16_null_terminated, wait_for_refresh_or_timeout,
+    };
+    static REFRESH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn user_refresh_request_takes_priority_over_automatic_request() {
+        let _guard = REFRESH_TEST_LOCK.lock().unwrap();
+        let _ = take_refresh_request();
+        request_automatic_refresh();
+        request_refresh();
+
+        assert_eq!(
+            take_refresh_request(),
+            Some(RefreshRequestOrigin::UserInitiated)
+        );
+        assert_eq!(take_refresh_request(), None);
+    }
+
+    #[test]
+    fn pending_refresh_is_observed_before_waiting() {
+        let _guard = REFRESH_TEST_LOCK.lock().unwrap();
+        let _ = take_refresh_request();
+        request_automatic_refresh();
+        let started = std::time::Instant::now();
+
+        wait_for_refresh_or_timeout(std::time::Duration::from_secs(1));
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(
+            take_refresh_request(),
+            Some(RefreshRequestOrigin::Automatic)
+        );
+    }
+
+    #[test]
+    fn utf16_helper_truncates_and_null_terminates() {
+        let encoded = utf16_null_terminated::<4>("abcd");
+
+        assert_eq!(encoded, ['a' as u16, 'b' as u16, 'c' as u16, 0]);
+    }
+
+    #[test]
+    fn utf16_helper_keeps_complete_surrogate_pair_at_boundary() {
+        let encoded = utf16_null_terminated::<4>("a😀b");
+        let terminator = encoded.iter().position(|unit| *unit == 0).unwrap();
+
+        assert_eq!(String::from_utf16(&encoded[..terminator]).unwrap(), "a😀");
+    }
+
+    #[test]
+    fn utf16_helper_does_not_split_surrogate_pair() {
+        let encoded = utf16_null_terminated::<3>("a😀");
+
+        assert_eq!(encoded, ['a' as u16, 0, 0]);
+        assert!(String::from_utf16(&encoded[..1]).is_ok());
+    }
+
+    #[test]
+    fn utf16_helper_stops_at_embedded_null() {
+        let encoded = utf16_null_terminated::<8>("quota\0hidden");
+
+        assert_eq!(String::from_utf16(&encoded[..5]).unwrap(), "quota");
+        assert_eq!(encoded[5], 0);
     }
 }

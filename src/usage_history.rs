@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageHistory {
     pub entries: Vec<UsageHistoryEntry>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub budget_refresh_failures: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,20 +69,41 @@ impl UsageHistory {
 
     pub fn trend_for(&self, provider: &str, days: i64) -> Option<ProviderTrend> {
         let cutoff = Utc::now() - chrono::Duration::days(days);
-        let samples: Vec<f64> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.fetched_at >= cutoff)
-            .filter_map(|entry| {
-                entry
-                    .providers
-                    .iter()
-                    .find(|data| {
-                        data.provider.eq_ignore_ascii_case(provider) && data.error.is_none()
-                    })
-                    .map(|data| data.max_used_percent())
-            })
-            .collect();
+        let budgeted_provider = crate::provider::supports_api_budget(provider);
+        let mut expected_budget_limit: Option<Option<f64>> = None;
+        let mut samples = Vec::new();
+
+        for entry in self.entries.iter().rev() {
+            if entry.fetched_at < cutoff {
+                break;
+            }
+            let Some(data) = entry
+                .providers
+                .iter()
+                .find(|data| data.provider.eq_ignore_ascii_case(provider))
+            else {
+                if expected_budget_limit.is_some() || !samples.is_empty() {
+                    break;
+                }
+                continue;
+            };
+            if data.error.is_some() {
+                continue;
+            }
+
+            if budgeted_provider {
+                let current_limit = budget_limit(data);
+                if let Some(expected_limit) = expected_budget_limit {
+                    if !same_optional_limit(expected_limit, current_limit) {
+                        break;
+                    }
+                } else {
+                    expected_budget_limit = Some(current_limit);
+                }
+            }
+            samples.push(data.max_used_percent());
+        }
+        samples.reverse();
 
         if samples.is_empty() {
             return None;
@@ -124,6 +148,30 @@ impl UsageHistory {
     }
 }
 
+fn budget_limit(data: &crate::provider::UsageData) -> Option<f64> {
+    data.windows
+        .iter()
+        .find(|window| {
+            crate::provider::is_budget_spend_window(
+                &data.provider,
+                &window.label,
+                window.unit.as_deref(),
+            )
+        })
+        .and_then(|window| window.limit)
+        .filter(|limit| limit.is_finite() && *limit > 0.0)
+}
+
+fn same_optional_limit(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            (left - right).abs() <= f64::EPSILON * left.abs().max(right.abs()).max(1.0)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub fn history_path() -> PathBuf {
     crate::diagnostics::app_dir().join("usage-history.json")
 }
@@ -147,6 +195,23 @@ mod tests {
             credits: None,
             fetched_at: Utc::now(),
             error: error.map(str::to_string),
+        }
+    }
+
+    fn budget_usage(percent: f64, limit: f64) -> UsageData {
+        UsageData {
+            provider: "openai".to_string(),
+            windows: vec![UsageWindow {
+                label: "Cost 30d".to_string(),
+                used_percent: percent,
+                limit: Some(limit),
+                used: Some(percent / 100.0 * limit),
+                unit: Some("USD".to_string()),
+                resets_at: None,
+            }],
+            credits: None,
+            fetched_at: Utc::now(),
+            error: None,
         }
     }
 
@@ -185,6 +250,29 @@ mod tests {
         assert_eq!(trend.previous_percent, Some(20.0));
         assert_eq!(trend.peak_percent, 50.0);
         assert_eq!(trend.average_percent, 35.0);
+    }
+
+    #[test]
+    fn trend_starts_a_new_generation_when_budget_changes() {
+        let mut history = UsageHistory::default();
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: Utc::now() - chrono::Duration::hours(2),
+            providers: vec![budget_usage(20.0, 100.0)],
+        });
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: Utc::now() - chrono::Duration::hours(1),
+            providers: vec![budget_usage(30.0, 100.0)],
+        });
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: Utc::now(),
+            providers: vec![budget_usage(60.0, 50.0)],
+        });
+
+        let trend = history.trend_for("openai", 7).unwrap();
+        assert_eq!(trend.samples, 1);
+        assert_eq!(trend.latest_percent, 60.0);
+        assert_eq!(trend.previous_percent, None);
+        assert_eq!(trend.average_percent, 60.0);
     }
 
     #[test]
