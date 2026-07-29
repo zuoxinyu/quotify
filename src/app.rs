@@ -4,6 +4,7 @@ use gpui_component::{
     Disableable, IndexPath, Selectable, Sizable,
     alert::Alert,
     button::{Button, ButtonVariants},
+    chart::BarChart,
     collapsible::Collapsible,
     divider::Divider,
     group_box::{GroupBox, GroupBoxVariants},
@@ -18,7 +19,7 @@ use gpui_component::{
 };
 use parking_lot::RwLock;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, OnceLock, atomic::Ordering},
     time::Duration,
@@ -249,6 +250,12 @@ struct SliderFieldState {
     _subscription: Subscription,
 }
 
+struct TrendChartBar {
+    label: SharedString,
+    value: f64,
+    has_data: bool,
+}
+
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
@@ -263,6 +270,7 @@ pub struct QuotifyApp {
     budget_input_errors: HashMap<String, String>,
     pub selected_setting_provider: String,
     pub show_codex_reset_credits: bool,
+    expanded_trends: HashSet<String>,
 }
 
 impl QuotifyApp {
@@ -289,6 +297,7 @@ impl QuotifyApp {
             budget_input_errors: HashMap::new(),
             selected_setting_provider: "openai".to_string(),
             show_codex_reset_credits: false,
+            expanded_trends: HashSet::new(),
         }
     }
 
@@ -830,7 +839,14 @@ impl QuotifyApp {
         let mouse_move_provider = provider_name.clone();
         let card_elt_id = SharedString::from(format!("card_{name}"));
 
-        let trend = self.history.read().trend_for(name, 7);
+        let effective_budget = self
+            .config
+            .provider_budget(name)
+            .or_else(|| crate::legacy_bedrock_budget(&self.config, name));
+        let trend = self
+            .history
+            .read()
+            .trend_for_with_budget(name, 7, effective_budget);
         let reset_credits = crate::provider::codex::reset_credits(data);
         let show_reset_credits = reset_credits.is_some() && self.show_codex_reset_credits;
 
@@ -1193,19 +1209,7 @@ impl QuotifyApp {
             .collect::<Vec<_>>();
 
         if let Some(trend_val) = trend {
-            let trend_text = format_trend_summary(&trend_val);
-            children.push(
-                div()
-                    .mt_2() // Top margin for trend summary matches layout spacing
-                    .text_size(px(10.0))
-                    .text_color(if is_dark {
-                        gpui::rgba(0xffffff7f)
-                    } else {
-                        gpui::rgba(0x0000007f)
-                    })
-                    .child(trend_text)
-                    .into_any_element(),
-            );
+            children.push(self.render_trend_section(provider, trend_val, is_dark, cx));
         }
 
         div()
@@ -1213,6 +1217,167 @@ impl QuotifyApp {
             .flex_col()
             .gap(px(12.0)) // 8px gap between progress rows matches egui's default spacing
             .children(children)
+            .into_any_element()
+    }
+
+    fn render_trend_section(
+        &self,
+        provider: &str,
+        trend: crate::usage_history::ProviderTrend,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let provider_key = provider.to_ascii_lowercase();
+        let expanded = self.expanded_trends.contains(&provider_key);
+        let trend_text = format_trend_summary(&trend);
+        let app = cx.entity().downgrade();
+        let toggle_provider = provider_key.clone();
+        let weak_text = if is_dark {
+            gpui::rgba(0xffffff7f)
+        } else {
+            gpui::rgba(0x0000007f)
+        };
+
+        div()
+            .mt_2()
+            .flex()
+            .flex_col()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new(SharedString::from(format!("trend-toggle-{provider_key}")))
+                    .ghost()
+                    .xsmall()
+                    .p_0()
+                    .h_auto()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .w_full()
+                            .text_color(weak_text)
+                            .child(div().text_size(px(10.0)).child(trend_text))
+                            .child(fluent_icon(
+                                if expanded { "\u{E70E}" } else { "\u{E70D}" },
+                                10.0,
+                            )),
+                    )
+                    .tooltip(if expanded {
+                        "Hide 7-day usage histogram"
+                    } else {
+                        "Show 7-day usage histogram"
+                    })
+                    .on_click(move |_, _, cx| {
+                        app.update(cx, |this, cx| {
+                            if !this.expanded_trends.insert(toggle_provider.clone()) {
+                                this.expanded_trends.remove(&toggle_provider);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    }),
+            )
+            .child(
+                Collapsible::new()
+                    .open(expanded)
+                    .content(Self::render_trend_histogram(&trend, is_dark)),
+            )
+            .into_any_element()
+    }
+
+    fn render_trend_histogram(
+        trend: &crate::usage_history::ProviderTrend,
+        is_dark: bool,
+    ) -> AnyElement {
+        let buckets = trend.histogram_buckets(7);
+        let chart_state = crate::usage_history::classify_histogram_buckets(&buckets);
+        let bars = buckets
+            .into_iter()
+            .enumerate()
+            .map(|(index, bucket)| {
+                let latest = bucket
+                    .latest_percent
+                    .filter(|value| value.is_finite())
+                    .map(|value| value.max(0.0));
+                TrendChartBar {
+                    label: if index == 6 {
+                        "Now".into()
+                    } else {
+                        format!("{}d", 6 - index).into()
+                    },
+                    value: latest.unwrap_or(0.0),
+                    has_data: latest.is_some(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let weak_text = if is_dark {
+            gpui::rgba(0xffffff7f)
+        } else {
+            gpui::rgba(0x0000007f)
+        };
+
+        div()
+            .pt_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .text_color(weak_text)
+                    .child("Latest sample per rolling 24h · relative scale"),
+            )
+            .child(match chart_state {
+                crate::usage_history::TrendHistogramState::Chart => div()
+                    .w_full()
+                    .h(px(118.0))
+                    .child(
+                        BarChart::new(bars)
+                            .x(|bar| bar.label.clone())
+                            .y(|bar| bar.value)
+                            .fill(move |bar| {
+                                if bar.has_data {
+                                    usage_percent_color(bar.value, is_dark)
+                                } else {
+                                    gpui::rgba(0x00000000)
+                                }
+                            })
+                            .tick_margin(1)
+                            .label(|bar| {
+                                if bar.has_data {
+                                    if bar.value < 1.0 {
+                                        format!("{:.1}%", bar.value)
+                                    } else {
+                                        format!("{:.0}%", bar.value)
+                                    }
+                                } else {
+                                    String::new()
+                                }
+                            }),
+                    )
+                    .into_any_element(),
+                crate::usage_history::TrendHistogramState::AllRoundedToZero => div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w_full()
+                    .h(px(72.0))
+                    .text_size(px(10.0))
+                    .text_color(weak_text)
+                    .child("Available latest samples round to 0%")
+                    .into_any_element(),
+                crate::usage_history::TrendHistogramState::LatestUnavailable => div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w_full()
+                    .h(px(72.0))
+                    .text_size(px(10.0))
+                    .text_color(weak_text)
+                    .child("Latest samples unavailable for these buckets")
+                    .into_any_element(),
+            })
             .into_any_element()
     }
 
@@ -1315,25 +1480,7 @@ impl QuotifyApp {
 
     fn render_progress_row(w: &crate::provider::UsageWindow, is_dark: bool) -> AnyElement {
         let pct = w.used_percent.clamp(0.0, 100.0);
-        let fill_color = if pct >= 80.0 {
-            if is_dark {
-                gpui::rgb(0xf1707a)
-            } else {
-                gpui::rgb(0xc42b1c)
-            }
-        } else if pct >= 50.0 {
-            if is_dark {
-                gpui::rgb(0xffc800)
-            } else {
-                gpui::rgb(0xb37b00)
-            }
-        } else {
-            if is_dark {
-                gpui::rgb(0x60cdff)
-            } else {
-                gpui::rgb(0x0078d4)
-            }
-        };
+        let fill_color = usage_percent_color(pct, is_dark);
 
         div()
             .flex()
@@ -3198,6 +3345,26 @@ fn open_folder(path: &std::path::Path) -> anyhow::Result<()> {
         .args(["/C", "start", "", &path.to_string_lossy()])
         .spawn()?;
     Ok(())
+}
+
+fn usage_percent_color(percent: f64, is_dark: bool) -> gpui::Rgba {
+    if percent >= 80.0 {
+        if is_dark {
+            gpui::rgb(0xf1707a)
+        } else {
+            gpui::rgb(0xc42b1c)
+        }
+    } else if percent >= 50.0 {
+        if is_dark {
+            gpui::rgb(0xffc800)
+        } else {
+            gpui::rgb(0xb37b00)
+        }
+    } else if is_dark {
+        gpui::rgb(0x60cdff)
+    } else {
+        gpui::rgb(0x0078d4)
+    }
 }
 
 fn format_trend_summary(trend: &crate::usage_history::ProviderTrend) -> String {

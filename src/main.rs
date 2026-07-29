@@ -40,7 +40,7 @@ use std::{
     cell::RefCell,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -65,12 +65,15 @@ pub static SYSTEM_SLEEPING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static FLYOUT_STATE: AtomicU8 = AtomicU8::new(FlyoutState::Hidden as u8);
 static NEXT_FLYOUT_TIMER_ID: AtomicUsize = AtomicUsize::new(0x5155);
+static STARTUP_SHOW_CANCELLED: AtomicBool = AtomicBool::new(false);
 const FLYOUT_WIDTH_DIP: f32 = 400.0;
 const FLYOUT_HEIGHT_DIP: f32 = 520.0;
 const FLYOUT_GAP_PX: i32 = 16;
 const FLYOUT_SHOW_DURATION: Duration = Duration::from_millis(180);
 const FLYOUT_HIDE_DURATION: Duration = Duration::from_millis(150);
 const FLYOUT_TIMER_INTERVAL_MS: u32 = 10;
+const STARTUP_INACTIVE_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_INACTIVE_TIMER_INTERVAL_MS: u32 = 100;
 pub const PROVIDER_ORDER: [&str; 42] = [
     "codex",
     "openai",
@@ -1638,7 +1641,6 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     std::thread::spawn(move || {
         let tray_controller =
             Arc::new(tray::TrayController::new().expect("Failed to create tray controller"));
-        tray_tx.send(tray_controller.clone()).unwrap();
 
         // Set initial loading icon before data is fetched
         let (initial_icon, tooltip) = {
@@ -1667,6 +1669,9 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
         if let Ok(hicon) = initial_icon.to_hicon() {
             tray_controller.update_icon_with_tooltip(hicon, &tooltip);
         }
+        // Publish the controller only after the first tray-icon registration
+        // attempt, so the startup flyout can anchor to the actual icon.
+        tray_tx.send(tray_controller.clone()).unwrap();
 
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
@@ -1930,9 +1935,32 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                 return;
             }
 
-            #[cfg(debug_assertions)]
-            if std::env::var_os("QUOTIFY_SHOW_ON_START").is_some() {
-                let _ = shwnd.post_message(tray::WM_APP_SHOW, WPARAM(0), LPARAM(0));
+            // Give Explorer a short, bounded window to publish the icon rect.
+            // On a normal launch this is already available; during login it can
+            // lag slightly behind NIM_ADD.
+            let icon_rect_deadline = Instant::now() + Duration::from_secs(1);
+            while tray_icon_rect().is_none() && Instant::now() < icon_rect_deadline {
+                if tray::QUIT_REQUESTED.load(Ordering::SeqCst)
+                    || STARTUP_SHOW_CANCELLED.load(Ordering::SeqCst)
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if STARTUP_SHOW_CANCELLED.load(Ordering::SeqCst) {
+                return;
+            }
+            if tray_icon_rect().is_none() {
+                tracing::warn!(
+                    "Tray icon rectangle was unavailable at startup; using placement fallback"
+                );
+            }
+
+            // LPARAM(1) marks this as a startup show. It uses the same placement
+            // and animation as tray actions, but remains visible if Windows
+            // declines to grant foreground activation during login startup.
+            if let Err(err) = shwnd.post_message(tray::WM_APP_SHOW, WPARAM(0), LPARAM(1)) {
+                tracing::error!("Failed to request the startup flyout: {err}");
             }
         });
 
@@ -2060,6 +2088,8 @@ struct FlyoutController {
     placement: Option<FlyoutPlacement>,
     animation: Option<FlyoutAnimation>,
     timer_id: Option<usize>,
+    startup_inactive_deadline: Option<Instant>,
+    startup_inactive_timer_id: Option<usize>,
     generation: u64,
     quit_after_hide: bool,
 }
@@ -2809,38 +2839,45 @@ unsafe extern "system" fn main_window_subclass(
 
         match msg {
             tray::WM_APP_TOGGLE => {
+                STARTUP_SHOW_CANCELLED.store(true, Ordering::SeqCst);
                 if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
                     hide_popup_window(hwnd);
                 } else {
                     tray::ACTIVE_PAGE.store(wparam.0 as u32, Ordering::SeqCst);
-                    show_popup_window(hwnd);
+                    show_popup_window(hwnd, false);
                     trigger_gui_update();
                 }
                 LRESULT(0)
             }
             tray::WM_APP_SHOW => {
-                tray::ACTIVE_PAGE.store(wparam.0 as u32, Ordering::SeqCst);
-                if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
-                    if !activate_popup_window(hwnd) {
-                        hide_popup_window(hwnd);
-                    }
-                } else {
-                    show_popup_window(hwnd);
+                let startup_show = lparam.0 != 0;
+                if startup_show && STARTUP_SHOW_CANCELLED.load(Ordering::SeqCst) {
+                    return LRESULT(0);
                 }
+                if !startup_show {
+                    STARTUP_SHOW_CANCELLED.store(true, Ordering::SeqCst);
+                }
+                tray::ACTIVE_PAGE.store(wparam.0 as u32, Ordering::SeqCst);
+                show_popup_window(hwnd, startup_show);
                 trigger_gui_update();
                 LRESULT(0)
             }
             tray::WM_APP_HIDE => {
+                STARTUP_SHOW_CANCELLED.store(true, Ordering::SeqCst);
                 hide_popup_window(hwnd);
                 LRESULT(0)
             }
             WM_ACTIVATE => {
                 let active_state = (wparam.0 & 0xFFFF) as u32;
-                if active_state == WA_INACTIVE
-                    && matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible)
-                    && !is_pointer_on_tray_icon()
-                {
-                    hide_popup_window(hwnd);
+                if active_state == WA_INACTIVE {
+                    if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible)
+                        && !startup_flyout_is_inactive()
+                        && !is_pointer_on_tray_icon()
+                    {
+                        hide_popup_window(hwnd);
+                    }
+                } else {
+                    promote_activated_startup_flyout(hwnd);
                 }
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
@@ -2884,7 +2921,12 @@ unsafe extern "system" fn main_window_subclass(
                 apply_rounded_window_region(hwnd);
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
-            WM_TIMER if handle_flyout_timer(hwnd, wparam.0) => LRESULT(0),
+            WM_TIMER
+                if handle_flyout_timer(hwnd, wparam.0)
+                    || handle_startup_inactive_timer(hwnd, wparam.0) =>
+            {
+                LRESULT(0)
+            }
             tray::WM_APP_QUIT => {
                 quit_popup_window(hwnd);
                 LRESULT(0)
@@ -3027,6 +3069,112 @@ fn ensure_flyout_timer(hwnd: HWND) -> bool {
     }
 }
 
+fn startup_flyout_is_inactive() -> bool {
+    FLYOUT_CONTROLLER.with(|controller| controller.borrow().startup_inactive_deadline.is_some())
+}
+
+fn arm_startup_inactive_timer(hwnd: HWND) -> bool {
+    let already_armed = FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        controller.startup_inactive_deadline = Some(Instant::now() + STARTUP_INACTIVE_TIMEOUT);
+        controller.startup_inactive_timer_id.is_some()
+    });
+    if already_armed {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::SetTimer;
+
+        let requested_id = NEXT_FLYOUT_TIMER_ID.fetch_add(1, Ordering::SeqCst);
+        let timer_id = unsafe {
+            SetTimer(
+                Some(hwnd),
+                requested_id,
+                STARTUP_INACTIVE_TIMER_INTERVAL_MS,
+                None,
+            )
+        };
+        if timer_id == 0 {
+            FLYOUT_CONTROLLER.with(|controller| {
+                controller.borrow_mut().startup_inactive_deadline = None;
+            });
+            tracing::error!("Failed to create startup flyout timeout timer");
+            return false;
+        }
+        FLYOUT_CONTROLLER.with(|controller| {
+            controller.borrow_mut().startup_inactive_timer_id = Some(timer_id);
+        });
+        true
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+        true
+    }
+}
+
+fn clear_startup_inactive_timer(hwnd: HWND) -> bool {
+    let (timer_id, was_inactive) = FLYOUT_CONTROLLER.with(|controller| {
+        let mut controller = controller.borrow_mut();
+        let timer_id = controller.startup_inactive_timer_id.take();
+        let was_inactive = controller.startup_inactive_deadline.take().is_some();
+        (timer_id, was_inactive)
+    });
+
+    #[cfg(target_os = "windows")]
+    if let Some(timer_id) = timer_id {
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::KillTimer;
+            let _ = KillTimer(Some(hwnd), timer_id);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = (hwnd, timer_id);
+
+    was_inactive
+}
+
+fn promote_activated_startup_flyout(hwnd: HWND) {
+    if clear_startup_inactive_timer(hwnd) && flyout_state() == FlyoutState::Visible {
+        set_popup_topmost(hwnd, true);
+    }
+}
+
+fn handle_startup_inactive_timer(hwnd: HWND, timer_id: usize) -> bool {
+    let deadline = FLYOUT_CONTROLLER.with(|controller| {
+        let controller = controller.borrow();
+        if controller.startup_inactive_timer_id == Some(timer_id) {
+            controller.startup_inactive_deadline
+        } else {
+            None
+        }
+    });
+    let Some(deadline) = deadline else {
+        return false;
+    };
+
+    #[cfg(target_os = "windows")]
+    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } == hwnd {
+        promote_activated_startup_flyout(hwnd);
+        return true;
+    }
+
+    if Instant::now() < deadline {
+        return true;
+    }
+
+    clear_startup_inactive_timer(hwnd);
+    if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
+        tracing::debug!("Auto-hiding an inactive startup flyout");
+        hide_popup_window(hwnd);
+    }
+    true
+}
+
 fn set_popup_topmost(hwnd: HWND, topmost: bool) {
     #[cfg(target_os = "windows")]
     unsafe {
@@ -3067,7 +3215,10 @@ fn finalize_flyout_animation(hwnd: HWND, animation: FlyoutAnimation) {
 
     match animation.phase {
         FlyoutState::Showing => {
-            set_popup_topmost(hwnd, true);
+            // A startup flyout that Windows would not activate stays
+            // non-topmost until the user focuses it, and is auto-hidden by its
+            // bounded timeout.
+            set_popup_topmost(hwnd, !startup_flyout_is_inactive());
             if animation_generation_is_current(animation.generation) {
                 set_flyout_state(FlyoutState::Visible);
                 tracing::debug!("Flyout show animation completed");
@@ -3211,22 +3362,31 @@ fn handle_flyout_timer(hwnd: HWND, timer_id: usize) -> bool {
     true
 }
 
-fn show_popup_window(hwnd: HWND) {
+fn show_popup_window(hwnd: HWND, startup_show: bool) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::WindowsAndMessaging::{
             HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
         };
 
-        if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
-            if !activate_popup_window(hwnd) {
-                hide_popup_window(hwnd);
-            }
+        let quitting = FLYOUT_CONTROLLER.with(|controller| controller.borrow().quit_after_hide);
+        if quitting {
             return;
         }
 
-        let quitting = FLYOUT_CONTROLLER.with(|controller| controller.borrow().quit_after_hide);
-        if quitting {
+        let startup_timeout_armed = if startup_show {
+            arm_startup_inactive_timer(hwnd)
+        } else {
+            clear_startup_inactive_timer(hwnd);
+            false
+        };
+
+        if matches!(flyout_state(), FlyoutState::Showing | FlyoutState::Visible) {
+            if activate_popup_window(hwnd) {
+                promote_activated_startup_flyout(hwnd);
+            } else if !startup_timeout_armed {
+                hide_popup_window(hwnd);
+            }
             return;
         }
 
@@ -3290,7 +3450,14 @@ fn show_popup_window(hwnd: HWND) {
         if !ensure_flyout_timer(hwnd) {
             finish_flyout_animation_now(hwnd);
         }
-        if !activate_popup_window(hwnd) {
+        if activate_popup_window(hwnd) {
+            promote_activated_startup_flyout(hwnd);
+        } else if startup_timeout_armed {
+            tracing::info!(
+                "Windows declined startup flyout activation; showing it without focus for up to {}s",
+                STARTUP_INACTIVE_TIMEOUT.as_secs()
+            );
+        } else {
             tracing::warn!("Windows refused to activate the flyout; hiding it again");
             hide_popup_window(hwnd);
         }
@@ -3333,6 +3500,8 @@ fn is_pointer_on_tray_icon() -> bool {
 }
 
 fn hide_popup_window(hwnd: HWND) {
+    clear_startup_inactive_timer(hwnd);
+
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -3389,6 +3558,8 @@ fn hide_popup_window(hwnd: HWND) {
 }
 
 fn hide_popup_immediately(hwnd: HWND, destroy_after_hide: bool) {
+    clear_startup_inactive_timer(hwnd);
+
     let timer_id = FLYOUT_CONTROLLER.with(|controller| {
         let mut controller = controller.borrow_mut();
         controller.generation = controller.generation.wrapping_add(1);
@@ -3447,6 +3618,8 @@ fn quit_popup_window(hwnd: HWND) {
 }
 
 fn reset_flyout_controller(hwnd: HWND) {
+    clear_startup_inactive_timer(hwnd);
+
     let timer_id = FLYOUT_CONTROLLER.with(|controller| {
         let mut controller = controller.borrow_mut();
         let timer_id = controller.timer_id.take();

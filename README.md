@@ -22,6 +22,7 @@ Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) 
 * **Mica & Fluent Aesthetics**: Implements native Windows 11 DWM Mica backdrop effects with semi-transparent card layouts.
 * **Windows Credential Manager Security**: API keys, session tokens, and browser cookies are securely stored using Windows Credential Manager (`quotify/<provider>/<field>`), ensuring no secrets are stored in plain text.
 * **Smart Local History Caching**: Usage snapshots are cached locally in `%APPDATA%\quotify\usage-history.json` so you can instantly view your last fetched usage stats while background fetch is running.
+* **Expandable Usage Trends**: Each provider card can expand its 7-day trend summary into a daily usage histogram while preserving gaps where no samples were recorded.
 * **Interactive Drag-to-Reorder**: Reorder provider cards directly in the UI with a simple long-press and drag action. Your custom order is automatically updated in the config file.
 * **Native Windows Notifications**: Optionally receive quota-reset, usage-threshold, and silent background-refresh failure notifications through Windows. Notifications are completely disabled by default.
 * **Windows Desktop Facilities**: Supports running as a single instance, automatically registering to start with Windows, and writing rotating daily diagnostic logs to `%APPDATA%\quotify\logs`.
