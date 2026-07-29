@@ -36,6 +36,111 @@ pub fn current_component_theme_setting() -> String {
     component_theme_setting().read().clone()
 }
 
+/// Limits gpui-component's opaque surface color to a single Select subtree.
+///
+/// gpui-component 0.5.1 renders Select menus with `theme.background`, while
+/// Quotify keeps that token transparent so the window backdrop remains visible.
+/// Swapping the token only while this subtree is materialized gives the menu the
+/// existing opaque popover color without changing the Root/DWM backdrop.
+struct SelectPopoverSurface {
+    child: AnyElement,
+}
+
+impl SelectPopoverSurface {
+    fn new(child: impl IntoElement) -> Self {
+        Self {
+            child: child.into_any_element(),
+        }
+    }
+
+    fn with_popover_theme<R>(cx: &mut App, render: impl FnOnce(&mut App) -> R) -> R {
+        let (background, foreground, popover, popover_foreground) = {
+            let theme = gpui_component::Theme::global(cx);
+            (
+                theme.background,
+                theme.foreground,
+                theme.popover,
+                theme.popover_foreground,
+            )
+        };
+
+        {
+            let theme = gpui_component::Theme::global_mut(cx);
+            theme.background = popover;
+            theme.foreground = popover_foreground;
+        }
+
+        let result = render(cx);
+
+        {
+            let theme = gpui_component::Theme::global_mut(cx);
+            theme.background = background;
+            theme.foreground = foreground;
+        }
+
+        result
+    }
+}
+
+impl IntoElement for SelectPopoverSurface {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for SelectPopoverSurface {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let layout_id = Self::with_popover_theme(cx, |cx| self.child.request_layout(window, cx));
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        Self::with_popover_theme(cx, |cx| {
+            self.child.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        Self::with_popover_theme(cx, |cx| self.child.paint(window, cx));
+    }
+}
+
 pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, cx: &mut App) {
     *component_theme_setting().write() = theme_setting.to_string();
 
@@ -1699,10 +1804,12 @@ impl QuotifyApp {
                     .fill()
                     .child(
                         // Provider ComboBox
-                        Select::new(&provider_select)
-                            .bg(bg_fill)
-                            .search_placeholder("Search providers")
-                            .w_full(),
+                        SelectPopoverSurface::new(
+                            Select::new(&provider_select)
+                                .bg(bg_fill)
+                                .search_placeholder("Search providers")
+                                .w_full(),
+                        ),
                     )
                     .child(Divider::horizontal())
                     .child(
