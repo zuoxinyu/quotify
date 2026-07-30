@@ -10,6 +10,7 @@ active_provider = ""                # Optional primary provider for tray icon/ti
 start_with_windows = false          # Register Quotify under HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 backdrop = "mica_alt"               # "mica", "mica_alt", "acrylic", or "none"
 auto_webview_login = true           # Automatically open WebView when supported providers require login
+local_agent_discovery = true        # Allow local credential/CLI discovery; first launch asks before enabling this
 provider_order = [
   "claude",
   "codex",

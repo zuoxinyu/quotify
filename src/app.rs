@@ -238,6 +238,14 @@ enum WebViewLoginStatus {
     Error(String),
 }
 
+#[derive(Clone, Debug, Default)]
+enum AgentScanStatus {
+    #[default]
+    Idle,
+    Scanning,
+    Complete(Vec<crate::agent_scan::DetectedAgent>),
+}
+
 #[derive(Default, Clone)]
 pub struct ProviderDragState {
     held_provider: Option<String>,
@@ -281,6 +289,8 @@ pub struct QuotifyApp {
     webview_login_status: Arc<parking_lot::Mutex<HashMap<String, WebViewLoginStatus>>>,
     budget_input_errors: HashMap<String, String>,
     pub selected_setting_provider: String,
+    show_agent_scan_onboarding: bool,
+    agent_scan_status: AgentScanStatus,
     disclosures: HashMap<String, DisclosureAnimation>,
     disclosure_frame_at: Option<Instant>,
     trend_cache: crate::trend_cache::TrendCache,
@@ -296,6 +306,7 @@ impl QuotifyApp {
         history: Arc<RwLock<crate::usage_history::UsageHistory>>,
         _cx: &mut Context<Self>,
     ) -> Self {
+        let show_agent_scan_onboarding = !config.general.agent_scan_onboarding_completed;
         Self {
             data,
             last_refresh,
@@ -309,6 +320,8 @@ impl QuotifyApp {
             webview_login_status: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             budget_input_errors: HashMap::new(),
             selected_setting_provider: "openai".to_string(),
+            show_agent_scan_onboarding,
+            agent_scan_status: AgentScanStatus::Idle,
             disclosures: HashMap::new(),
             disclosure_frame_at: None,
             trend_cache: crate::trend_cache::TrendCache::new(),
@@ -336,6 +349,67 @@ impl QuotifyApp {
                 tracing::error!("Failed to save config: {err}");
             }
         }
+    }
+
+    fn decline_agent_scan_onboarding(&mut self) {
+        self.config.general.local_agent_discovery = false;
+        self.config.general.agent_scan_onboarding_completed = true;
+        self.show_agent_scan_onboarding = false;
+        self.agent_scan_status = AgentScanStatus::Idle;
+        self.save_config();
+    }
+
+    fn trigger_agent_scan(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.agent_scan_status, AgentScanStatus::Scanning) {
+            return;
+        }
+
+        let mut scan_config = self.config.clone();
+        for provider_id in crate::agent_scan::AGENT_PROVIDER_IDS {
+            set_provider_enabled_value(&mut scan_config, provider_id, None);
+        }
+
+        self.agent_scan_status = AgentScanStatus::Scanning;
+        cx.notify();
+
+        cx.spawn(|this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let detected = cx
+                    .background_executor()
+                    .spawn(async move { crate::agent_scan::scan_available_agents(&scan_config) })
+                    .await;
+
+                cx.update(|cx| {
+                    this.update(cx, |view, cx| {
+                        view.config.general.local_agent_discovery = true;
+                        view.config.general.agent_scan_onboarding_completed = true;
+                        for agent in &detected {
+                            set_provider_enabled_value(
+                                &mut view.config,
+                                agent.provider_id,
+                                Some(true),
+                            );
+                        }
+
+                        if view.config.general.active_provider.trim().is_empty()
+                            && let Some(first) = detected.first()
+                        {
+                            view.config.general.active_provider = first.provider_id.to_string();
+                            *view.active_provider.write() = first.provider_id.to_string();
+                        }
+
+                        view.agent_scan_status = AgentScanStatus::Complete(detected);
+                        view.save_config();
+                        crate::tray::request_refresh();
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn set_primary_provider(&mut self, provider_name: &str) {
@@ -715,6 +789,19 @@ impl Render for QuotifyApp {
             gpui::rgba(0xffffff99)
         };
 
+        if self.show_agent_scan_onboarding {
+            return div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .h_full()
+                .p(px(24.0))
+                .bg(bg_fill)
+                .text_color(text_color)
+                .font_family("Segoe UI")
+                .child(self.render_agent_scan_onboarding(is_dark, cx));
+        }
+
         // Outer layout container matching Windows 11 Mica backdrop popup dimensions 400x520
         div()
             .flex()
@@ -769,6 +856,235 @@ impl Render for QuotifyApp {
 }
 
 impl QuotifyApp {
+    fn render_agent_scan_onboarding(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
+        let secondary_text = if is_dark {
+            gpui::rgba(0xffffff99)
+        } else {
+            gpui::rgba(0x00000099)
+        };
+
+        let status_content = match &self.agent_scan_status {
+            AgentScanStatus::Idle => {
+                let decline_app = app.clone();
+                let scan_app = app.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .gap_4()
+                    .child(
+                        GroupBox::new()
+                            .fill()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(fluent_icon("\u{E721}", 15.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_size(px(12.0))
+                                                    .child("Local-only discovery"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(secondary_text)
+                                                    .child(
+                                                        "Checks known credential locations, environment variables, and installed CLI commands.",
+                                                    ),
+                                            ),
+                                    ),
+                            )
+                            .child(Divider::horizontal())
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(fluent_icon("\u{E8D7}", 15.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_size(px(12.0))
+                                                    .child("You stay in control"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(secondary_text)
+                                                    .child(
+                                                        "Nothing is uploaded. Detected providers are enabled so Quotify can display their usage.",
+                                                    ),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("onboarding_skip_agent_scan")
+                                    .label("Not now")
+                                    .on_click(move |_, _, cx| {
+                                        decline_app
+                                            .update(cx, |this, cx| {
+                                                this.decline_agent_scan_onboarding();
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            )
+                            .child(
+                                Button::new("onboarding_allow_agent_scan")
+                                    .primary()
+                                    .child(fluent_icon("\u{E721}", 11.0))
+                                    .child("Allow & Scan")
+                                    .on_click(move |_, _, cx| {
+                                        scan_app
+                                            .update(cx, |this, cx| {
+                                                this.trigger_agent_scan(cx);
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            AgentScanStatus::Scanning => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(fluent_icon("\u{E721}", 24.0))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_size(px(13.0))
+                        .child("Scanning for local agents..."),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(secondary_text)
+                        .child("This usually takes only a few seconds."),
+                )
+                .into_any_element(),
+            AgentScanStatus::Complete(detected) => {
+                let continue_app = app.clone();
+                let detected_count = detected.len();
+                let result_message = if detected.is_empty() {
+                    "No ready agents were found. You can configure providers manually in Settings."
+                        .to_string()
+                } else {
+                    format!(
+                        "Found and enabled {detected_count} local agent{}.",
+                        if detected_count == 1 { "" } else { "s" }
+                    )
+                };
+
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .gap_3()
+                    .child(
+                        Alert::success("agent-scan-complete", result_message)
+                            .title("Scan complete"),
+                    )
+                    .when(!detected.is_empty(), |view| {
+                        view.child(
+                            GroupBox::new().fill().child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .max_h(px(230.0))
+                                    .overflow_y_scrollbar()
+                                    .children(detected.iter().map(|agent| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .py_1()
+                                            .child(fluent_icon("\u{E73E}", 10.0))
+                                            .child(
+                                                div().text_size(px(11.0)).child(agent.display_name),
+                                            )
+                                    })),
+                            ),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        div().flex().justify_end().child(
+                            Button::new("onboarding_finish_agent_scan")
+                                .primary()
+                                .label("Continue")
+                                .on_click(move |_, _, cx| {
+                                    continue_app
+                                        .update(cx, |this, cx| {
+                                            this.show_agent_scan_onboarding = false;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                }),
+                        ),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .h_full()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(img("assets/icons/quotify.svg").w(px(32.0)).h(px(32.0)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_size(px(18.0))
+                                    .child("Welcome to Quotify"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(secondary_text)
+                                    .child("Find your coding agents and get set up faster."),
+                            ),
+                    ),
+            )
+            .child(Divider::horizontal())
+            .child(status_content)
+            .into_any_element()
+    }
+
     fn render_header(&self, active_page: u32, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
         let app = cx.entity().downgrade();
         let weak_text = if is_dark {
@@ -1956,6 +2272,9 @@ impl QuotifyApp {
         let theme_app = cx.entity().downgrade();
         let backdrop_app = cx.entity().downgrade();
         let auto_webview_app = cx.entity().downgrade();
+        let agent_discovery_app = cx.entity().downgrade();
+        let scan_agents_app = cx.entity().downgrade();
+        let agent_scan_status = self.agent_scan_status.clone();
         let secondary_text = if is_dark {
             gpui::rgba(0xffffff99)
         } else {
@@ -2142,6 +2461,125 @@ impl QuotifyApp {
                                             .ok();
                                     })
                             )
+                    )
+                    .child(Divider::horizontal())
+                    .child(
+                        // Local agent discovery consent and manual scan.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_size(px(12.0))
+                                                    .child("Local Agent Discovery"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(secondary_text)
+                                                    .child(
+                                                        "Check known local auth locations and installed agent CLIs",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("scan_local_agents_btn")
+                                                    .small()
+                                                    .compact()
+                                                    .label("Scan now")
+                                                    .loading(matches!(
+                                                        &agent_scan_status,
+                                                        AgentScanStatus::Scanning
+                                                    ))
+                                                    .disabled(
+                                                        !self.config.general.local_agent_discovery
+                                                            || matches!(
+                                                                &agent_scan_status,
+                                                                AgentScanStatus::Scanning
+                                                            ),
+                                                    )
+                                                    .on_click(move |_, _, cx| {
+                                                        scan_agents_app
+                                                            .update(cx, |this, cx| {
+                                                                this.trigger_agent_scan(cx);
+                                                            })
+                                                            .ok();
+                                                    }),
+                                            )
+                                            .child(
+                                                Switch::new("local_agent_discovery")
+                                                    .checked(
+                                                        self.config
+                                                            .general
+                                                            .local_agent_discovery,
+                                                    )
+                                                    .on_click(move |checked, _window, cx| {
+                                                        let checked = *checked;
+                                                        agent_discovery_app
+                                                            .update(cx, |this, cx| {
+                                                                this.config
+                                                                    .general
+                                                                    .local_agent_discovery =
+                                                                    checked;
+                                                                this.config
+                                                                    .general
+                                                                    .agent_scan_onboarding_completed =
+                                                                    true;
+                                                                this.agent_scan_status =
+                                                                    AgentScanStatus::Idle;
+                                                                this.save_config();
+                                                                if checked {
+                                                                    this.trigger_agent_scan(cx);
+                                                                } else {
+                                                                    crate::tray::request_refresh();
+                                                                    cx.notify();
+                                                                }
+                                                            })
+                                                            .ok();
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                            .child(match agent_scan_status {
+                                AgentScanStatus::Complete(detected) if detected.is_empty() => {
+                                    Alert::info(
+                                        "settings-agent-scan-empty",
+                                        "No ready local agents were found.",
+                                    )
+                                    .small()
+                                    .into_any_element()
+                                }
+                                AgentScanStatus::Complete(detected) => Alert::success(
+                                    "settings-agent-scan-complete",
+                                    format!(
+                                        "Enabled: {}",
+                                        detected
+                                            .iter()
+                                            .map(|agent| agent.display_name)
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ),
+                                )
+                                .small()
+                                .into_any_element(),
+                                _ => div().into_any_element(),
+                            }),
                     )
                     .child(Divider::horizontal())
                     .child(
@@ -3566,21 +4004,31 @@ fn api_key_provider_config_mut<'a>(
 }
 
 fn enable_provider_for_test(config: &mut crate::config::AppConfig, provider: &str) {
+    set_provider_enabled_value(config, provider, Some(true));
+}
+
+fn set_provider_enabled_value(
+    config: &mut crate::config::AppConfig,
+    provider: &str,
+    enabled: Option<bool>,
+) -> bool {
     match provider {
-        "deepseek" => config.deepseek.enabled = Some(true),
-        "claude" => config.claude.enabled = Some(true),
-        "codex" => config.codex.enabled = Some(true),
-        "gemini" => config.gemini.enabled = Some(true),
-        "antigravity" => config.antigravity.enabled = Some(true),
-        "opencode" => config.opencode.enabled = Some(true),
-        "opencodego" => config.opencode.enabled = Some(true),
-        "mimo" => config.mimo.enabled = Some(true),
+        "deepseek" => config.deepseek.enabled = enabled,
+        "claude" => config.claude.enabled = enabled,
+        "codex" => config.codex.enabled = enabled,
+        "gemini" => config.gemini.enabled = enabled,
+        "antigravity" => config.antigravity.enabled = enabled,
+        "opencode" | "opencodego" => config.opencode.enabled = enabled,
+        "mimo" => config.mimo.enabled = enabled,
         _ => {
             if let Some(cfg) = api_key_provider_config_mut(config, provider) {
-                cfg.enabled = Some(true);
+                cfg.enabled = enabled;
+            } else {
+                return false;
             }
         }
     }
+    true
 }
 
 fn summarize_provider_test(data: &UsageData) -> String {

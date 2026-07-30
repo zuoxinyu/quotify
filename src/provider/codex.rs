@@ -29,6 +29,27 @@ pub fn reset_credits(data: &UsageData) -> Option<super::CodexResetCredits> {
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
+pub fn attach_reset_credits(data: &mut UsageData, resets: &super::CodexResetCredits) -> bool {
+    if !data.provider.eq_ignore_ascii_case("codex") {
+        return false;
+    }
+
+    let Ok(json) = serde_json::to_string(resets) else {
+        return false;
+    };
+    data.windows
+        .retain(|window| !is_reset_credits_window(window));
+    data.windows.push(UsageWindow {
+        label: RESET_CREDITS_LABEL.to_string(),
+        used_percent: 0.0,
+        limit: None,
+        used: None,
+        unit: Some(json),
+        resets_at: None,
+    });
+    true
+}
+
 pub struct CodexProvider {
     auth_file: Option<String>,
     client: reqwest::Client,
@@ -366,11 +387,24 @@ impl Provider for CodexProvider {
         if let Some(auth) = auth.as_ref() {
             let reset_resp = self.authenticated_get(RESET_CREDITS_URL, auth).send().await;
 
-            if let Ok(r) = reset_resp
-                && r.status().is_success()
-                && let Ok(parsed) = r.json::<super::CodexResetCredits>().await
-            {
-                codex_reset_credits = Some(parsed);
+            match reset_resp {
+                Ok(response) if response.status().is_success() => {
+                    match response.json::<super::CodexResetCredits>().await {
+                        Ok(parsed) => codex_reset_credits = Some(parsed),
+                        Err(err) => {
+                            tracing::warn!("Failed to parse Codex reset credits response: {err}");
+                        }
+                    }
+                }
+                Ok(response) => {
+                    tracing::warn!(
+                        "Codex reset credits API returned non-success status: {}",
+                        response.status()
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to call Codex reset credits API: {err}");
+                }
             }
 
             let resp = self.authenticated_get(USAGE_URL, auth).send().await;
@@ -515,19 +549,6 @@ impl Provider for CodexProvider {
             }
         }
 
-        if let Some(resets) = codex_reset_credits
-            && let Ok(json_str) = serde_json::to_string(&resets)
-        {
-            windows.push(UsageWindow {
-                label: RESET_CREDITS_LABEL.to_string(),
-                used_percent: 0.0,
-                limit: None,
-                used: None,
-                unit: Some(json_str),
-                resets_at: None,
-            });
-        }
-
         if windows.is_empty() {
             windows.push(UsageWindow {
                 label: "No data".to_string(),
@@ -539,14 +560,18 @@ impl Provider for CodexProvider {
             });
         }
 
-        Ok(UsageData {
+        let mut data = UsageData {
             provider: self.name().to_string(),
             windows,
             credits,
             subscription_tier,
             fetched_at: Utc::now(),
             error: None,
-        })
+        };
+        if let Some(resets) = codex_reset_credits {
+            attach_reset_credits(&mut data, &resets);
+        }
+        Ok(data)
     }
 }
 

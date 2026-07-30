@@ -21,6 +21,7 @@ Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) 
 * **GPUI-powered UI**: Renders a premium, GPU-accelerated, high-performance interface built using the modern `GPUI` framework (developed by the Zed team).
 * **Mica & Fluent Aesthetics**: Implements native Windows 11 DWM Mica backdrop effects with semi-transparent card layouts.
 * **Windows Credential Manager Security**: API keys, session tokens, and browser cookies are securely stored using Windows Credential Manager (`quotify/<provider>/<field>`), ensuring no secrets are stored in plain text.
+* **Consent-based Agent Discovery**: On first launch, Quotify asks before checking known local credential locations, environment variables, and installed coding-agent CLIs. Discovery stays local and can be changed or rerun from Settings.
 * **Smart Local History Caching**: Usage snapshots are cached locally in `%APPDATA%\quotify\usage-history.json` so you can instantly view your last fetched usage stats while background fetch is running.
 * **Expandable Usage Trends**: Each provider card can expand its 7-day trend summary into a daily usage histogram while preserving gaps where no samples were recorded.
 * **Interactive Drag-to-Reorder**: Reorder provider cards directly in the UI with a simple long-press and drag action. Your custom order is automatically updated in the config file.
@@ -139,6 +140,12 @@ The configuration directory is located at:
 
 * **`quotify.toml`**: Stores non-sensitive settings like refresh intervals, proxy setup, and active provider ordering. See `config.example.toml` for options.
 * **Credential Manager**: Secret fields (API keys, cookies) configured via the settings UI are saved securely under Windows Credential Manager.
+
+### Local Agent Discovery
+
+New installations do not scan automatically. The first-launch onboarding prompt can enable a local scan and activate detected coding-agent providers. The scan checks only known local credential locations, environment variables, and installed CLI commands; it does not upload credentials or file contents.
+
+Discovery can be disabled or rerun from **Settings → General Settings → Local Agent Discovery**. When disabled, Quotify refreshes only providers that were explicitly enabled in Provider Settings.
 
 ### Windows Notifications
 

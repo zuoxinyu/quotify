@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![cfg_attr(test, allow(dead_code, unused_variables, unused_imports))]
 
+mod agent_scan;
 #[cfg(not(test))]
 mod app;
 mod config;
@@ -1194,21 +1195,32 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
 }
 
 async fn fetch_all_providers(config: &config::AppConfig) -> Vec<UsageData> {
+    let provider_names = provider_names_for_refresh(config);
+    fetch_providers(config, provider_names).await
+}
+
+fn provider_names_for_refresh(config: &config::AppConfig) -> Vec<String> {
     let all_providers = PROVIDER_ORDER;
 
-    let provider_names: Vec<String> = all_providers
-        .iter()
-        .filter(|name| create_provider(name, config).is_some())
-        .map(|s| s.to_string())
-        .collect();
+    let provider_names: Vec<String> = if config.general.local_agent_discovery {
+        all_providers
+            .iter()
+            .filter(|name| create_provider(name, config).is_some())
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        all_providers
+            .iter()
+            .filter(|name| config.provider_explicitly_enabled(name))
+            .map(|s| s.to_string())
+            .collect()
+    };
 
-    let provider_names = if provider_names.is_empty() {
+    if provider_names.is_empty() && config.general.local_agent_discovery {
         all_providers.iter().map(|s| s.to_string()).collect()
     } else {
         provider_names
-    };
-
-    fetch_providers(config, provider_names).await
+    }
 }
 
 fn publish_provider_results(
@@ -1219,6 +1231,15 @@ fn publish_provider_results(
     history: &Arc<RwLock<usage_history::UsageHistory>>,
     silent_refresh: bool,
 ) {
+    {
+        let history = history.read();
+        if history.carry_forward_codex_reset_credits(&mut results, chrono::Utc::now()) {
+            tracing::debug!(
+                "Carried forward unexpired Codex reset credits after a partial refresh"
+            );
+        }
+    }
+
     let mut budget_refresh_failures = std::collections::BTreeSet::new();
     for result in &mut results {
         if apply_provider_budget(config, result) {
@@ -1645,6 +1666,32 @@ fn load_runtime_config(
     });
     secrets::hydrate_config(&mut config);
     config
+}
+
+#[cfg(test)]
+mod agent_discovery_tests {
+    use super::provider_names_for_refresh;
+    use crate::config::AppConfig;
+
+    #[test]
+    fn new_install_does_not_scan_or_fetch_implicit_providers() {
+        let config = AppConfig::default();
+
+        assert!(provider_names_for_refresh(&config).is_empty());
+    }
+
+    #[test]
+    fn declined_discovery_keeps_explicitly_enabled_providers_working() {
+        let mut config = AppConfig::default();
+        config.general.agent_scan_onboarding_completed = true;
+        config.openai.enabled = Some(true);
+        config.codex.enabled = Some(true);
+
+        assert_eq!(
+            provider_names_for_refresh(&config),
+            vec!["codex".to_string(), "openai".to_string()]
+        );
+    }
 }
 
 #[derive(rust_embed::Embed)]

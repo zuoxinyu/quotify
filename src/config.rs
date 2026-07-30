@@ -18,6 +18,10 @@ pub struct GeneralConfig {
     pub auto_webview_login: bool,
     #[serde(default)]
     pub start_with_windows: bool,
+    #[serde(default = "default_local_agent_discovery_for_existing_config")]
+    pub local_agent_discovery: bool,
+    #[serde(default = "default_agent_scan_onboarding_for_existing_config")]
+    pub agent_scan_onboarding_completed: bool,
 }
 
 fn default_refresh_interval() -> u64 {
@@ -36,6 +40,14 @@ fn default_auto_webview_login() -> bool {
     true
 }
 
+fn default_local_agent_discovery_for_existing_config() -> bool {
+    true
+}
+
+fn default_agent_scan_onboarding_for_existing_config() -> bool {
+    true
+}
+
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -46,6 +58,8 @@ impl Default for GeneralConfig {
             backdrop: default_backdrop(),
             auto_webview_login: default_auto_webview_login(),
             start_with_windows: false,
+            local_agent_discovery: false,
+            agent_scan_onboarding_completed: false,
         }
     }
 }
@@ -372,6 +386,78 @@ impl AppConfig {
         self.general.provider_order = merged_order;
     }
 
+    pub fn provider_explicitly_enabled(&self, provider: &str) -> bool {
+        match provider.trim().to_ascii_lowercase().as_str() {
+            "deepseek" => self.deepseek.enabled,
+            "openrouter" => self.openrouter.enabled,
+            "clinepass" => self.clinepass.enabled,
+            "alibaba" => self.alibaba.enabled,
+            "qwencloud" => self.qwencloud.enabled,
+            "devin" => self.devin.enabled,
+            "manus" => self.manus.enabled,
+            "zed" => self.zed.enabled,
+            "perplexity" => self.perplexity.enabled,
+            "sakana" => self.sakana.enabled,
+            "deepinfra" => self.deepinfra.enabled,
+            "commandcode" => self.commandcode.enabled,
+            "qoder" => self.qoder.enabled,
+            "litellm" => self.litellm.enabled,
+            "poe" => self.poe.enabled,
+            "chutes" => self.chutes.enabled,
+            "neuralwatt" => self.neuralwatt.enabled,
+            "clawrouter" => self.clawrouter.enabled,
+            "longcat" => self.longcat.enabled,
+            "sub2api" => self.sub2api.enabled,
+            "wayfinder" => self.wayfinder.enabled,
+            "zenmux" => self.zenmux.enabled,
+            "aiand" => self.aiand.enabled,
+            "zoommate" => self.zoommate.enabled,
+            "xai" => self.xai.enabled,
+            "openai" => self.openai.enabled,
+            "moonshot" => self.moonshot.enabled,
+            "elevenlabs" => self.elevenlabs.enabled,
+            "doubao" => self.doubao.enabled,
+            "zai" => self.zai.enabled,
+            "venice" => self.venice.enabled,
+            "crof" => self.crof.enabled,
+            "synthetic" => self.synthetic.enabled,
+            "warp" => self.warp.enabled,
+            "groqcloud" => self.groqcloud.enabled,
+            "deepgram" => self.deepgram.enabled,
+            "llmproxy" => self.llmproxy.enabled,
+            "codebuff" => self.codebuff.enabled,
+            "kiro" => self.kiro.enabled,
+            "copilot" => self.copilot.enabled,
+            "azureopenai" => self.azureopenai.enabled,
+            "ollama" => self.ollama.enabled,
+            "minimax" => self.minimax.enabled,
+            "jetbrains" => self.jetbrains.enabled,
+            "kimi" => self.kimi.enabled,
+            "kilo" => self.kilo.enabled,
+            "augment" => self.augment.enabled,
+            "bedrock" => self.bedrock.enabled,
+            "vertexai" => self.vertexai.enabled,
+            "stepfun" => self.stepfun.enabled,
+            "abacus" => self.abacus.enabled,
+            "alibabatoken" => self.alibabatoken.enabled,
+            "t3chat" => self.t3chat.enabled,
+            "amp" => self.amp.enabled,
+            "mistral" => self.mistral.enabled,
+            "grok" => self.grok.enabled,
+            "cursor" => self.cursor.enabled,
+            "droid" => self.droid.enabled,
+            "windsurf" => self.windsurf.enabled,
+            "claude" => self.claude.enabled,
+            "codex" => self.codex.enabled,
+            "gemini" => self.gemini.enabled,
+            "antigravity" => self.antigravity.enabled,
+            "opencode" | "opencodego" => self.opencode.enabled,
+            "mimo" => self.mimo.enabled,
+            _ => None,
+        }
+        .unwrap_or(false)
+    }
+
     pub fn provider_budget(&self, provider: &str) -> Option<f64> {
         let provider = provider.trim();
         self.provider_budgets
@@ -522,6 +608,8 @@ mod tests {
         assert_eq!(gen_config.theme, "system");
         assert_eq!(gen_config.backdrop, "mica_alt");
         assert!(gen_config.auto_webview_login);
+        assert!(gen_config.local_agent_discovery);
+        assert!(gen_config.agent_scan_onboarding_completed);
 
         let toml_str_with_theme = r#"
             refresh_interval = 300
@@ -535,6 +623,26 @@ mod tests {
         assert_eq!(gen_config2.theme, "dark");
         assert_eq!(gen_config2.backdrop, "acrylic");
         assert!(!gen_config2.auto_webview_login);
+    }
+
+    #[test]
+    fn new_install_waits_for_agent_scan_consent() {
+        let config = AppConfig::default();
+
+        assert!(!config.general.local_agent_discovery);
+        assert!(!config.general.agent_scan_onboarding_completed);
+    }
+
+    #[test]
+    fn every_registered_provider_supports_explicit_enable_detection() {
+        for (provider_id, _) in crate::provider::PROVIDER_CATALOG {
+            let config: AppConfig =
+                toml::from_str(&format!("[{provider_id}]\nenabled = true\n")).unwrap();
+            assert!(
+                config.provider_explicitly_enabled(provider_id),
+                "{provider_id} was not recognized as explicitly enabled"
+            );
+        }
     }
 
     #[test]

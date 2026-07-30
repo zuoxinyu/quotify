@@ -181,6 +181,15 @@ impl UsageHistory {
     }
 
     pub fn append(&mut self, providers: Vec<crate::provider::UsageData>) {
+        // A refresh can yield no provider results at all (for example, an
+        // isolated configuration or a startup race). That is not evidence
+        // that every previously tracked provider was removed, so it must not
+        // create a global discontinuity in every trend.
+        if providers.is_empty() {
+            tracing::debug!("Skipping empty usage history snapshot");
+            return;
+        }
+
         self.entries.push(UsageHistoryEntry {
             fetched_at: Utc::now(),
             providers,
@@ -191,7 +200,8 @@ impl UsageHistory {
     }
 
     pub fn latest_successful(&self) -> Vec<crate::provider::UsageData> {
-        self.entries
+        let mut providers = self
+            .entries
             .iter()
             .rev()
             .find(|entry| {
@@ -201,7 +211,44 @@ impl UsageHistory {
                     .any(|provider| provider.error.is_none())
             })
             .map(|entry| entry.providers.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.carry_forward_codex_reset_credits(&mut providers, Utc::now());
+        providers
+    }
+
+    pub fn carry_forward_codex_reset_credits(
+        &self,
+        providers: &mut [crate::provider::UsageData],
+        now: DateTime<Utc>,
+    ) -> bool {
+        let Some(codex) = providers.iter_mut().find(|data| {
+            data.provider.eq_ignore_ascii_case("codex")
+                && data.error.is_none()
+                && crate::provider::codex::reset_credits(data).is_none()
+        }) else {
+            return false;
+        };
+
+        let Some(mut resets) = self.entries.iter().rev().find_map(|entry| {
+            entry
+                .providers
+                .iter()
+                .find(|data| data.provider.eq_ignore_ascii_case("codex") && data.error.is_none())
+                .and_then(crate::provider::codex::reset_credits)
+        }) else {
+            return false;
+        };
+
+        resets.credits.retain(|credit| {
+            credit.status.eq_ignore_ascii_case("available")
+                && credit.expires_at.is_none_or(|expires_at| expires_at > now)
+        });
+        resets.available_count = i32::try_from(resets.credits.len()).unwrap_or(i32::MAX);
+        if resets.available_count == 0 {
+            return false;
+        }
+
+        crate::provider::codex::attach_reset_credits(codex, &resets)
     }
 
     /// Computes independent trends for every meaningful window in `current`.
@@ -281,6 +328,12 @@ impl UsageHistory {
             }
             if entry.fetched_at < cutoff {
                 break;
+            }
+            // Older versions could persist a completely empty refresh. Treat
+            // those entries as no observation rather than as every provider
+            // being removed, so existing history remains continuous.
+            if entry.providers.is_empty() {
+                continue;
             }
 
             let Some(data) = entry
@@ -683,6 +736,90 @@ mod tests {
         }
     }
 
+    fn reset_credit(
+        status: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> crate::provider::CodexResetCredit {
+        crate::provider::CodexResetCredit {
+            status: status.to_string(),
+            granted_at: None,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn missing_codex_reset_response_carries_only_unexpired_available_credits() {
+        let now = fixed_now();
+        let resets = crate::provider::CodexResetCredits {
+            available_count: 3,
+            credits: vec![
+                reset_credit("available", Some(now + chrono::Duration::days(2))),
+                reset_credit("available", Some(now - chrono::Duration::minutes(1))),
+                reset_credit("redeemed", Some(now + chrono::Duration::days(3))),
+            ],
+        };
+        let mut historical = usage("codex", 10.0, None);
+        assert!(crate::provider::codex::attach_reset_credits(
+            &mut historical,
+            &resets
+        ));
+        let history = UsageHistory {
+            entries: vec![UsageHistoryEntry {
+                fetched_at: now - chrono::Duration::minutes(5),
+                providers: vec![historical],
+            }],
+            ..UsageHistory::default()
+        };
+        let mut current = vec![usage("codex", 20.0, None)];
+
+        assert!(history.carry_forward_codex_reset_credits(&mut current, now));
+        let carried = crate::provider::codex::reset_credits(&current[0]).unwrap();
+        assert_eq!(carried.available_count, 1);
+        assert_eq!(carried.credits.len(), 1);
+        assert_eq!(
+            carried.credits[0].expires_at,
+            Some(now + chrono::Duration::days(2))
+        );
+    }
+
+    #[test]
+    fn current_empty_codex_reset_response_is_not_replaced_with_history() {
+        let now = fixed_now();
+        let historical_resets = crate::provider::CodexResetCredits {
+            available_count: 1,
+            credits: vec![reset_credit(
+                "available",
+                Some(now + chrono::Duration::days(2)),
+            )],
+        };
+        let mut historical = usage("codex", 10.0, None);
+        crate::provider::codex::attach_reset_credits(&mut historical, &historical_resets);
+        let history = UsageHistory {
+            entries: vec![UsageHistoryEntry {
+                fetched_at: now - chrono::Duration::minutes(5),
+                providers: vec![historical],
+            }],
+            ..UsageHistory::default()
+        };
+        let mut current = usage("codex", 20.0, None);
+        crate::provider::codex::attach_reset_credits(
+            &mut current,
+            &crate::provider::CodexResetCredits {
+                available_count: 0,
+                credits: Vec::new(),
+            },
+        );
+        let mut current = vec![current];
+
+        assert!(!history.carry_forward_codex_reset_credits(&mut current, now));
+        assert_eq!(
+            crate::provider::codex::reset_credits(&current[0])
+                .unwrap()
+                .available_count,
+            0
+        );
+    }
+
     #[test]
     fn semantic_window_keys_join_aliases_and_keep_weekly_variants_separate() {
         let codex_session = usage_window_key("codex", &window("Session", 10.0)).unwrap();
@@ -970,6 +1107,15 @@ mod tests {
     }
 
     #[test]
+    fn append_ignores_empty_provider_snapshots() {
+        let mut history = UsageHistory::default();
+
+        history.append(Vec::new());
+
+        assert!(history.entries.is_empty());
+    }
+
+    #[test]
     fn histogram_uses_fixed_time_buckets_and_preserves_gaps() {
         let now = fixed_now();
         let cutoff = now - chrono::Duration::days(7);
@@ -1122,6 +1268,34 @@ mod tests {
         assert_eq!(trend.samples, 1);
         assert_eq!(trend.latest_percent, 30.0);
         assert_eq!(trend.observations[0].fetched_at, now);
+    }
+
+    #[test]
+    fn trend_crosses_a_global_empty_snapshot() {
+        let now = fixed_now();
+        let oldest_at = now - chrono::Duration::days(2);
+        let mut history = UsageHistory::default();
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: oldest_at,
+            providers: vec![usage("openai", 10.0, None)],
+        });
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: now - chrono::Duration::days(1),
+            providers: Vec::new(),
+        });
+        let current = usage("openai", 30.0, None);
+        history.entries.push(UsageHistoryEntry {
+            fetched_at: now,
+            providers: vec![current.clone()],
+        });
+
+        let trends = history.trends_for_at_with_budget(&current, 7, now, None);
+        let trend = &trends[0].trend;
+
+        assert_eq!(trend.samples, 2);
+        assert_eq!(trend.average_percent, 20.0);
+        assert_eq!(trend.observations[0].fetched_at, oldest_at);
+        assert_eq!(trend.observations[1].fetched_at, now);
     }
 
     #[test]
