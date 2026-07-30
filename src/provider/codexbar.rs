@@ -579,7 +579,10 @@ fn apply_headers(id: &str, request: RequestBuilder) -> RequestBuilder {
         .header("Accept", "application/json, text/plain, */*")
         .header(
             "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Quotify/0.5",
+            concat!(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Quotify/",
+                env!("CARGO_PKG_VERSION")
+            ),
         );
     match id {
         "alibaba" => request
