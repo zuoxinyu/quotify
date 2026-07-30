@@ -11,7 +11,7 @@ use gpui_component::{
     link::Link,
     progress::Progress,
     scroll::ScrollableElement,
-    select::{Select, SelectEvent, SelectState},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     tag::Tag,
@@ -253,7 +253,7 @@ struct InputFieldState {
 }
 
 struct ProviderSelectFieldState {
-    select: Entity<SelectState<Vec<String>>>,
+    select: Entity<SelectState<SearchableVec<String>>>,
     _subscription: Subscription,
 }
 
@@ -2476,11 +2476,12 @@ impl QuotifyApp {
     ) -> AnyElement {
         let select_app = cx.entity().downgrade();
 
-        let provider_names = provider_catalog()
+        let settings_catalog = provider_settings_catalog();
+        let provider_names = settings_catalog
             .iter()
             .map(|(_, display)| display.to_string())
             .collect::<Vec<_>>();
-        let selected_index = provider_catalog()
+        let selected_index = settings_catalog
             .iter()
             .position(|(id, _)| *id == self.selected_setting_provider)
             .unwrap_or(0);
@@ -2488,7 +2489,7 @@ impl QuotifyApp {
             window.use_keyed_state("provider-select-state", cx, move |window, cx| {
                 let select = cx.new(|cx| {
                     SelectState::new(
-                        provider_names,
+                        SearchableVec::new(provider_names),
                         Some(IndexPath::default().row(selected_index)),
                         window,
                         cx,
@@ -2497,7 +2498,7 @@ impl QuotifyApp {
                 });
                 let _subscription = cx.subscribe(
                     &select,
-                    move |_, _, event: &SelectEvent<Vec<String>>, cx| {
+                    move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
                         let SelectEvent::Confirm(Some(display_name)) = event else {
                             return;
                         };
@@ -3247,6 +3248,12 @@ fn provider_catalog() -> &'static [(&'static str, &'static str)] {
     crate::provider::PROVIDER_CATALOG
 }
 
+fn provider_settings_catalog() -> Vec<(&'static str, &'static str)> {
+    let mut catalog = provider_catalog().to_vec();
+    catalog.sort_by_cached_key(|(id, display)| (display.to_lowercase(), *display, *id));
+    catalog
+}
+
 fn provider_display_order(config: &crate::config::AppConfig) -> Vec<(String, &'static str)> {
     let mut ordered = Vec::new();
     for configured in &config.general.provider_order {
@@ -3699,4 +3706,18 @@ fn format_trend_metrics(trend: &crate::usage_history::ProviderTrend) -> String {
         "avg {:.0}% · peak {:.0}% · {delta} · {} samples",
         trend.average_percent, trend.peak_percent, trend.samples
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_catalog, provider_settings_catalog};
+
+    #[test]
+    fn provider_settings_catalog_is_sorted_by_display_name() {
+        let actual = provider_settings_catalog();
+        let mut expected = provider_catalog().to_vec();
+        expected.sort_by_cached_key(|(id, display)| (display.to_lowercase(), *display, *id));
+
+        assert_eq!(actual, expected);
+    }
 }
