@@ -4,7 +4,6 @@ use gpui_component::{
     Disableable, IndexPath, Selectable, Sizable,
     alert::Alert,
     button::{Button, ButtonVariants},
-    chart::BarChart,
     divider::Divider,
     group_box::{GroupBox, GroupBoxVariants},
     input::{Input, InputEvent, InputState},
@@ -29,14 +28,19 @@ use crate::provider::UsageData;
 
 const CODEX_RESET_DISCLOSURE_KEY: &str = "codex-reset-credits";
 const TREND_CAPTION_HEIGHT: f32 = 24.0;
-const TREND_WINDOW_HEADER_HEIGHT: f32 = 22.0;
-const TREND_WINDOW_CHART_HEIGHT: f32 = 96.0;
-const TREND_WINDOW_GAP: f32 = 8.0;
+const TREND_LEGEND_ROW_HEIGHT: f32 = 18.0;
+const TREND_LEGEND_CHART_GAP: f32 = 6.0;
+const TREND_CHART_HEIGHT: f32 = 112.0;
+const TREND_PLOT_HEIGHT: f32 = 92.0;
+const TREND_VALUE_LABEL_HEIGHT: f32 = 13.0;
+const TREND_BAR_MAX_WIDTH: f32 = 24.0;
+const PROGRESS_TRACK_HEIGHT: f32 = 8.0;
 
 fn trend_disclosure_height(window_count: usize) -> f32 {
     TREND_CAPTION_HEIGHT
-        + window_count as f32 * (TREND_WINDOW_HEADER_HEIGHT + TREND_WINDOW_CHART_HEIGHT)
-        + window_count.saturating_sub(1) as f32 * TREND_WINDOW_GAP
+        + window_count as f32 * TREND_LEGEND_ROW_HEIGHT
+        + TREND_LEGEND_CHART_GAP
+        + TREND_CHART_HEIGHT
 }
 
 static COMPONENT_THEME_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
@@ -270,12 +274,6 @@ struct SliderFieldState {
     _subscription: Subscription,
 }
 
-struct TrendChartBar {
-    label: SharedString,
-    value: f64,
-    has_data: bool,
-}
-
 pub struct QuotifyApp {
     pub data: Arc<RwLock<Vec<UsageData>>>,
     pub last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
@@ -294,6 +292,7 @@ pub struct QuotifyApp {
     disclosures: HashMap<String, DisclosureAnimation>,
     disclosure_frame_at: Option<Instant>,
     trend_cache: crate::trend_cache::TrendCache,
+    hovered_trend_series: Option<String>,
 }
 
 impl QuotifyApp {
@@ -325,6 +324,7 @@ impl QuotifyApp {
             disclosures: HashMap::new(),
             disclosure_frame_at: None,
             trend_cache: crate::trend_cache::TrendCache::new(),
+            hovered_trend_series: None,
         }
     }
 
@@ -1724,7 +1724,7 @@ impl QuotifyApp {
             gpui::rgba(0x0000007f)
         };
         let (histograms, histogram_height) =
-            Self::render_trend_histograms(&provider_key, &trends.windows, is_dark);
+            self.render_trend_histograms(&provider_key, &trends.windows, is_dark, cx);
 
         div()
             .mt_2()
@@ -1773,58 +1773,286 @@ impl QuotifyApp {
     }
 
     fn render_trend_histograms(
+        &self,
         provider: &str,
         trends: &[crate::trend_cache::CachedWindowTrend],
         is_dark: bool,
+        cx: &mut Context<Self>,
     ) -> (AnyElement, f32) {
         let weak_text = if is_dark {
             gpui::rgba(0xffffff7f)
         } else {
             gpui::rgba(0x0000007f)
         };
-        let blocks = trends
+        let bucket_count = trends
             .iter()
-            .map(|window_trend| {
+            .map(|trend| trend.histogram_buckets.len())
+            .max()
+            .unwrap_or(0);
+        let latest_values = trends
+            .iter()
+            .flat_map(|trend| &trend.histogram_buckets)
+            .filter_map(|bucket| bucket.latest_percent)
+            .filter(|value| value.is_finite())
+            .map(|value| value.max(0.0))
+            .collect::<Vec<_>>();
+        let series_states = trends
+            .iter()
+            .map(|trend| crate::usage_history::classify_histogram_buckets(&trend.histogram_buckets))
+            .collect::<Vec<_>>();
+        let chart_state =
+            if series_states.contains(&crate::usage_history::TrendHistogramState::Chart) {
+                crate::usage_history::TrendHistogramState::Chart
+            } else if series_states
+                .contains(&crate::usage_history::TrendHistogramState::AllRoundedToZero)
+            {
+                crate::usage_history::TrendHistogramState::AllRoundedToZero
+            } else {
+                crate::usage_history::TrendHistogramState::LatestUnavailable
+            };
+        let max_value = latest_values.iter().copied().fold(1.0_f64, f64::max);
+        let grid_color = if is_dark {
+            gpui::rgba(0xffffff26)
+        } else {
+            gpui::rgba(0x0000001f)
+        };
+        let active_series = self.hovered_trend_series.as_deref();
+        let mut legend_rows = Vec::with_capacity(trends.len());
+
+        for (series_index, window_trend) in trends.iter().enumerate() {
+            let series_id = format!("{provider}:{}", window_trend.key.as_str());
+            let dimmed = active_series.is_some_and(|active| active != series_id);
+            let hover_id = series_id.clone();
+            let series_color = trend_series_color(series_index, is_dark);
+            legend_rows.push(
                 div()
-                    .id(SharedString::from(format!(
-                        "trend-window-{provider}-{}",
-                        window_trend.key.as_str()
-                    )))
+                    .id(SharedString::from(format!("trend-legend-{series_id}")))
                     .w_full()
-                    .h(px(TREND_WINDOW_HEADER_HEIGHT + TREND_WINDOW_CHART_HEIGHT))
+                    .h(px(TREND_LEGEND_ROW_HEIGHT))
                     .flex_none()
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .cursor_pointer()
+                    .opacity(if dimmed { 0.28 } else { 1.0 })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_hover(cx.listener(
+                        move |this: &mut Self,
+                              hovered: &bool,
+                              _window: &mut gpui::Window,
+                              cx: &mut gpui::Context<Self>| {
+                            if *hovered {
+                                this.hovered_trend_series = Some(hover_id.clone());
+                            } else if this.hovered_trend_series.as_deref()
+                                == Some(hover_id.as_str())
+                            {
+                                this.hovered_trend_series = None;
+                            }
+                            cx.notify();
+                        },
+                    ))
                     .child(
                         div()
-                            .w_full()
-                            .h(px(TREND_WINDOW_HEADER_HEIGHT))
-                            .flex_none()
                             .flex()
                             .items_center()
-                            .justify_between()
                             .gap_2()
-                            .text_color(weak_text)
+                            .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(series_color))
                             .child(
                                 div()
                                     .text_size(px(10.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(window_trend.label.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(weak_text)
+                            .child(format_trend_metrics(&window_trend.trend)),
+                    ),
+            );
+        }
+
+        let chart = match chart_state {
+            crate::usage_history::TrendHistogramState::Chart => {
+                let mut bucket_groups = Vec::with_capacity(bucket_count);
+                for bucket_index in 0..bucket_count {
+                    let days_ago = bucket_count.saturating_sub(bucket_index + 1);
+                    let bucket_label: SharedString = if days_ago == 0 {
+                        "Now".into()
+                    } else {
+                        format!("{days_ago}d").into()
+                    };
+                    let mut series_bars = Vec::with_capacity(trends.len());
+
+                    for (series_index, window_trend) in trends.iter().enumerate() {
+                        let series_id = format!("{provider}:{}", window_trend.key.as_str());
+                        let dimmed = active_series.is_some_and(|active| active != series_id);
+                        let highlighted =
+                            active_series == Some(series_id.as_str()) || trends.len() == 1;
+                        let value = window_trend
+                            .histogram_buckets
+                            .get(bucket_index)
+                            .and_then(|bucket| bucket.latest_percent)
+                            .filter(|value| value.is_finite())
+                            .map(|value| value.max(0.0));
+                        let bar_height = value.map_or(0.0, |value| {
+                            ((value / max_value) as f32
+                                * (TREND_PLOT_HEIGHT - TREND_VALUE_LABEL_HEIGHT))
+                                .max(1.0)
+                        });
+                        let hover_id = series_id.clone();
+                        let series_color = trend_series_color(series_index, is_dark);
+
+                        series_bars.push(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "trend-bar-{series_id}-{bucket_index}"
+                                )))
+                                .relative()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .h_full()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_end()
+                                .cursor_pointer()
+                                .opacity(if dimmed { 0.22 } else { 1.0 })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_hover(cx.listener(
+                                    move |this: &mut Self,
+                                          hovered: &bool,
+                                          _window: &mut gpui::Window,
+                                          cx: &mut gpui::Context<Self>| {
+                                        if *hovered {
+                                            this.hovered_trend_series =
+                                                Some(hover_id.clone());
+                                        } else if this.hovered_trend_series.as_deref()
+                                            == Some(hover_id.as_str())
+                                        {
+                                            this.hovered_trend_series = None;
+                                        }
+                                        cx.notify();
+                                    },
+                                ))
+                                .when(highlighted && value.is_some(), |bar| {
+                                    bar.child(
+                                        div()
+                                            .absolute()
+                                            .bottom(px(bar_height))
+                                            .left_0()
+                                            .w_full()
+                                            .h(px(TREND_VALUE_LABEL_HEIGHT))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_size(px(8.0))
+                                            .child(format_histogram_percent(value.unwrap())),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .max_w(px(TREND_BAR_MAX_WIDTH))
+                                        .h(px(bar_height))
+                                        .flex_none()
+                                        .rounded(px(2.0))
+                                        .bg(if value.is_some() {
+                                            series_color
+                                        } else {
+                                            gpui::rgba(0x00000000)
+                                        }),
+                                ),
+                        );
+                    }
+
+                    bucket_groups.push(
+                        div()
+                            .flex_1()
+                            .h(px(TREND_CHART_HEIGHT))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(TREND_PLOT_HEIGHT))
+                                    .flex_none()
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(2.0))
+                                    .children(series_bars),
                             )
                             .child(
                                 div()
+                                    .w_full()
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
                                     .text_size(px(9.0))
-                                    .child(format_trend_metrics(&window_trend.trend)),
+                                    .text_color(weak_text)
+                                    .child(bucket_label),
                             ),
+                    );
+                }
+
+                let grid_lines = (1..=4)
+                    .map(|index| {
+                        div()
+                            .absolute()
+                            .top(px(TREND_PLOT_HEIGHT * index as f32 / 4.0))
+                            .left_0()
+                            .w_full()
+                            .h(px(1.0))
+                            .bg(grid_color)
+                    })
+                    .collect::<Vec<_>>();
+
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(TREND_CHART_HEIGHT))
+                    .flex_none()
+                    .children(grid_lines)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w_full()
+                            .h_full()
+                            .flex()
+                            .gap_2()
+                            .children(bucket_groups),
                     )
-                    .child(Self::render_trend_histogram(
-                        &window_trend.histogram_buckets,
-                        is_dark,
-                    ))
                     .into_any_element()
-            })
-            .collect::<Vec<_>>();
-        let disclosure_height = trend_disclosure_height(blocks.len());
+            }
+            crate::usage_history::TrendHistogramState::AllRoundedToZero => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w_full()
+                .h(px(TREND_CHART_HEIGHT))
+                .text_size(px(10.0))
+                .text_color(weak_text)
+                .child("Available latest samples round to 0%")
+                .into_any_element(),
+            crate::usage_history::TrendHistogramState::LatestUnavailable => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w_full()
+                .h(px(TREND_CHART_HEIGHT))
+                .text_size(px(10.0))
+                .text_color(weak_text)
+                .child("Latest samples unavailable for these buckets")
+                .into_any_element(),
+        };
+        let disclosure_height = trend_disclosure_height(trends.len());
 
         (
             div()
@@ -1841,108 +2069,14 @@ impl QuotifyApp {
                         .flex_none()
                         .text_size(px(9.0))
                         .text_color(weak_text)
-                        .child("Latest sample per rolling 24h · relative scale"),
+                        .child("Latest sample per rolling 24h · shared relative scale"),
                 )
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(TREND_WINDOW_GAP))
-                        .children(blocks),
-                )
+                .child(div().w_full().flex().flex_col().children(legend_rows))
+                .child(div().w_full().h(px(TREND_LEGEND_CHART_GAP)).flex_none())
+                .child(chart)
                 .into_any_element(),
             disclosure_height,
         )
-    }
-
-    fn render_trend_histogram(
-        buckets: &[crate::usage_history::ProviderTrendBucket],
-        is_dark: bool,
-    ) -> AnyElement {
-        let chart_state = crate::usage_history::classify_histogram_buckets(buckets);
-        let bucket_count = buckets.len();
-        let bars = buckets
-            .iter()
-            .enumerate()
-            .map(|(index, bucket)| {
-                let latest = bucket
-                    .latest_percent
-                    .filter(|value| value.is_finite())
-                    .map(|value| value.max(0.0));
-                let days_ago = bucket_count.saturating_sub(index + 1);
-                TrendChartBar {
-                    label: if days_ago == 0 {
-                        "Now".into()
-                    } else {
-                        format!("{days_ago}d").into()
-                    },
-                    value: latest.unwrap_or(0.0),
-                    has_data: latest.is_some(),
-                }
-            })
-            .collect::<Vec<_>>();
-        let weak_text = if is_dark {
-            gpui::rgba(0xffffff7f)
-        } else {
-            gpui::rgba(0x0000007f)
-        };
-
-        div()
-            .w_full()
-            .h(px(TREND_WINDOW_CHART_HEIGHT))
-            .flex_none()
-            .child(match chart_state {
-                crate::usage_history::TrendHistogramState::Chart => div()
-                    .w_full()
-                    .h(px(TREND_WINDOW_CHART_HEIGHT))
-                    .child(
-                        BarChart::new(bars)
-                            .x(|bar| bar.label.clone())
-                            .y(|bar| bar.value)
-                            .fill(move |bar| {
-                                if bar.has_data {
-                                    usage_percent_color(bar.value, is_dark)
-                                } else {
-                                    gpui::rgba(0x00000000)
-                                }
-                            })
-                            .tick_margin(1)
-                            .label(|bar| {
-                                if bar.has_data {
-                                    if bar.value < 1.0 {
-                                        format!("{:.1}%", bar.value)
-                                    } else {
-                                        format!("{:.0}%", bar.value)
-                                    }
-                                } else {
-                                    String::new()
-                                }
-                            }),
-                    )
-                    .into_any_element(),
-                crate::usage_history::TrendHistogramState::AllRoundedToZero => div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w_full()
-                    .h(px(TREND_WINDOW_CHART_HEIGHT))
-                    .text_size(px(10.0))
-                    .text_color(weak_text)
-                    .child("Available latest samples round to 0%")
-                    .into_any_element(),
-                crate::usage_history::TrendHistogramState::LatestUnavailable => div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w_full()
-                    .h(px(TREND_WINDOW_CHART_HEIGHT))
-                    .text_size(px(10.0))
-                    .text_color(weak_text)
-                    .child("Latest samples unavailable for these buckets")
-                    .into_any_element(),
-            })
-            .into_any_element()
     }
 
     fn render_codex_reset_details(
@@ -2086,7 +2220,9 @@ impl QuotifyApp {
                 div()
                     .relative()
                     .flex_1()
-                    .h(px(8.0))
+                    .h(px(PROGRESS_TRACK_HEIGHT))
+                    .rounded_full()
+                    .overflow_hidden()
                     .child(Progress::new().value(0.0).bg(fill_color).w_full().h_full())
                     .when(pct > 0.0, |track| {
                         track.child(
@@ -2097,6 +2233,7 @@ impl QuotifyApp {
                                 .top_0()
                                 .left_0()
                                 .w(relative((pct / 100.0) as f32))
+                                .min_w(px(PROGRESS_TRACK_HEIGHT))
                                 .h_full(),
                         )
                     }),
@@ -4116,6 +4253,35 @@ fn open_folder(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn trend_series_color(index: usize, is_dark: bool) -> gpui::Rgba {
+    const LIGHT: [u32; 6] = [
+        0x0078d4, // Fluent blue
+        0x744da9, // Purple
+        0x008272, // Teal
+        0xca5010, // Orange
+        0xc239b3, // Magenta
+        0x498205, // Green
+    ];
+    const DARK: [u32; 6] = [
+        0x60cdff, // Light blue
+        0xb4a0ff, // Light purple
+        0x4cc2a8, // Light teal
+        0xffa86b, // Light orange
+        0xf08bcb, // Light magenta
+        0x92c353, // Light green
+    ];
+    let palette = if is_dark { &DARK } else { &LIGHT };
+    gpui::rgb(palette[index % palette.len()])
+}
+
+fn format_histogram_percent(value: f64) -> String {
+    if value < 1.0 {
+        format!("{value:.1}%")
+    } else {
+        format!("{value:.0}%")
+    }
+}
+
 fn usage_percent_color(percent: f64, is_dark: bool) -> gpui::Rgba {
     if percent >= 80.0 {
         if is_dark {
@@ -4158,7 +4324,10 @@ fn format_trend_metrics(trend: &crate::usage_history::ProviderTrend) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_catalog, provider_settings_catalog};
+    use super::{
+        format_histogram_percent, provider_catalog, provider_settings_catalog,
+        trend_disclosure_height, trend_series_color,
+    };
 
     #[test]
     fn provider_settings_catalog_is_sorted_by_display_name() {
@@ -4167,5 +4336,34 @@ mod tests {
         expected.sort_by_cached_key(|(id, display)| (display.to_lowercase(), *display, *id));
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn combined_trend_height_adds_only_legend_rows_per_window() {
+        let one_window = trend_disclosure_height(1);
+        let three_windows = trend_disclosure_height(3);
+
+        assert_eq!(
+            three_windows - one_window,
+            2.0 * super::TREND_LEGEND_ROW_HEIGHT
+        );
+    }
+
+    #[test]
+    fn trend_palette_is_distinct_and_wraps_stably() {
+        let colors = (0..6)
+            .map(|index| trend_series_color(index, false))
+            .collect::<Vec<_>>();
+
+        assert!(colors.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(trend_series_color(0, false), trend_series_color(6, false));
+        assert_ne!(trend_series_color(0, false), trend_series_color(0, true));
+    }
+
+    #[test]
+    fn histogram_percent_labels_preserve_sub_percent_values() {
+        assert_eq!(format_histogram_percent(0.04), "0.0%");
+        assert_eq!(format_histogram_percent(0.6), "0.6%");
+        assert_eq!(format_histogram_percent(11.4), "11%");
     }
 }
