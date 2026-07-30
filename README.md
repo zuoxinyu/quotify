@@ -32,7 +32,9 @@ Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) 
 
 ## 🤖 Supported Providers
 
-Quotify supports over 25 different AI models, services, and developer tools, categorized below:
+Quotify covers the 66 provider IDs currently registered by CodexBar through 65
+provider cards: OpenCode and OpenCode Go intentionally share one card, configuration,
+cookie, and history identity. Windows-native credential storage and UI behavior remain:
 
 ### General & Custom LLM Providers
 * **Claude / Anthropic** (Session keys, cookies, or API keys)
@@ -44,6 +46,12 @@ Quotify supports over 25 different AI models, services, and developer tools, cat
 * **Grok / xAI**
 * **z.ai**
 * **MiniMax**
+* **ClinePass**
+* **DeepInfra**
+* **Chutes**
+* **NeuralWatt**
+* **xAI Management**
+* **ai&**
 
 ### Coding Assistants
 * **GitHub Copilot** (OAuth token)
@@ -53,12 +61,19 @@ Quotify supports over 25 different AI models, services, and developer tools, cat
 * **Codebuff**
 * **Kiro**
 * **Kilo Code**
+* **Devin**
+* **Zed**
+* **Command Code**
+* **Qoder**
 
 ### Cloud & Local Hostings
 * **Azure OpenAI**
 * **AWS Bedrock**
 * **Vertex AI / Google Cloud**
 * **Ollama** (Local API)
+* **LiteLLM**
+* **LLM Proxy / sub2api**
+* **ClawRouter / Wayfinder**
 
 ### Regional & Specialized Platforms
 * **OpenCode Zen/Go**
@@ -66,6 +81,15 @@ Quotify supports over 25 different AI models, services, and developer tools, cat
 * **Alibaba Token Plan**
 * **StepFun**
 * **Amp**
+* **Alibaba Coding Plan / Qwen Cloud**
+* **Manus / Perplexity / Poe**
+* **Sakana AI / LongCat**
+* **ZenMux / ZoomMate**
+
+Codex, Claude, the merged OpenCode integration, and Cursor retain their individual
+quota windows (for example 5-hour/session, weekly, monthly, or billing-cycle lanes)
+rather than collapsing a provider into one maximum percentage. Subscription tiers
+are surfaced when the upstream response or local credentials expose them.
 
 ---
 

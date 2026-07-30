@@ -296,6 +296,7 @@ pub fn hydrate_config(config: &mut crate::config::AppConfig) {
         "windsurf",
         &["WINDSURF_SERVICE_KEY", "CODEIUM_SERVICE_KEY"],
     );
+    hydrate_codexbar_providers(config);
 
     config.claude.api_key = get_or_env(
         "claude",
@@ -308,6 +309,12 @@ pub fn hydrate_config(config: &mut crate::config::AppConfig) {
     config.antigravity.api_key = get_or_env("antigravity", "api_key", &["ANTIGRAVITY_API_KEY"]);
     config.opencode.api_key = get_or_env("opencode", "api_key", &[]);
     config.opencode.auth_cookie = get_or_env("opencode", "auth_cookie", &["OPENCODE_AUTH_COOKIE"]);
+    if config.opencode.api_key.trim().is_empty() {
+        config.opencode.api_key = get_or_env("opencodego", "api_key", &[]);
+    }
+    if config.opencode.auth_cookie.trim().is_empty() {
+        config.opencode.auth_cookie = get_or_env("opencodego", "auth_cookie", &[]);
+    }
     config.mimo.api_key = get_or_env("mimo", "api_key", &[]);
     config.mimo.service_token = get_or_env("mimo", "service_token", &["MIMO_SERVICE_TOKEN"]);
     config.mimo.cookie_header = get_or_env("mimo", "cookie_header", &["MIMO_COOKIE_HEADER"]);
@@ -349,6 +356,7 @@ pub fn store_and_scrub_config(config: &mut crate::config::AppConfig) {
     store_api_key(&mut config.cursor, "cursor");
     store_api_key(&mut config.droid, "droid");
     store_api_key(&mut config.windsurf, "windsurf");
+    store_codexbar_providers(config);
 
     set_secret_from_input("claude", "api_key", &mut config.claude.api_key);
     set_secret_from_input("claude", "session_key", &mut config.claude.session_key);
@@ -360,6 +368,106 @@ pub fn store_and_scrub_config(config: &mut crate::config::AppConfig) {
     set_secret_from_input("mimo", "api_key", &mut config.mimo.api_key);
     set_secret_from_input("mimo", "service_token", &mut config.mimo.service_token);
     set_secret_from_input("mimo", "cookie_header", &mut config.mimo.cookie_header);
+}
+
+fn hydrate_codexbar_providers(config: &mut crate::config::AppConfig) {
+    hydrate_api_key(
+        &mut config.clinepass,
+        "clinepass",
+        &["CLINE_API_KEY", "CLINEPASS_API_KEY"],
+    );
+    hydrate_api_key(
+        &mut config.alibaba,
+        "alibaba",
+        &[
+            "ALIBABA_CODING_PLAN_API_KEY",
+            "ALIBABA_QWEN_API_KEY",
+            "DASHSCOPE_API_KEY",
+        ],
+    );
+    hydrate_api_key(&mut config.qwencloud, "qwencloud", &["QWEN_CLOUD_COOKIE"]);
+    hydrate_api_key(&mut config.devin, "devin", &["DEVIN_BEARER_TOKEN"]);
+    hydrate_api_key(
+        &mut config.manus,
+        "manus",
+        &["MANUS_SESSION_TOKEN", "MANUS_COOKIE"],
+    );
+    hydrate_api_key(
+        &mut config.zed,
+        "zed",
+        &["ZED_SESSION_TOKEN", "ZED_ACCESS_TOKEN"],
+    );
+    hydrate_api_key(
+        &mut config.perplexity,
+        "perplexity",
+        &["PERPLEXITY_SESSION_TOKEN", "PERPLEXITY_COOKIE"],
+    );
+    hydrate_api_key(&mut config.sakana, "sakana", &["SAKANA_COOKIE"]);
+    hydrate_api_key(
+        &mut config.deepinfra,
+        "deepinfra",
+        &["DEEPINFRA_API_KEY", "DEEPINFRA_TOKEN"],
+    );
+    hydrate_api_key(
+        &mut config.commandcode,
+        "commandcode",
+        &["COMMANDCODE_COOKIE", "COMMAND_CODE_COOKIE"],
+    );
+    hydrate_api_key(&mut config.qoder, "qoder", &["QODER_COOKIE"]);
+    hydrate_api_key(&mut config.litellm, "litellm", &["LITELLM_API_KEY"]);
+    hydrate_api_key(&mut config.poe, "poe", &["POE_API_KEY"]);
+    hydrate_api_key(&mut config.chutes, "chutes", &["CHUTES_API_KEY"]);
+    hydrate_api_key(
+        &mut config.neuralwatt,
+        "neuralwatt",
+        &["NEURALWATT_API_KEY"],
+    );
+    hydrate_api_key(
+        &mut config.clawrouter,
+        "clawrouter",
+        &["CLAWROUTER_API_KEY"],
+    );
+    hydrate_api_key(
+        &mut config.longcat,
+        "longcat",
+        &["LONGCAT_MANUAL_COOKIE", "LONGCAT_COOKIE"],
+    );
+    hydrate_api_key(&mut config.sub2api, "sub2api", &["SUB2API_API_KEY"]);
+    hydrate_api_key(&mut config.wayfinder, "wayfinder", &[]);
+    hydrate_api_key(&mut config.zenmux, "zenmux", &["ZENMUX_MANAGEMENT_API_KEY"]);
+    hydrate_api_key(&mut config.aiand, "aiand", &["AIAND_API_KEY"]);
+    hydrate_api_key(
+        &mut config.zoommate,
+        "zoommate",
+        &["ZOOMMATE_TOKEN", "ZOOMMATE_COOKIE"],
+    );
+    hydrate_api_key(&mut config.xai, "xai", &["XAI_MANAGEMENT_API_KEY"]);
+}
+
+fn store_codexbar_providers(config: &mut crate::config::AppConfig) {
+    store_api_key(&mut config.clinepass, "clinepass");
+    store_api_key(&mut config.alibaba, "alibaba");
+    store_api_key(&mut config.qwencloud, "qwencloud");
+    store_api_key(&mut config.devin, "devin");
+    store_api_key(&mut config.manus, "manus");
+    store_api_key(&mut config.zed, "zed");
+    store_api_key(&mut config.perplexity, "perplexity");
+    store_api_key(&mut config.sakana, "sakana");
+    store_api_key(&mut config.deepinfra, "deepinfra");
+    store_api_key(&mut config.commandcode, "commandcode");
+    store_api_key(&mut config.qoder, "qoder");
+    store_api_key(&mut config.litellm, "litellm");
+    store_api_key(&mut config.poe, "poe");
+    store_api_key(&mut config.chutes, "chutes");
+    store_api_key(&mut config.neuralwatt, "neuralwatt");
+    store_api_key(&mut config.clawrouter, "clawrouter");
+    store_api_key(&mut config.longcat, "longcat");
+    store_api_key(&mut config.sub2api, "sub2api");
+    store_api_key(&mut config.wayfinder, "wayfinder");
+    store_api_key(&mut config.zenmux, "zenmux");
+    store_api_key(&mut config.aiand, "aiand");
+    store_api_key(&mut config.zoommate, "zoommate");
+    store_api_key(&mut config.xai, "xai");
 }
 
 fn hydrate_api_key(config: &mut crate::config::ApiKeyProviderConfig, provider: &str, env: &[&str]) {

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
@@ -8,14 +9,15 @@ const OPENCODE_SERVER_URL: &str = "https://opencode.ai/_server";
 const OPENCODE_WORKSPACES_FUNCTION_ID: &str =
     "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f";
 const OPENCODE_SUBSCRIPTION_FUNCTION_ID: &str =
+    "7abeebee372f304e050aaaf92be863f4a86490e382f8c79db68fd94040d691b4";
+const OPENCODE_GO_SUBSCRIPTION_FUNCTION_ID: &str =
     "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
 static SERVER_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct OpenCodeProvider {
-    provider_name: &'static str,
     client: reqwest::Client,
-    workspace_id: Option<String>,
-    auth_cookie: Option<String>,
+    workspace_id: Mutex<Option<String>>,
+    auth_cookie: Mutex<Option<String>>,
     auto_webview_login: bool,
 }
 
@@ -26,40 +28,48 @@ impl OpenCodeProvider {
         auto_webview_login: bool,
         proxy: Option<&str>,
     ) -> Self {
-        Self::new_with_name(
-            "opencode",
-            workspace_id,
-            auth_cookie,
-            auto_webview_login,
-            proxy,
-        )
-    }
-
-    pub fn new_with_name(
-        provider_name: &'static str,
-        workspace_id: Option<String>,
-        auth_cookie: Option<String>,
-        auto_webview_login: bool,
-        proxy: Option<&str>,
-    ) -> Self {
         Self {
-            provider_name,
             client: http_client(proxy),
-            workspace_id: workspace_id.and_then(|value| normalize_workspace_id(&value)),
-            auth_cookie: auth_cookie.and_then(|value| normalize_auth_cookie(&value)),
+            workspace_id: Mutex::new(workspace_id.and_then(|value| normalize_workspace_id(&value))),
+            auth_cookie: Mutex::new(auth_cookie.and_then(|value| normalize_auth_cookie(&value))),
             auto_webview_login,
         }
     }
 
     fn configured_workspace_id(&self) -> Option<String> {
-        self.workspace_id.clone().or_else(|| {
-            std::env::var("OPENCODE_WORKSPACE_ID")
-                .or_else(|_| std::env::var("CODEXBAR_OPENCODEGO_WORKSPACE_ID"))
-                .or_else(|_| std::env::var("CODEXBAR_OPENCODE_WORKSPACE_ID"))
-                .or_else(|_| std::env::var("CODEXBAR_OPENCODE_GO_WORKSPACE_ID"))
-                .ok()
-                .and_then(|value| normalize_workspace_id(&value))
-        })
+        self.workspace_id
+            .lock()
+            .clone()
+            .or_else(|| {
+                crate::secrets::get("opencode", "workspace_id")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| normalize_workspace_id(&value))
+            })
+            .or_else(|| {
+                std::env::var("OPENCODE_WORKSPACE_ID")
+                    .or_else(|_| std::env::var("CODEXBAR_OPENCODEGO_WORKSPACE_ID"))
+                    .or_else(|_| std::env::var("CODEXBAR_OPENCODE_WORKSPACE_ID"))
+                    .or_else(|_| std::env::var("CODEXBAR_OPENCODE_GO_WORKSPACE_ID"))
+                    .ok()
+                    .and_then(|value| normalize_workspace_id(&value))
+            })
+    }
+
+    fn remember_workspace_id(&self, workspace_id: &str) {
+        *self.workspace_id.lock() = Some(workspace_id.to_string());
+        if let Err(err) = crate::secrets::set("opencode", "workspace_id", workspace_id) {
+            tracing::warn!("Failed to remember OpenCode workspace ID: {err}");
+        }
+    }
+
+    fn webview_target_url(&self) -> Option<String> {
+        self.configured_workspace_id()
+            .map(|workspace_id| format!("https://opencode.ai/workspace/{workspace_id}/go"))
+    }
+
+    fn remember_auth_cookie(&self, auth_cookie: &str) {
+        *self.auth_cookie.lock() = normalize_auth_cookie(auth_cookie);
     }
 
     pub fn has_workspace_hint() -> bool {
@@ -80,10 +90,8 @@ impl OpenCodeProvider {
     }
 
     async fn resolve_cookie_header(&self) -> Result<String> {
-        if let Some(cookie) = &self.auth_cookie
-            && !cookie.is_empty()
-        {
-            return Ok(cookie.clone());
+        if let Some(cookie) = self.auth_cookie.lock().clone() {
+            return Ok(cookie);
         }
 
         if let Ok(cookie) = std::env::var("OPENCODE_AUTH_COOKIE")
@@ -93,6 +101,11 @@ impl OpenCodeProvider {
         }
 
         if let Ok(Some(cookie)) = crate::secrets::get("opencode", "auth_cookie")
+            && let Some(cookie) = normalize_auth_cookie(&cookie)
+        {
+            return Ok(cookie);
+        }
+        if let Ok(Some(cookie)) = crate::secrets::get("opencodego", "auth_cookie")
             && let Some(cookie) = normalize_auth_cookie(&cookie)
         {
             return Ok(cookie);
@@ -107,7 +120,7 @@ impl OpenCodeProvider {
 #[async_trait::async_trait]
 impl Provider for OpenCodeProvider {
     fn name(&self) -> &str {
-        self.provider_name
+        "opencode"
     }
 
     async fn fetch_usage(&self) -> Result<UsageData> {
@@ -115,7 +128,14 @@ impl Provider for OpenCodeProvider {
             Ok(cookie) => cookie,
             Err(_) if self.auto_webview_login => {
                 tracing::info!("OpenCode credentials missing. Attempting WebView2 login...");
-                crate::webview_login::login_and_store_async("opencode", false).await?
+                let cookie = crate::webview_login::login_and_store_async_at(
+                    "opencode",
+                    false,
+                    self.webview_target_url(),
+                )
+                .await?;
+                self.remember_auth_cookie(&cookie);
+                cookie
             }
             Err(err) => {
                 return Err(crate::webview_login::login_required_error(self.name(), err));
@@ -125,9 +145,16 @@ impl Provider for OpenCodeProvider {
         let (windows, credits) = match self.fetch_via_server_cookie(&cookie_header).await {
             Ok(result) => result,
             Err(err) if is_webview_auth_failure(&err) && self.auto_webview_login => {
-                tracing::info!("OpenCode credentials rejected. Attempting WebView2 login...");
-                let fresh_cookie =
-                    crate::webview_login::login_and_store_async("opencode", true).await?;
+                tracing::info!(
+                    "OpenCode credentials rejected. Reusing the WebView2 browser session..."
+                );
+                let fresh_cookie = crate::webview_login::login_and_store_async_at(
+                    "opencode",
+                    false,
+                    self.webview_target_url(),
+                )
+                .await?;
+                self.remember_auth_cookie(&fresh_cookie);
                 match self.fetch_via_server_cookie(&fresh_cookie).await {
                     Ok(result) => result,
                     Err(retry_err) => {
@@ -141,10 +168,15 @@ impl Provider for OpenCodeProvider {
             Err(err) if is_webview_auth_failure(&err) => {
                 return Err(crate::webview_login::login_required_error(
                     self.name(),
-                    "the saved credentials were rejected",
+                    safe_auth_failure_summary(&err),
                 ));
             }
-            Err(err) => return Err(err.context("Failed to fetch OpenCode Go usage")),
+            Err(err) => {
+                return Err(err.context(format!(
+                    "Failed to fetch {} usage",
+                    super::display_name(self.name())
+                )));
+            }
         };
 
         Ok(UsageData {
@@ -167,9 +199,47 @@ fn is_webview_auth_failure(error: &anyhow::Error) -> bool {
         "forbidden",
         "returned html",
         "did not contain usage data",
+        "workspace id not found",
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+fn safe_auth_failure_summary(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("workspace id not found") {
+        return "the saved session did not expose an OpenCode workspace".to_string();
+    }
+    if lower.contains("did not contain usage data") {
+        let shapes = regex::Regex::new(r"kind=[a-z]+ length=\d+ markers=[a-z,-]+")
+            .ok()
+            .map(|regex| {
+                regex
+                    .find_iter(&text)
+                    .map(|matched| matched.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return if shapes.is_empty() {
+            "the authenticated response did not contain recognizable usage data".to_string()
+        } else {
+            format!(
+                "the authenticated response did not contain recognizable usage data ({})",
+                shapes.join("; ")
+            )
+        };
+    }
+    if lower.contains("401") || lower.contains("unauthorized") {
+        return "the saved credentials were rejected with HTTP 401".to_string();
+    }
+    if lower.contains("403") || lower.contains("forbidden") {
+        return "the saved credentials were rejected with HTTP 403".to_string();
+    }
+    if lower.contains("returned html") {
+        return "the saved session was redirected to an HTML login page".to_string();
+    }
+    "the saved credentials were rejected".to_string()
 }
 
 impl OpenCodeProvider {
@@ -192,6 +262,7 @@ impl OpenCodeProvider {
                 .context("Failed to fetch OpenCode workspaces")?;
             parse_workspace_id(&body).context("OpenCode workspace ID not found")?
         };
+        self.remember_workspace_id(&workspace_id);
 
         match self
             .fetch_go_page(cookie_header, &workspace_id)
@@ -202,24 +273,59 @@ impl OpenCodeProvider {
             Err(err) => tracing::debug!("OpenCode Go page fetch failed: {err:#}"),
         }
 
+        let go_referer = format!("https://opencode.ai/workspace/{workspace_id}/go");
+        let go_result = self
+            .call_server_function(
+                cookie_header,
+                OPENCODE_GO_SUBSCRIPTION_FUNCTION_ID,
+                &[serde_json::Value::String(workspace_id.clone())],
+                &go_referer,
+            )
+            .await;
+        let go_failure = match go_result {
+            Ok(body) => {
+                tracing::debug!(
+                    "OpenCode Go server response shape: {}",
+                    response_shape(&body)
+                );
+                let result = parse_subscription_usage(&body);
+                if !result.0.is_empty() {
+                    return Ok(result);
+                }
+                format!(
+                    "response did not contain usage data ({})",
+                    response_shape(&body)
+                )
+            }
+            Err(err) => format!("{err:#}"),
+        };
+        tracing::debug!("OpenCode Go subscription fetch failed: {go_failure}");
+
+        let billing_referer = format!("https://opencode.ai/workspace/{workspace_id}/billing");
         let body = self
             .call_server_function(
                 cookie_header,
                 OPENCODE_SUBSCRIPTION_FUNCTION_ID,
                 &[serde_json::Value::String(workspace_id.clone())],
-                &format!("https://opencode.ai/workspace/{workspace_id}/go"),
+                &billing_referer,
             )
             .await
-            .with_context(|| format!("Failed to fetch OpenCode subscription for {workspace_id}"))?;
-
+            .with_context(|| {
+                format!(
+                    "OpenCode Go usage failed ({go_failure}); standard OpenCode usage also failed"
+                )
+            })?;
         tracing::debug!(
-            "OpenCode server response (first 500 chars): {}",
-            &body[..body.len().min(500)]
+            "Standard OpenCode server response shape: {}",
+            response_shape(&body)
         );
 
         let (windows, credits) = parse_subscription_usage(&body);
         if windows.is_empty() {
-            anyhow::bail!("OpenCode subscription response did not contain usage data");
+            anyhow::bail!(
+                "OpenCode Go usage failed ({go_failure}); standard OpenCode response did not contain usage data ({})",
+                response_shape(&body)
+            );
         }
 
         Ok((windows, credits))
@@ -254,18 +360,21 @@ impl OpenCodeProvider {
         if !status.is_success() {
             anyhow::bail!("OpenCode Go page error {status}: {body}");
         }
+        if looks_signed_out(&body) {
+            anyhow::bail!("OpenCode Go page unauthorized: signed-out session");
+        }
         if body.starts_with("<!DOCTYPE") && !body.contains("rollingUsage") {
             anyhow::bail!("OpenCode Go page did not contain usage data");
         }
 
-        tracing::debug!(
-            "OpenCode Go page response (first 500 chars): {}",
-            &body[..body.len().min(500)]
-        );
+        tracing::debug!("OpenCode Go page response shape: {}", response_shape(&body));
 
         let (windows, credits) = parse_subscription_usage(&body);
         if windows.is_empty() {
-            anyhow::bail!("OpenCode Go page response did not contain usage data");
+            anyhow::bail!(
+                "OpenCode Go page response did not contain usage data ({})",
+                response_shape(&body)
+            );
         }
 
         Ok((windows, credits))
@@ -308,6 +417,9 @@ impl OpenCodeProvider {
         let mut last_error = match get_request.send().await {
             Ok(resp) if resp.status().is_success() => {
                 let body = resp.text().await.unwrap_or_default();
+                if looks_signed_out(&body) {
+                    anyhow::bail!("OpenCode server unauthorized: signed-out session");
+                }
                 if !looks_like_html(&body) {
                     return Ok(body);
                 }
@@ -341,6 +453,7 @@ impl OpenCodeProvider {
                 .client
                 .post(OPENCODE_SERVER_URL)
                 .header("x-server-id", function_id)
+                .header("x-server-instance", server_instance_id())
                 .header("Cookie", cookie_header)
                 .header("Origin", "https://opencode.ai")
                 .header("Referer", referer)
@@ -361,6 +474,9 @@ impl OpenCodeProvider {
             match request.send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let body = resp.text().await.unwrap_or_default();
+                    if looks_signed_out(&body) {
+                        anyhow::bail!("OpenCode server unauthorized: signed-out session");
+                    }
                     if looks_like_html(&body) {
                         last_error = Some("OpenCode server returned HTML".to_string());
                     } else {
@@ -388,6 +504,68 @@ impl OpenCodeProvider {
 fn looks_like_html(body: &str) -> bool {
     let trimmed = body.trim_start();
     trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html")
+}
+
+fn looks_signed_out(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    [
+        "auth/authorize",
+        "sign in",
+        "not associated with an account",
+        "actor of type \"public\"",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn response_shape(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "kind=empty length=0".to_string();
+    }
+
+    let kind = if looks_like_html(trimmed) {
+        "html"
+    } else if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        "json"
+    } else {
+        "text"
+    };
+    let lower = trimmed.to_ascii_lowercase();
+    let mut markers = Vec::new();
+    for (name, aliases) in [
+        (
+            "rolling",
+            ["rollingusage", "rolling_usage", "rollingwindow"],
+        ),
+        ("weekly", ["weeklyusage", "weekly_usage", "weeklywindow"]),
+        (
+            "monthly",
+            ["monthlyusage", "monthly_usage", "monthlywindow"],
+        ),
+        ("workspace", ["wrk_", "\"workspace\"", "workspaceid"]),
+        (
+            "signed-out",
+            ["auth/authorize", "sign in", "actor of type \"public\""],
+        ),
+    ] {
+        if aliases.iter().any(|alias| lower.contains(alias)) {
+            markers.push(name);
+        }
+    }
+    if trimmed.eq_ignore_ascii_case("null") {
+        markers.push("null");
+    }
+
+    format!(
+        "kind={kind} length={} markers={}",
+        trimmed.len(),
+        if markers.is_empty() {
+            "none".to_string()
+        } else {
+            markers.join(",")
+        }
+    )
 }
 
 fn server_instance_id() -> String {
@@ -431,18 +609,26 @@ fn normalize_auth_cookie(value: &str) -> Option<String> {
         return None;
     }
 
-    // If it contains multiple cookies, extract only the 'auth' cookie
-    if cookie.contains(';') {
-        for part in cookie.split(';') {
+    let auth_cookies = cookie
+        .split(';')
+        .filter_map(|part| {
             let part = part.trim();
-            if part.starts_with("auth=") {
-                return Some(part.to_string());
+            let (name, value) = part.split_once('=')?;
+            if matches!(
+                name.trim().to_ascii_lowercase().as_str(),
+                "auth" | "__host-auth"
+            ) && !value.trim().is_empty()
+            {
+                Some(format!("{}={}", name.trim(), value.trim()))
+            } else {
+                None
             }
-        }
-    }
-
-    if cookie.contains('=') {
-        Some(cookie.to_string())
+        })
+        .collect::<Vec<_>>();
+    if !auth_cookies.is_empty() {
+        Some(auth_cookies.join("; "))
+    } else if cookie.contains('=') {
+        None
     } else {
         Some(format!("auth={cookie}"))
     }
@@ -463,13 +649,40 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
     let mut credits = None;
 
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some((pct, reset)) = usage_from_json(&json, "rollingUsage") {
+        if let Some((pct, reset)) = usage_from_json(
+            &json,
+            &[
+                "rollingUsage",
+                "rolling",
+                "rolling_usage",
+                "rollingWindow",
+                "rolling_window",
+            ],
+        ) {
             windows.push(usage_window("Rolling Usage", pct, reset));
         }
-        if let Some((pct, reset)) = usage_from_json(&json, "weeklyUsage") {
+        if let Some((pct, reset)) = usage_from_json(
+            &json,
+            &[
+                "weeklyUsage",
+                "weekly",
+                "weekly_usage",
+                "weeklyWindow",
+                "weekly_window",
+            ],
+        ) {
             windows.push(usage_window("Weekly Usage", pct, reset));
         }
-        if let Some((pct, reset)) = usage_from_json(&json, "monthlyUsage") {
+        if let Some((pct, reset)) = usage_from_json(
+            &json,
+            &[
+                "monthlyUsage",
+                "monthly",
+                "monthly_usage",
+                "monthlyWindow",
+                "monthly_window",
+            ],
+        ) {
             windows.push(usage_window("Monthly Usage", pct, reset));
         }
 
@@ -484,21 +697,23 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
     }
 
     if windows.is_empty() {
-        let rolling_pct = regex_after_key_f64(body, "rollingUsage", "usagePercent");
-        let weekly_pct = regex_after_key_f64(body, "weeklyUsage", "usagePercent");
-        let monthly_pct = regex_after_key_f64(body, "monthlyUsage", "usagePercent");
-        let rolling_reset = regex_after_key_f64(body, "rollingUsage", "resetInSec");
-        let weekly_reset = regex_after_key_f64(body, "weeklyUsage", "resetInSec");
-        let monthly_reset = regex_after_key_f64(body, "monthlyUsage", "resetInSec");
-
-        if let Some(pct) = rolling_pct {
-            windows.push(usage_window("Rolling Usage", pct, rolling_reset));
-        }
-        if let Some(pct) = weekly_pct {
-            windows.push(usage_window("Weekly Usage", pct, weekly_reset));
-        }
-        if let Some(pct) = monthly_pct {
-            windows.push(usage_window("Monthly Usage", pct, monthly_reset));
+        for (label, aliases) in [
+            (
+                "Rolling Usage",
+                &["rollingUsage", "rolling", "rolling_usage", "rollingWindow"][..],
+            ),
+            (
+                "Weekly Usage",
+                &["weeklyUsage", "weekly", "weekly_usage", "weeklyWindow"][..],
+            ),
+            (
+                "Monthly Usage",
+                &["monthlyUsage", "monthly", "monthly_usage", "monthlyWindow"][..],
+            ),
+        ] {
+            if let Some((percent, reset)) = usage_from_text(body, aliases) {
+                windows.push(usage_window(label, percent, reset));
+            }
         }
 
         if credits.is_none()
@@ -522,7 +737,7 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
 fn usage_window(label: &str, pct: f64, reset_in_sec: Option<f64>) -> UsageWindow {
     UsageWindow {
         label: label.to_string(),
-        used_percent: pct.clamp(0.0, 100.0),
+        used_percent: normalize_percent(pct),
         limit: None,
         used: None,
         unit: None,
@@ -531,30 +746,172 @@ fn usage_window(label: &str, pct: f64, reset_in_sec: Option<f64>) -> UsageWindow
     }
 }
 
-fn usage_from_json(json: &serde_json::Value, key: &str) -> Option<(f64, Option<f64>)> {
-    let usage = find_object_by_key(json, key)?;
-    let pct = usage.get("usagePercent").and_then(number_value)?;
-    let reset = usage.get("resetInSec").and_then(number_value);
-    Some((pct, reset))
+fn normalize_percent(percent: f64) -> f64 {
+    let percent = if (0.0..=1.0).contains(&percent) {
+        percent * 100.0
+    } else {
+        percent
+    };
+    percent.clamp(0.0, 100.0)
 }
 
-fn find_object_by_key<'a>(
+fn usage_from_json(json: &serde_json::Value, aliases: &[&str]) -> Option<(f64, Option<f64>)> {
+    let usage = find_object_by_keys(json, aliases)?;
+    parse_window_object(usage)
+}
+
+fn parse_window_object(
+    usage: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(f64, Option<f64>)> {
+    const PERCENT_KEYS: &[&str] = &[
+        "usagePercent",
+        "usedPercent",
+        "percentUsed",
+        "percent",
+        "usage_percent",
+        "used_percent",
+        "utilization",
+        "utilizationPercent",
+        "utilization_percent",
+        "usage",
+    ];
+    const RESET_KEYS: &[&str] = &[
+        "resetInSec",
+        "resetInSeconds",
+        "resetSeconds",
+        "reset_sec",
+        "reset_in_sec",
+        "resetsInSec",
+        "resetsInSeconds",
+        "resetIn",
+        "resetSec",
+    ];
+    const RESET_AT_KEYS: &[&str] = &[
+        "resetAt",
+        "resetsAt",
+        "reset_at",
+        "resets_at",
+        "nextReset",
+        "next_reset",
+        "renewAt",
+        "renew_at",
+    ];
+
+    let direct_percent = map_number_by_keys(usage, PERCENT_KEYS);
+    let percent = direct_percent.or_else(|| {
+        let used =
+            map_number_by_keys(usage, &["used", "usage", "consumed", "count", "usedTokens"])?;
+        let limit = map_number_by_keys(
+            usage,
+            &["limit", "total", "quota", "max", "cap", "tokenLimit"],
+        )?;
+        (limit > 0.0).then_some((used / limit) * 100.0)
+    })?;
+    let percent = if direct_percent.is_some() {
+        normalize_percent(percent)
+    } else {
+        percent.clamp(0.0, 100.0)
+    };
+    let reset = map_number_by_keys(usage, RESET_KEYS)
+        .or_else(|| map_value_by_keys(usage, RESET_AT_KEYS).and_then(reset_seconds_from_value));
+    Some((percent, reset))
+}
+
+fn find_object_by_keys<'a>(
     value: &'a serde_json::Value,
-    key: &str,
+    keys: &[&str],
 ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
     match value {
         serde_json::Value::Object(map) => {
-            if let Some(obj) = map.get(key).and_then(|v| v.as_object()) {
+            if let Some(obj) = map.iter().find_map(|(key, value)| {
+                keys.iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                    .then(|| value.as_object())
+                    .flatten()
+            }) {
                 return Some(obj);
             }
             map.values()
-                .find_map(|child| find_object_by_key(child, key))
+                .find_map(|child| find_object_by_keys(child, keys))
         }
         serde_json::Value::Array(items) => items
             .iter()
-            .find_map(|child| find_object_by_key(child, key)),
+            .find_map(|child| find_object_by_keys(child, keys)),
         _ => None,
     }
+}
+
+fn map_value_by_keys<'a>(
+    map: &'a serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<&'a serde_json::Value> {
+    map.iter().find_map(|(key, value)| {
+        keys.iter()
+            .any(|candidate| key.eq_ignore_ascii_case(candidate))
+            .then_some(value)
+    })
+}
+
+fn map_number_by_keys(
+    map: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<f64> {
+    map_value_by_keys(map, keys).and_then(number_value)
+}
+
+fn reset_seconds_from_value(value: &serde_json::Value) -> Option<f64> {
+    if let Some(number) = number_value(value) {
+        let timestamp = if number > 1_000_000_000_000.0 {
+            number / 1000.0
+        } else if number > 1_000_000_000.0 {
+            number
+        } else {
+            return None;
+        };
+        return Some((timestamp - Utc::now().timestamp() as f64).max(0.0));
+    }
+    let timestamp = value.as_str()?;
+    let reset_at = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()?
+        .with_timezone(&Utc);
+    Some((reset_at - Utc::now()).num_seconds().max(0) as f64)
+}
+
+fn usage_from_text(body: &str, outer_keys: &[&str]) -> Option<(f64, Option<f64>)> {
+    const PERCENT_KEYS: &[&str] = &[
+        "usagePercent",
+        "usedPercent",
+        "percentUsed",
+        "percent",
+        "usage_percent",
+        "used_percent",
+        "utilization",
+        "utilizationPercent",
+        "utilization_percent",
+    ];
+    const RESET_KEYS: &[&str] = &[
+        "resetInSec",
+        "resetInSeconds",
+        "resetSeconds",
+        "reset_sec",
+        "reset_in_sec",
+        "resetsInSec",
+        "resetsInSeconds",
+        "resetIn",
+        "resetSec",
+    ];
+
+    let percent = outer_keys.iter().find_map(|outer_key| {
+        PERCENT_KEYS
+            .iter()
+            .find_map(|field| regex_after_key_f64(body, outer_key, field))
+    })?;
+    let reset = outer_keys.iter().find_map(|outer_key| {
+        RESET_KEYS
+            .iter()
+            .find_map(|field| regex_after_key_f64(body, outer_key, field))
+    });
+    Some((normalize_percent(percent), reset))
 }
 
 fn find_string_matching(
@@ -632,8 +989,55 @@ mod tests {
         assert!(is_webview_auth_failure(&anyhow::anyhow!(
             "OpenCode server returned HTML"
         )));
+        assert!(is_webview_auth_failure(&anyhow::anyhow!(
+            "OpenCode workspace ID not found"
+        )));
         assert!(!is_webview_auth_failure(&anyhow::anyhow!(
             "connection timed out"
         )));
+        assert!(looks_signed_out(
+            r#"Error: actor of type "public" is not associated with an account"#
+        ));
+    }
+
+    #[test]
+    fn normalizes_only_opencode_auth_cookies() {
+        assert_eq!(
+            normalize_auth_cookie("theme=dark; auth=one; __Host-auth=two; analytics=x").as_deref(),
+            Some("auth=one; __Host-auth=two")
+        );
+        assert_eq!(
+            normalize_auth_cookie("raw-token").as_deref(),
+            Some("auth=raw-token")
+        );
+        assert!(normalize_auth_cookie("theme=dark").is_none());
+    }
+
+    #[test]
+    fn parses_current_json_usage_aliases_and_reset_timestamps() {
+        let body = r#"{
+            "data": {
+                "rolling_window": {
+                    "used_percent": 0.25,
+                    "reset_in_sec": 120
+                },
+                "weekly": {
+                    "used": 40,
+                    "limit": 100,
+                    "resets_at": "2099-01-01T00:00:00Z"
+                },
+                "monthlyUsage": {
+                    "utilizationPercent": "75",
+                    "resetInSeconds": "3600"
+                }
+            }
+        }"#;
+
+        let (windows, _) = parse_subscription_usage(body);
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].used_percent, 25.0);
+        assert_eq!(windows[1].used_percent, 40.0);
+        assert_eq!(windows[2].used_percent, 75.0);
+        assert!(windows.iter().all(|window| window.resets_at.is_some()));
     }
 }

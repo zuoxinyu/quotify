@@ -552,8 +552,14 @@ impl QuotifyApp {
         cx.notify();
 
         let statuses = self.webview_login_status.clone();
+        let initial_url = if matches!(provider.as_str(), "opencode" | "opencodego") {
+            crate::webview_login::opencode_workspace_go_url(&self.config.opencode.workspace_id)
+        } else {
+            None
+        };
         std::thread::spawn(move || {
-            let result = crate::webview_login::login_and_store_for_provider(&provider, true);
+            let result =
+                crate::webview_login::login_and_store_for_provider_at(&provider, true, initial_url);
             match result {
                 Ok(_) => {
                     statuses.lock().remove(&provider);
@@ -2997,15 +3003,6 @@ impl QuotifyApp {
                         .into_any_element(),
                 );
             }
-            "opencodego" => {
-                widgets.push(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(gpui::rgba(0xffffff7f))
-                        .child("OpenCode Go is configured using OpenCode settings.")
-                        .into_any_element(),
-                );
-            }
             _ => {
                 let key_field = SharedString::from(format!("{}_key", provider_id));
                 let url_field = SharedString::from(format!("{}_url", provider_id));
@@ -3275,7 +3272,7 @@ fn provider_icon(provider_name: &str, is_dark: bool) -> Option<&'static str> {
     match (provider_name, is_dark) {
         ("abacus", true) => Some("assets/provider-icons/abacus-ai-dark.svg"),
         ("abacus", false) => Some("assets/provider-icons/abacus-ai.png"),
-        ("alibabatoken", _) => Some("assets/provider-icons/alibaba.svg"),
+        ("alibabatoken" | "alibaba" | "qwencloud", _) => Some("assets/provider-icons/alibaba.svg"),
         ("amp", _) => Some("assets/provider-icons/amp.svg"),
         ("augment", _) => Some("assets/provider-icons/augment.svg"),
         ("codex", true) => Some("assets/provider-icons/codex-dark.svg"),
@@ -3298,6 +3295,12 @@ fn provider_icon(provider_name: &str, is_dark: bool) -> Option<&'static str> {
         ("opencode" | "opencodego", true) => Some("assets/provider-icons/opencode-dark.svg"),
         ("opencode" | "opencodego", false) => Some("assets/provider-icons/opencode.svg"),
         ("openrouter", _) => Some("assets/provider-icons/openrouter.svg"),
+        ("devin", _) => Some("assets/provider-icons/devin.svg"),
+        ("perplexity", _) => Some("assets/provider-icons/perplexity.svg"),
+        ("poe", _) => Some("assets/provider-icons/poe.svg"),
+        ("chutes", _) => Some("assets/provider-icons/chutes.svg"),
+        ("zed", _) => Some("assets/provider-icons/zed.svg"),
+        ("litellm", _) => Some("assets/provider-icons/litellm.svg"),
         ("claude", _) => Some("assets/provider-icons/claude.svg"),
         ("gemini", _) => Some("assets/provider-icons/gemini.svg"),
         ("antigravity", _) => Some("assets/provider-icons/antigravity.svg"),
@@ -3428,6 +3431,29 @@ fn api_key_provider_config<'a>(
     match provider {
         "openai" => Some(&config.openai),
         "openrouter" => Some(&config.openrouter),
+        "clinepass" => Some(&config.clinepass),
+        "alibaba" => Some(&config.alibaba),
+        "qwencloud" => Some(&config.qwencloud),
+        "devin" => Some(&config.devin),
+        "manus" => Some(&config.manus),
+        "zed" => Some(&config.zed),
+        "perplexity" => Some(&config.perplexity),
+        "sakana" => Some(&config.sakana),
+        "deepinfra" => Some(&config.deepinfra),
+        "commandcode" => Some(&config.commandcode),
+        "qoder" => Some(&config.qoder),
+        "litellm" => Some(&config.litellm),
+        "poe" => Some(&config.poe),
+        "chutes" => Some(&config.chutes),
+        "neuralwatt" => Some(&config.neuralwatt),
+        "clawrouter" => Some(&config.clawrouter),
+        "longcat" => Some(&config.longcat),
+        "sub2api" => Some(&config.sub2api),
+        "wayfinder" => Some(&config.wayfinder),
+        "zenmux" => Some(&config.zenmux),
+        "aiand" => Some(&config.aiand),
+        "zoommate" => Some(&config.zoommate),
+        "xai" => Some(&config.xai),
         "moonshot" => Some(&config.moonshot),
         "elevenlabs" => Some(&config.elevenlabs),
         "doubao" => Some(&config.doubao),
@@ -3472,6 +3498,29 @@ fn api_key_provider_config_mut<'a>(
     match provider {
         "openai" => Some(&mut config.openai),
         "openrouter" => Some(&mut config.openrouter),
+        "clinepass" => Some(&mut config.clinepass),
+        "alibaba" => Some(&mut config.alibaba),
+        "qwencloud" => Some(&mut config.qwencloud),
+        "devin" => Some(&mut config.devin),
+        "manus" => Some(&mut config.manus),
+        "zed" => Some(&mut config.zed),
+        "perplexity" => Some(&mut config.perplexity),
+        "sakana" => Some(&mut config.sakana),
+        "deepinfra" => Some(&mut config.deepinfra),
+        "commandcode" => Some(&mut config.commandcode),
+        "qoder" => Some(&mut config.qoder),
+        "litellm" => Some(&mut config.litellm),
+        "poe" => Some(&mut config.poe),
+        "chutes" => Some(&mut config.chutes),
+        "neuralwatt" => Some(&mut config.neuralwatt),
+        "clawrouter" => Some(&mut config.clawrouter),
+        "longcat" => Some(&mut config.longcat),
+        "sub2api" => Some(&mut config.sub2api),
+        "wayfinder" => Some(&mut config.wayfinder),
+        "zenmux" => Some(&mut config.zenmux),
+        "aiand" => Some(&mut config.aiand),
+        "zoommate" => Some(&mut config.zoommate),
+        "xai" => Some(&mut config.xai),
         "moonshot" => Some(&mut config.moonshot),
         "elevenlabs" => Some(&mut config.elevenlabs),
         "doubao" => Some(&mut config.doubao),
@@ -3516,7 +3565,8 @@ fn enable_provider_for_test(config: &mut crate::config::AppConfig, provider: &st
         "codex" => config.codex.enabled = Some(true),
         "gemini" => config.gemini.enabled = Some(true),
         "antigravity" => config.antigravity.enabled = Some(true),
-        "opencode" | "opencodego" => config.opencode.enabled = Some(true),
+        "opencode" => config.opencode.enabled = Some(true),
+        "opencodego" => config.opencode.enabled = Some(true),
         "mimo" => config.mimo.enabled = Some(true),
         _ => {
             if let Some(cfg) = api_key_provider_config_mut(config, provider) {

@@ -224,14 +224,16 @@ fn draw_provider_watermark(px: f64, py: f64, provider: &str) -> Option<[u8; 4]> 
                 None
             }
         }
-        "opencode" | "codex" => {
+        "opencode" | "opencodego" | "codex" => {
             // Stylized code tag </ >
             let is_slash = (dx + 2.0 * dy).abs() <= 1.0 && dy.abs() <= 5.0;
             let is_left = (dx + dy.abs() - 1.5).abs() <= 0.8 && dx <= -0.5 && dy.abs() <= 3.5;
             let is_right = (dx - dy.abs() + 1.5).abs() <= 0.8 && dx >= 0.5 && dy.abs() <= 3.5;
 
             if is_slash || is_left || is_right {
-                if provider.eq_ignore_ascii_case("opencode") {
+                if provider.eq_ignore_ascii_case("opencode")
+                    || provider.eq_ignore_ascii_case("opencodego")
+                {
                     Some([16, 124, 65, 30])
                 } else {
                     Some([120, 120, 120, 30])
@@ -413,50 +415,5 @@ fn aggregate_percent(data: &[UsageData]) -> f64 {
 }
 
 fn provider_display_name(provider: &str) -> String {
-    match provider.to_ascii_lowercase().as_str() {
-        "codex" => "Codex".to_string(),
-        "openai" => "OpenAI".to_string(),
-        "opencode" => "OpenCode".to_string(),
-        "opencodego" => "OpenCode Go".to_string(),
-        "claude" => "Claude".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "antigravity" => "Antigravity".to_string(),
-        "deepseek" => "DeepSeek".to_string(),
-        "openrouter" => "OpenRouter".to_string(),
-        "moonshot" => "Moonshot".to_string(),
-        "elevenlabs" => "ElevenLabs".to_string(),
-        "doubao" => "Doubao".to_string(),
-        "zai" => "z.ai".to_string(),
-        "venice" => "Venice".to_string(),
-        "crof" => "Crof".to_string(),
-        "synthetic" => "Synthetic".to_string(),
-        "warp" => "Warp".to_string(),
-        "groqcloud" => "GroqCloud".to_string(),
-        "deepgram" => "Deepgram".to_string(),
-        "llmproxy" => "LLM Proxy".to_string(),
-        "codebuff" => "Codebuff".to_string(),
-        "kiro" => "Kiro".to_string(),
-        "copilot" => "Copilot".to_string(),
-        "azureopenai" => "Azure OpenAI".to_string(),
-        "ollama" => "Ollama".to_string(),
-        "minimax" => "MiniMax".to_string(),
-        "jetbrains" => "JetBrains AI".to_string(),
-        "kimi" => "Kimi".to_string(),
-        "kilo" => "Kilo Code".to_string(),
-        "augment" => "Augment".to_string(),
-        "bedrock" => "AWS Bedrock".to_string(),
-        "vertexai" => "Vertex AI".to_string(),
-        "stepfun" => "StepFun".to_string(),
-        "abacus" => "Abacus AI".to_string(),
-        "alibabatoken" => "Alibaba Token".to_string(),
-        "t3chat" => "T3 Chat".to_string(),
-        "amp" => "Amp".to_string(),
-        "mistral" => "Mistral".to_string(),
-        "grok" => "Grok".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "droid" => "Factory Droid".to_string(),
-        "windsurf" => "Windsurf".to_string(),
-        "mimo" => "MiMo".to_string(),
-        other => other.to_string(),
-    }
+    crate::provider::display_name(provider).to_string()
 }

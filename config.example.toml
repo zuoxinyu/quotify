@@ -16,7 +16,6 @@ provider_order = [
   "gemini",
   "antigravity",
   "opencode",
-  "opencodego",
   "deepseek",
   "mimo",
   "openai",
@@ -54,6 +53,29 @@ provider_order = [
   "cursor",
   "droid",
   "windsurf",
+  "clinepass",
+  "alibaba",
+  "qwencloud",
+  "devin",
+  "manus",
+  "zed",
+  "perplexity",
+  "sakana",
+  "deepinfra",
+  "commandcode",
+  "qoder",
+  "litellm",
+  "poe",
+  "chutes",
+  "neuralwatt",
+  "clawrouter",
+  "longcat",
+  "sub2api",
+  "wayfinder",
+  "zenmux",
+  "aiand",
+  "zoommate",
+  "xai",
 ]
 
 [notifications]
@@ -69,10 +91,12 @@ silent_refresh_failures = false       # Notify when a background refresh fails
 # Non-sensitive 30-day budgets. Uncomment positive USD amounts as needed.
 # If CODEXBAR_BEDROCK_BUDGET is set, unset it before disabling Bedrock's budget here.
 # Budget progress is available only when the provider returns actual 30-day USD spend.
-# Currently supported: OpenAI, Claude Admin API, and AWS Bedrock.
+# Supported when spend data is available: OpenAI, Claude Admin API, AWS Bedrock,
+# DeepInfra, LiteLLM, ClawRouter, ai&, and xAI Management.
 # openai = 100.0
 # claude = 100.0
 # bedrock = 100.0
+# xai = 100.0
 
 [network]
 proxy = ""                          # Optional explicit proxy: http://127.0.0.1:7890 or socks5://127.0.0.1:7890
@@ -286,3 +310,107 @@ base_url = ""                       # Reserved
 enabled = false
 api_key = ""                        # Windsurf/Codeium service key; env: WINDSURF_SERVICE_KEY / CODEIUM_SERVICE_KEY
 base_url = ""                       # Optional override, default: https://server.codeium.com/api/v1
+
+[clinepass]
+enabled = false
+api_key = ""                        # ClinePass key; env: CLINE_API_KEY / CLINEPASS_API_KEY
+base_url = ""                       # Optional override, default: https://api.cline.bot
+
+[alibaba]
+enabled = false
+api_key = ""                        # Alibaba Coding Plan API key; env: ALIBABA_CODING_PLAN_API_KEY
+base_url = ""                       # Optional OneConsole host override
+deployment = ""                     # Optional region: intl (default) or cn
+
+[qwencloud]
+enabled = false
+api_key = ""                        # Qwen Cloud Cookie header; env: QWEN_CLOUD_COOKIE
+base_url = ""                       # Optional dashboard host override
+
+[devin]
+enabled = false
+api_key = ""                        # Devin Bearer token; env: DEVIN_BEARER_TOKEN
+deployment = ""                     # Required internal organization ID; env: DEVIN_ORG_ID
+
+[manus]
+enabled = false
+api_key = ""                        # Manus session_id or Cookie header; env: MANUS_SESSION_TOKEN / MANUS_COOKIE
+
+[zed]
+enabled = false
+api_key = ""                        # Zed access token (or "<user-id> <token>"); env: ZED_SESSION_TOKEN / ZED_ACCESS_TOKEN
+deployment = ""                     # Zed user ID when api_key contains only the token; env: ZED_USER_ID
+
+[perplexity]
+enabled = false
+api_key = ""                        # Perplexity session token/Cookie; env: PERPLEXITY_SESSION_TOKEN / PERPLEXITY_COOKIE
+
+[sakana]
+enabled = false
+api_key = ""                        # Sakana Cookie header; env: SAKANA_COOKIE
+
+[deepinfra]
+enabled = false
+api_key = ""                        # DeepInfra API key; env: DEEPINFRA_API_KEY / DEEPINFRA_TOKEN
+
+[commandcode]
+enabled = false
+api_key = ""                        # Command Code Cookie header; env: COMMANDCODE_COOKIE
+
+[qoder]
+enabled = false
+api_key = ""                        # Qoder Cookie header; env: QODER_COOKIE
+
+[litellm]
+enabled = false
+api_key = ""                        # LiteLLM virtual key; env: LITELLM_API_KEY
+base_url = ""                       # Required proxy URL; env: LITELLM_BASE_URL
+
+[poe]
+enabled = false
+api_key = ""                        # Poe API key; env: POE_API_KEY
+
+[chutes]
+enabled = false
+api_key = ""                        # Chutes API key; env: CHUTES_API_KEY
+base_url = ""                       # Optional override, default: https://api.chutes.ai
+
+[neuralwatt]
+enabled = false
+api_key = ""                        # NeuralWatt API key; env: NEURALWATT_API_KEY
+base_url = ""                       # Optional override, default: https://api.neuralwatt.com
+
+[clawrouter]
+enabled = false
+api_key = ""                        # ClawRouter API key; env: CLAWROUTER_API_KEY
+base_url = ""                       # Optional override, default: https://clawrouter.openclaw.ai
+
+[longcat]
+enabled = false
+api_key = ""                        # LongCat Cookie header; env: LONGCAT_MANUAL_COOKIE / LONGCAT_COOKIE
+
+[sub2api]
+enabled = false
+api_key = ""                        # sub2api group key; env: SUB2API_API_KEY
+base_url = ""                       # Required server URL; env: SUB2API_BASE_URL
+
+[wayfinder]
+enabled = false
+base_url = ""                       # Local gateway; env: WAYFINDER_GATEWAY_URL; default: http://127.0.0.1:8088
+
+[zenmux]
+enabled = false
+api_key = ""                        # ZenMux management key; env: ZENMUX_MANAGEMENT_API_KEY
+
+[aiand]
+enabled = false
+api_key = ""                        # ai& API key; env: AIAND_API_KEY
+
+[zoommate]
+enabled = false
+api_key = ""                        # ZoomMate token/Cookie; env: ZOOMMATE_TOKEN / ZOOMMATE_COOKIE
+
+[xai]
+enabled = false
+api_key = ""                        # xAI Management API key; env: XAI_MANAGEMENT_API_KEY
+deployment = ""                     # Team ID; env: XAI_TEAM_ID / XAI_MANAGEMENT_TEAM_ID

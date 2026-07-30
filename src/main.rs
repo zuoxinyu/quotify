@@ -23,20 +23,26 @@ use clap::{Parser, Subcommand};
 use gpui::prelude::*;
 use parking_lot::RwLock;
 use provider::{
-    Provider, UsageData, abacus::AbacusProvider, alibabatoken::AlibabaTokenProvider,
-    amp::AmpProvider, antigravity::AntigravityProvider, augment::AugmentProvider,
-    azureopenai::AzureOpenAiProvider, bedrock::BedrockProvider, claude::ClaudeProvider,
-    codebuff::CodebuffProvider, codex::CodexProvider, copilot::CopilotProvider, crof::CrofProvider,
-    cursor::CursorProvider, deepgram::DeepgramProvider, deepseek::DeepSeekProvider,
-    doubao::DoubaoProvider, droid::DroidProvider, elevenlabs::ElevenLabsProvider,
-    gemini::GeminiProvider, grok::GrokProvider, groqcloud::GroqCloudProvider,
-    jetbrains::JetBrainsProvider, kilo::KiloProvider, kimi::KimiProvider, kiro::KiroProvider,
-    llmproxy::LlmProxyProvider, mimo::MimoProvider, minimax::MiniMaxProvider,
-    mistral::MistralProvider, moonshot::MoonshotProvider, ollama::OllamaProvider,
-    openai::OpenAiProvider, opencode::OpenCodeProvider, openrouter::OpenRouterProvider,
-    stepfun::StepFunProvider, synthetic::SyntheticProvider, t3chat::T3ChatProvider,
-    venice::VeniceProvider, vertexai::VertexAiProvider, warp::WarpProvider,
-    windsurf::WindsurfProvider, zai::ZaiProvider,
+    Provider, UsageData, abacus::AbacusProvider, aiand::AiAndProvider, alibaba::AlibabaProvider,
+    alibabatoken::AlibabaTokenProvider, amp::AmpProvider, antigravity::AntigravityProvider,
+    augment::AugmentProvider, azureopenai::AzureOpenAiProvider, bedrock::BedrockProvider,
+    chutes::ChutesProvider, claude::ClaudeProvider, clawrouter::ClawRouterProvider,
+    clinepass::ClinePassProvider, codebuff::CodebuffProvider, codex::CodexProvider,
+    commandcode::CommandCodeProvider, copilot::CopilotProvider, crof::CrofProvider,
+    cursor::CursorProvider, deepgram::DeepgramProvider, deepinfra::DeepInfraProvider,
+    deepseek::DeepSeekProvider, devin::DevinProvider, doubao::DoubaoProvider, droid::DroidProvider,
+    elevenlabs::ElevenLabsProvider, gemini::GeminiProvider, grok::GrokProvider,
+    groqcloud::GroqCloudProvider, jetbrains::JetBrainsProvider, kilo::KiloProvider,
+    kimi::KimiProvider, kiro::KiroProvider, litellm::LiteLlmProvider, llmproxy::LlmProxyProvider,
+    longcat::LongCatProvider, manus::ManusProvider, mimo::MimoProvider, minimax::MiniMaxProvider,
+    mistral::MistralProvider, moonshot::MoonshotProvider, neuralwatt::NeuralWattProvider,
+    ollama::OllamaProvider, openai::OpenAiProvider, opencode::OpenCodeProvider,
+    openrouter::OpenRouterProvider, perplexity::PerplexityProvider, poe::PoeProvider,
+    qoder::QoderProvider, qwencloud::QwenCloudProvider, sakana::SakanaProvider,
+    stepfun::StepFunProvider, sub2api::Sub2ApiProvider, synthetic::SyntheticProvider,
+    t3chat::T3ChatProvider, venice::VeniceProvider, vertexai::VertexAiProvider, warp::WarpProvider,
+    wayfinder::WayfinderProvider, windsurf::WindsurfProvider, xai::XaiProvider, zai::ZaiProvider,
+    zed::ZedProvider, zenmux::ZenMuxProvider, zoommate::ZoomMateProvider,
 };
 use std::{
     cell::RefCell,
@@ -76,13 +82,19 @@ const FLYOUT_HIDE_DURATION: Duration = Duration::from_millis(150);
 const FLYOUT_TIMER_INTERVAL_MS: u32 = 10;
 const STARTUP_INACTIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_INACTIVE_TIMER_INTERVAL_MS: u32 = 100;
-pub const PROVIDER_ORDER: [&str; 42] = [
+pub const PROVIDER_ORDER: [&str; 65] = [
     "codex",
     "openai",
     "opencode",
     "claude",
+    "clinepass",
+    "cursor",
     "gemini",
     "antigravity",
+    "copilot",
+    "droid",
+    "devin",
+    "windsurf",
     "deepseek",
     "openrouter",
     "moonshot",
@@ -95,10 +107,11 @@ pub const PROVIDER_ORDER: [&str; 42] = [
     "warp",
     "groqcloud",
     "deepgram",
+    "deepinfra",
     "llmproxy",
+    "litellm",
     "codebuff",
     "kiro",
-    "copilot",
     "azureopenai",
     "ollama",
     "minimax",
@@ -111,14 +124,30 @@ pub const PROVIDER_ORDER: [&str; 42] = [
     "stepfun",
     "abacus",
     "alibabatoken",
+    "alibaba",
+    "qwencloud",
     "t3chat",
     "amp",
     "mistral",
     "grok",
-    "cursor",
-    "droid",
-    "windsurf",
     "mimo",
+    "manus",
+    "zed",
+    "perplexity",
+    "sakana",
+    "commandcode",
+    "qoder",
+    "poe",
+    "chutes",
+    "neuralwatt",
+    "clawrouter",
+    "longcat",
+    "sub2api",
+    "wayfinder",
+    "zenmux",
+    "aiand",
+    "zoommate",
+    "xai",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,11 +222,87 @@ enum Commands {
     },
 }
 
+macro_rules! create_codexbar_provider {
+    ($config:expr, $field:ident, $provider:ty, $id:literal, $proxy:expr) => {{
+        let provider_config = &$config.$field;
+        if provider_config.enabled == Some(false) {
+            None
+        } else if provider_config.enabled.unwrap_or(false)
+            || !provider_config.api_key.trim().is_empty()
+            || provider::codexbar::CodexBarProvider::has_environment_credentials($id)
+        {
+            Some(Box::new(<$provider>::new(
+                provider_config.api_key.clone(),
+                provider_config.base_url.clone(),
+                provider_config.deployment.clone(),
+                $proxy,
+            )) as Box<dyn Provider>)
+        } else {
+            None
+        }
+    }};
+}
+
 pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<Box<dyn Provider>> {
     let proxy = config.network.proxy.trim();
     let proxy = (!proxy.is_empty()).then_some(proxy);
 
     match name {
+        "clinepass" => {
+            create_codexbar_provider!(config, clinepass, ClinePassProvider, "clinepass", proxy)
+        }
+        "alibaba" => {
+            create_codexbar_provider!(config, alibaba, AlibabaProvider, "alibaba", proxy)
+        }
+        "qwencloud" => {
+            create_codexbar_provider!(config, qwencloud, QwenCloudProvider, "qwencloud", proxy)
+        }
+        "devin" => create_codexbar_provider!(config, devin, DevinProvider, "devin", proxy),
+        "manus" => create_codexbar_provider!(config, manus, ManusProvider, "manus", proxy),
+        "zed" => create_codexbar_provider!(config, zed, ZedProvider, "zed", proxy),
+        "perplexity" => {
+            create_codexbar_provider!(config, perplexity, PerplexityProvider, "perplexity", proxy)
+        }
+        "sakana" => create_codexbar_provider!(config, sakana, SakanaProvider, "sakana", proxy),
+        "deepinfra" => {
+            create_codexbar_provider!(config, deepinfra, DeepInfraProvider, "deepinfra", proxy)
+        }
+        "commandcode" => create_codexbar_provider!(
+            config,
+            commandcode,
+            CommandCodeProvider,
+            "commandcode",
+            proxy
+        ),
+        "qoder" => create_codexbar_provider!(config, qoder, QoderProvider, "qoder", proxy),
+        "litellm" => {
+            create_codexbar_provider!(config, litellm, LiteLlmProvider, "litellm", proxy)
+        }
+        "poe" => create_codexbar_provider!(config, poe, PoeProvider, "poe", proxy),
+        "chutes" => {
+            create_codexbar_provider!(config, chutes, ChutesProvider, "chutes", proxy)
+        }
+        "neuralwatt" => {
+            create_codexbar_provider!(config, neuralwatt, NeuralWattProvider, "neuralwatt", proxy)
+        }
+        "clawrouter" => {
+            create_codexbar_provider!(config, clawrouter, ClawRouterProvider, "clawrouter", proxy)
+        }
+        "longcat" => {
+            create_codexbar_provider!(config, longcat, LongCatProvider, "longcat", proxy)
+        }
+        "sub2api" => {
+            create_codexbar_provider!(config, sub2api, Sub2ApiProvider, "sub2api", proxy)
+        }
+        "wayfinder" => {
+            create_codexbar_provider!(config, wayfinder, WayfinderProvider, "wayfinder", proxy)
+        }
+        "zenmux" => create_codexbar_provider!(config, zenmux, ZenMuxProvider, "zenmux", proxy),
+        "aiand" => create_codexbar_provider!(config, aiand, AiAndProvider, "aiand", proxy),
+        "zoommate" => {
+            create_codexbar_provider!(config, zoommate, ZoomMateProvider, "zoommate", proxy)
+        }
+        "xai" => create_codexbar_provider!(config, xai, XaiProvider, "xai", proxy),
         "deepseek" => {
             if config.deepseek.enabled == Some(false) {
                 return None;
@@ -1042,6 +1147,8 @@ pub(crate) fn create_provider(name: &str, config: &config::AppConfig) -> Option<
                 None
             }
         }
+        // Compatibility alias for old configs and CLI invocations. OpenCode Go
+        // is intentionally represented by the single OpenCode provider.
         "opencodego" => create_provider("opencode", config),
         "mimo" => {
             let service_token = if config.mimo.service_token.is_empty() {

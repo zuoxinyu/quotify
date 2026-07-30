@@ -199,6 +199,52 @@ pub struct AppConfig {
     #[serde(default)]
     pub openrouter: ApiKeyProviderConfig,
     #[serde(default)]
+    pub clinepass: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub alibaba: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub qwencloud: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub devin: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub manus: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub zed: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub perplexity: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub sakana: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub deepinfra: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub commandcode: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub qoder: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub litellm: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub poe: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub chutes: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub neuralwatt: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub clawrouter: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub longcat: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub sub2api: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub wayfinder: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub zenmux: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub aiand: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub zoommate: ApiKeyProviderConfig,
+    #[serde(default)]
+    pub xai: ApiKeyProviderConfig,
+    #[serde(default)]
     pub openai: ApiKeyProviderConfig,
     #[serde(default)]
     pub moonshot: ApiKeyProviderConfig,
@@ -276,11 +322,56 @@ pub struct AppConfig {
     pub antigravity: AntigravityConfig,
     #[serde(default)]
     pub opencode: OpenCodeConfig,
+    /// Legacy input-only section. It is merged into `opencode` during load and
+    /// omitted on save so OpenCode and OpenCode Go stay one provider.
+    #[serde(default, skip_serializing)]
+    pub opencodego: OpenCodeConfig,
     #[serde(default)]
     pub mimo: MimoConfig,
 }
 
 impl AppConfig {
+    fn merge_legacy_opencode_config(&mut self) {
+        if self.opencode.enabled.is_none() {
+            self.opencode.enabled = self.opencodego.enabled;
+        }
+        if self.opencode.api_key.trim().is_empty() {
+            self.opencode.api_key = std::mem::take(&mut self.opencodego.api_key);
+        }
+        if self.opencode.workspace_id.trim().is_empty() {
+            self.opencode.workspace_id = std::mem::take(&mut self.opencodego.workspace_id);
+        }
+        if self.opencode.auth_cookie.trim().is_empty() {
+            self.opencode.auth_cookie = std::mem::take(&mut self.opencodego.auth_cookie);
+        }
+        self.opencodego = OpenCodeConfig::default();
+
+        if self
+            .general
+            .active_provider
+            .eq_ignore_ascii_case("opencodego")
+        {
+            self.general.active_provider = "opencode".to_string();
+        }
+
+        let mut merged_order = Vec::with_capacity(self.general.provider_order.len());
+        for provider in &self.general.provider_order {
+            let provider = if provider.eq_ignore_ascii_case("opencodego") {
+                "opencode"
+            } else {
+                provider.trim()
+            };
+            if !provider.is_empty()
+                && !merged_order
+                    .iter()
+                    .any(|known: &String| known.eq_ignore_ascii_case(provider))
+            {
+                merged_order.push(provider.to_string());
+            }
+        }
+        self.general.provider_order = merged_order;
+    }
+
     pub fn provider_budget(&self, provider: &str) -> Option<f64> {
         let provider = provider.trim();
         self.provider_budgets
@@ -330,19 +421,8 @@ impl AppConfig {
 
             let mut config: AppConfig = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config from {:?}", p))?;
+            config.merge_legacy_opencode_config();
 
-            if config
-                .general
-                .active_provider
-                .eq_ignore_ascii_case("opencodego")
-            {
-                config.general.active_provider = "opencode".to_string();
-            }
-            for item in &mut config.general.provider_order {
-                if item.eq_ignore_ascii_case("opencodego") {
-                    *item = "opencode".to_string();
-                }
-            }
             Ok(config)
         };
 
@@ -492,6 +572,52 @@ mod tests {
         config.set_provider_budget("OPENAI", Some(90.0));
         assert_eq!(config.provider_budgets.len(), 1);
         assert_eq!(config.provider_budgets.get("openai"), Some(&90.0));
+    }
+
+    #[test]
+    fn legacy_opencode_go_settings_merge_into_opencode() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+            [general]
+            active_provider = "opencodego"
+            provider_order = ["codex", "opencodego", "opencode"]
+
+            [opencode]
+            enabled = true
+
+            [opencodego]
+            enabled = false
+            workspace_id = "wrk_go"
+            auth_cookie = "auth=legacy"
+            "#,
+        )
+        .unwrap();
+        config.merge_legacy_opencode_config();
+
+        assert_eq!(config.opencode.enabled, Some(true));
+        assert_eq!(config.opencode.workspace_id, "wrk_go");
+        assert_eq!(config.opencode.auth_cookie, "auth=legacy");
+        assert_eq!(config.general.active_provider, "opencode");
+        assert_eq!(
+            config.general.provider_order,
+            vec!["codex".to_string(), "opencode".to_string()]
+        );
+        assert!(!toml::to_string(&config).unwrap().contains("[opencodego]"));
+    }
+
+    #[test]
+    fn example_config_stays_parseable_as_provider_catalog_grows() {
+        let config: AppConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        let mut configured = config.general.provider_order.clone();
+        configured.sort();
+        let mut registered = crate::PROVIDER_ORDER
+            .iter()
+            .map(|provider| provider.to_string())
+            .collect::<Vec<_>>();
+        registered.sort();
+        assert_eq!(configured, registered);
+        assert_eq!(config.qwencloud.enabled, Some(false));
+        assert_eq!(config.xai.deployment, "");
     }
 
     #[test]
