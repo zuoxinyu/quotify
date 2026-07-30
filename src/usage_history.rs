@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -27,6 +27,33 @@ pub struct ProviderTrend {
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
     pub observations: Vec<ProviderTrendObservation>,
+}
+
+/// Stable, presentation-independent identity for one provider quota window.
+///
+/// Providers do not currently expose an explicit window id, so this key is
+/// derived from semantic period aliases and falls back to a normalized
+/// label/unit pair. It is intentionally not serialized: historical snapshots
+/// already contain the complete `UsageWindow` values and can be reclassified
+/// as aliases improve.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UsageWindowKey(String);
+
+impl UsageWindowKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn budget_30d_usd() -> Self {
+        Self("budget:30d:usd".to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageWindowTrend {
+    pub key: UsageWindowKey,
+    pub label: String,
+    pub trend: ProviderTrend,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,24 +204,77 @@ impl UsageHistory {
             .unwrap_or_default()
     }
 
-    pub fn trend_for_at_with_budget(
+    /// Computes independent trends for every meaningful window in `current`.
+    ///
+    /// The history is traversed once. A successful provider snapshot that is
+    /// missing one target window contributes an explicit gap to that window
+    /// instead of substituting another window's percentage. Configured API
+    /// budgets are tracked as an additional window and a budget-limit change
+    /// terminates only that budget generation.
+    pub fn trends_for_at_with_budget(
         &self,
-        provider: &str,
+        current: &crate::provider::UsageData,
         days: i64,
         now: DateTime<Utc>,
         configured_budget: Option<f64>,
-    ) -> Option<ProviderTrend> {
-        if days <= 0 {
-            return None;
+    ) -> Vec<UsageWindowTrend> {
+        if days <= 0 || current.provider.trim().is_empty() || current.error.is_some() {
+            return Vec::new();
+        }
+
+        let configured_budget = valid_configured_budget(&current.provider, configured_budget);
+        let mut targets = Vec::<WindowTrendAccumulator>::new();
+        let mut target_indexes = HashMap::<UsageWindowKey, usize>::new();
+
+        for window in &current.windows {
+            let Some(key) = usage_window_key(&current.provider, window) else {
+                continue;
+            };
+            let is_budget = key == UsageWindowKey::budget_30d_usd();
+            if is_budget && configured_budget.is_none() {
+                continue;
+            }
+            if !is_budget && is_raw_amount_window(window) {
+                continue;
+            }
+            if target_indexes.contains_key(&key) {
+                tracing::warn!(
+                    provider = %current.provider,
+                    window = %window.label,
+                    key = key.as_str(),
+                    "Ignoring duplicate usage trend window identity"
+                );
+                continue;
+            }
+
+            target_indexes.insert(key.clone(), targets.len());
+            targets.push(WindowTrendAccumulator::new(
+                key,
+                window.label.clone(),
+                is_budget,
+            ));
+        }
+
+        // A partial cost refresh can omit the budget window entirely. Keep its
+        // historical series visible and record the current snapshot as a gap.
+        if configured_budget.is_some() {
+            let budget_key = UsageWindowKey::budget_30d_usd();
+            if !target_indexes.contains_key(&budget_key) {
+                target_indexes.insert(budget_key.clone(), targets.len());
+                targets.push(WindowTrendAccumulator::new(
+                    budget_key,
+                    "30d Budget".to_string(),
+                    true,
+                ));
+            }
+        }
+
+        if targets.is_empty() {
+            return Vec::new();
         }
 
         let cutoff = now - chrono::Duration::days(days);
-        let configured_budget = configured_budget.filter(|budget| {
-            crate::provider::supports_api_budget(provider) && budget.is_finite() && *budget > 0.0
-        });
-        let mut points = Vec::new();
-        let mut observations = Vec::new();
-
+        let mut provider_segment_started = false;
         for entry in self.entries.iter().rev() {
             if entry.fetched_at > now {
                 continue;
@@ -202,127 +282,89 @@ impl UsageHistory {
             if entry.fetched_at < cutoff {
                 break;
             }
+
             let Some(data) = entry
                 .providers
                 .iter()
-                .find(|data| data.provider.eq_ignore_ascii_case(provider))
+                .find(|data| data.provider.eq_ignore_ascii_case(&current.provider))
             else {
-                if !observations.is_empty() {
+                if provider_segment_started {
                     break;
                 }
                 continue;
             };
+            provider_segment_started = true;
+
+            // Preserve the previous behavior for whole-provider failures: they
+            // are not valid quota observations. Partial successful responses,
+            // however, do create per-window gaps below.
             if data.error.is_some() {
                 continue;
             }
 
-            let observed_percent = if let Some(configured_budget) = configured_budget {
-                let Some(window) = data.windows.iter().find(|window| {
-                    crate::provider::is_budget_spend_window(
-                        &data.provider,
-                        &window.label,
-                        window.unit.as_deref(),
-                    )
-                }) else {
-                    // Core quota data can still be available when the cost API
-                    // fails. Preserve that time gap instead of substituting an
-                    // unrelated quota percentage for the configured budget.
-                    observations.push(ProviderTrendObservation {
-                        fetched_at: entry.fetched_at,
-                        used_percent: None,
-                    });
-                    continue;
-                };
-                let Some(window_limit) = window
-                    .limit
-                    .filter(|limit| limit.is_finite() && *limit > 0.0)
-                else {
-                    observations.push(ProviderTrendObservation {
-                        fetched_at: entry.fetched_at,
-                        used_percent: None,
-                    });
-                    continue;
-                };
-                if !same_optional_limit(Some(configured_budget), Some(window_limit)) {
-                    break;
+            let mut windows_by_key =
+                HashMap::<UsageWindowKey, &crate::provider::UsageWindow>::new();
+            for window in &data.windows {
+                if let Some(key) = usage_window_key(&data.provider, window) {
+                    windows_by_key.entry(key).or_insert(window);
                 }
-                window
-                    .used_percent
-                    .is_finite()
-                    .then_some(window.used_percent)
-            } else if crate::provider::supports_api_budget(provider) {
-                let old_budget_still_present = data.windows.iter().any(|window| {
-                    crate::provider::is_budget_spend_window(
-                        &data.provider,
-                        &window.label,
-                        window.unit.as_deref(),
-                    ) && window
-                        .limit
-                        .is_some_and(|limit| limit.is_finite() && limit > 0.0)
-                });
-                if old_budget_still_present {
-                    break;
+            }
+
+            for target in &mut targets {
+                if target.generation_ended {
+                    continue;
                 }
 
-                let Some(non_budget_percent) = data
-                    .windows
-                    .iter()
-                    .filter(|window| {
-                        !crate::provider::is_budget_spend_window(
-                            &data.provider,
-                            &window.label,
-                            window.unit.as_deref(),
-                        )
-                    })
-                    .map(|window| window.used_percent)
-                    .filter(|percent| percent.is_finite())
-                    .reduce(f64::max)
-                else {
-                    observations.push(ProviderTrendObservation {
-                        fetched_at: entry.fetched_at,
-                        used_percent: None,
-                    });
-                    continue;
+                let matched = windows_by_key.get(&target.key).copied();
+                let used_percent = if target.is_budget {
+                    let Some(expected_budget) = configured_budget else {
+                        continue;
+                    };
+                    match matched {
+                        Some(window) => match window
+                            .limit
+                            .filter(|limit| limit.is_finite() && *limit > 0.0)
+                        {
+                            Some(historical_limit)
+                                if !same_optional_limit(
+                                    Some(expected_budget),
+                                    Some(historical_limit),
+                                ) =>
+                            {
+                                target.generation_ended = true;
+                                continue;
+                            }
+                            Some(_) => window
+                                .used_percent
+                                .is_finite()
+                                .then_some(window.used_percent),
+                            None => None,
+                        },
+                        None => None,
+                    }
+                } else {
+                    matched
+                        .map(|window| window.used_percent)
+                        .filter(|percent| percent.is_finite())
                 };
-                Some(non_budget_percent)
-            } else {
-                let used_percent = data.max_used_percent();
-                used_percent.is_finite().then_some(used_percent)
-            };
-            observations.push(ProviderTrendObservation {
-                fetched_at: entry.fetched_at,
-                used_percent: observed_percent,
-            });
-            if let Some(used_percent) = observed_percent {
-                points.push((entry.fetched_at, used_percent));
+                target.observations.push(ProviderTrendObservation {
+                    fetched_at: entry.fetched_at,
+                    used_percent,
+                });
             }
         }
-        points.reverse();
-        observations.reverse();
 
-        if points.is_empty() {
-            return None;
-        }
-
-        let latest_percent = points.last().map_or(0.0, |(_, percent)| *percent);
-        let previous_percent = points.iter().rev().nth(1).map(|(_, percent)| *percent);
-        let peak_percent = points
-            .iter()
-            .map(|(_, percent)| *percent)
-            .fold(0.0, f64::max);
-        let average_percent =
-            points.iter().map(|(_, percent)| *percent).sum::<f64>() / points.len() as f64;
-
-        Some(ProviderTrend {
-            samples: points.len(),
-            latest_percent,
-            previous_percent,
-            peak_percent,
-            average_percent,
-            period_start: cutoff,
-            period_end: now,
-            observations,
-        })
+        targets
+            .into_iter()
+            .filter_map(|mut target| {
+                target.observations.reverse();
+                build_trend(target.observations, cutoff, now).map(|trend| UsageWindowTrend {
+                    key: target.key,
+                    label: target.label,
+                    trend,
+                })
+            })
+            .collect()
     }
 
     pub fn latest_successful_for(&self, provider: &str) -> Option<crate::provider::UsageData> {
@@ -343,6 +385,203 @@ impl UsageHistory {
             self.entries.drain(0..remove_count);
         }
     }
+}
+
+#[derive(Debug)]
+struct WindowTrendAccumulator {
+    key: UsageWindowKey,
+    label: String,
+    is_budget: bool,
+    generation_ended: bool,
+    observations: Vec<ProviderTrendObservation>,
+}
+
+impl WindowTrendAccumulator {
+    fn new(key: UsageWindowKey, label: String, is_budget: bool) -> Self {
+        Self {
+            key,
+            label,
+            is_budget,
+            generation_ended: false,
+            observations: Vec::new(),
+        }
+    }
+}
+
+fn build_trend(
+    observations: Vec<ProviderTrendObservation>,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Option<ProviderTrend> {
+    let points = observations
+        .iter()
+        .filter_map(|observation| {
+            observation
+                .used_percent
+                .filter(|percent| percent.is_finite())
+        })
+        .collect::<Vec<_>>();
+    let latest_percent = *points.last()?;
+    let previous_percent = points.iter().rev().nth(1).copied();
+    let peak_percent = points.iter().copied().fold(0.0, f64::max);
+    let average_percent = points.iter().sum::<f64>() / points.len() as f64;
+
+    Some(ProviderTrend {
+        samples: points.len(),
+        latest_percent,
+        previous_percent,
+        peak_percent,
+        average_percent,
+        period_start,
+        period_end,
+        observations,
+    })
+}
+
+fn valid_configured_budget(provider: &str, configured_budget: Option<f64>) -> Option<f64> {
+    configured_budget.filter(|budget| {
+        crate::provider::supports_api_budget(provider) && budget.is_finite() && *budget > 0.0
+    })
+}
+
+/// Derives a stable runtime identity from provider aliases and the window's
+/// semantic period. The source `UsageWindow` schema remains unchanged.
+pub fn usage_window_key(
+    provider: &str,
+    window: &crate::provider::UsageWindow,
+) -> Option<UsageWindowKey> {
+    let compact_label = compact_normalized(&window.label);
+    if matches!(
+        compact_label.as_str(),
+        "" | "error" | "nodata" | "resetcredits"
+    ) {
+        return None;
+    }
+
+    if crate::provider::is_budget_spend_window(provider, &window.label, window.unit.as_deref()) {
+        return Some(UsageWindowKey::budget_30d_usd());
+    }
+
+    let tokens = normalized_tokens(&window.label);
+    let provider = provider.trim().to_ascii_lowercase();
+    if let Some((period, qualifier)) =
+        semantic_period_and_qualifier(&provider, &compact_label, &tokens)
+    {
+        let mut key = format!("quota:{period}");
+        if !qualifier.is_empty() {
+            key.push(':');
+            key.push_str(&qualifier);
+        }
+        return Some(UsageWindowKey(key));
+    }
+
+    let normalized_label = normalized_component(&window.label);
+    if normalized_label.is_empty() {
+        return None;
+    }
+    let normalized_unit = window
+        .unit
+        .as_deref()
+        .map(normalized_component)
+        .filter(|unit| !unit.is_empty());
+    Some(UsageWindowKey(match normalized_unit {
+        Some(unit) => format!("named:{normalized_label}:{unit}"),
+        None => format!("named:{normalized_label}"),
+    }))
+}
+
+fn semantic_period_and_qualifier(
+    provider: &str,
+    compact_label: &str,
+    tokens: &[String],
+) -> Option<(&'static str, String)> {
+    let has_token = |expected: &str| tokens.iter().any(|token| token == expected);
+    let has_pair = |left: &str, right: &str| {
+        tokens
+            .windows(2)
+            .any(|pair| pair[0] == left && pair[1] == right)
+    };
+
+    let (period, period_noise): (&str, &[&str]) = if has_token("5h")
+        || compact_label.contains("5hour")
+        || compact_label.contains("fivehour")
+        || (matches!(provider, "codex" | "claude") && compact_label.contains("session"))
+        || (matches!(provider, "opencode" | "opencodego") && compact_label.contains("rollingusage"))
+        || (provider == "codex" && matches!(compact_label, "primary" | "primarywindow"))
+    {
+        (
+            "5h",
+            &[
+                "5h", "5hour", "five", "hour", "hours", "session", "rolling", "primary",
+            ],
+        )
+    } else if has_token("7d")
+        || has_token("weekly")
+        || has_token("week")
+        || compact_label.contains("sevenday")
+        || has_pair("seven", "day")
+        || (provider == "codex" && matches!(compact_label, "secondary" | "secondarywindow"))
+    {
+        (
+            "weekly",
+            &["7d", "weekly", "week", "seven", "day", "days", "secondary"],
+        )
+    } else if has_token("monthly")
+        || has_token("month")
+        || has_token("30d")
+        || compact_label.contains("thirtyday")
+        || has_pair("thirty", "day")
+    {
+        (
+            "monthly",
+            &["30d", "monthly", "month", "thirty", "day", "days"],
+        )
+    } else {
+        return None;
+    };
+
+    let qualifier = tokens
+        .iter()
+        .filter(|token| {
+            !matches!(
+                token.as_str(),
+                "usage" | "quota" | "window" | "limit" | "rate"
+            ) && !period_noise.contains(&token.as_str())
+        })
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("-");
+    Some((period, qualifier))
+}
+
+fn normalized_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.chars().flat_map(char::to_lowercase).collect())
+        .collect()
+}
+
+fn normalized_component(value: &str) -> String {
+    normalized_tokens(value).join("-")
+}
+
+fn compact_normalized(value: &str) -> String {
+    normalized_tokens(value).concat()
+}
+
+fn is_raw_amount_window(window: &crate::provider::UsageWindow) -> bool {
+    let compact_label = compact_normalized(&window.label);
+    compact_label.contains("localstats")
+        || (window.limit.is_none()
+            && window.used.is_some()
+            && window.used_percent.abs() < 0.05
+            && window.unit.as_deref().is_some_and(|unit| {
+                matches!(
+                    unit.trim().to_ascii_lowercase().as_str(),
+                    "usd" | "eur" | "gbp" | "cny" | "jpy" | "token" | "tokens"
+                )
+            }))
 }
 
 fn same_optional_limit(left: Option<f64>, right: Option<f64>) -> bool {
@@ -383,6 +622,7 @@ mod tests {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: error.map(str::to_string),
         }
@@ -400,9 +640,316 @@ mod tests {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         }
+    }
+
+    fn window(label: &str, percent: f64) -> UsageWindow {
+        UsageWindow {
+            label: label.to_string(),
+            used_percent: percent,
+            limit: None,
+            used: None,
+            unit: None,
+            resets_at: None,
+        }
+    }
+
+    fn usage_with_windows(
+        provider: &str,
+        fetched_at: DateTime<Utc>,
+        windows: Vec<UsageWindow>,
+    ) -> UsageData {
+        UsageData {
+            provider: provider.to_string(),
+            windows,
+            credits: None,
+            subscription_tier: None,
+            fetched_at,
+            error: None,
+        }
+    }
+
+    fn budget_window(label: &str, percent: f64, limit: f64) -> UsageWindow {
+        UsageWindow {
+            label: label.to_string(),
+            used_percent: percent,
+            limit: Some(limit),
+            used: Some(percent / 100.0 * limit),
+            unit: Some("USD".to_string()),
+            resets_at: None,
+        }
+    }
+
+    #[test]
+    fn semantic_window_keys_join_aliases_and_keep_weekly_variants_separate() {
+        let codex_session = usage_window_key("codex", &window("Session", 10.0)).unwrap();
+        let codex_five_hour = usage_window_key("codex", &window("Session (5h)", 20.0)).unwrap();
+        let claude_weekly = usage_window_key("claude", &window("Weekly", 10.0)).unwrap();
+        let claude_seven_day = usage_window_key("claude", &window("seven_day", 20.0)).unwrap();
+        let sonnet = usage_window_key("claude", &window("Weekly (Sonnet)", 30.0)).unwrap();
+        let opus = usage_window_key("claude", &window("seven_day_opus", 40.0)).unwrap();
+        let opencodego_rolling =
+            usage_window_key("opencodego", &window("Rolling Usage", 50.0)).unwrap();
+
+        assert_eq!(codex_session.as_str(), "quota:5h");
+        assert_eq!(codex_session, codex_five_hour);
+        assert_eq!(claude_weekly.as_str(), "quota:weekly");
+        assert_eq!(claude_weekly, claude_seven_day);
+        assert_eq!(sonnet.as_str(), "quota:weekly:sonnet");
+        assert_eq!(opus.as_str(), "quota:weekly:opus");
+        assert_ne!(sonnet, opus);
+        assert_eq!(opencodego_rolling.as_str(), "quota:5h");
+    }
+
+    #[test]
+    fn auxiliary_amount_windows_are_not_trended_as_zero_percent_quotas() {
+        let now = fixed_now();
+        let current = usage_with_windows(
+            "claude",
+            now,
+            vec![
+                window("Weekly", 25.0),
+                UsageWindow {
+                    label: "Token Usage (local stats)".to_string(),
+                    used_percent: 0.0,
+                    limit: None,
+                    used: Some(42_000.0),
+                    unit: Some("tokens".to_string()),
+                    resets_at: None,
+                },
+                UsageWindow {
+                    label: "Last Full Day Spend".to_string(),
+                    used_percent: 0.0,
+                    limit: None,
+                    used: Some(1.25),
+                    unit: Some("USD".to_string()),
+                    resets_at: None,
+                },
+            ],
+        );
+        let history = UsageHistory {
+            entries: vec![UsageHistoryEntry {
+                fetched_at: now,
+                providers: vec![current.clone()],
+            }],
+            ..UsageHistory::default()
+        };
+
+        let trends = history.trends_for_at_with_budget(&current, 7, now, None);
+
+        assert_eq!(trends.len(), 1);
+        assert_eq!(trends[0].key.as_str(), "quota:weekly");
+    }
+
+    #[test]
+    fn per_window_trends_preserve_current_order_and_missing_window_gaps() {
+        let now = fixed_now();
+        let oldest_at = now - chrono::Duration::days(2);
+        let middle_at = now - chrono::Duration::days(1);
+        let current = usage_with_windows(
+            "opencode",
+            now,
+            vec![
+                window("Monthly Usage", 90.0),
+                window("Rolling Usage", 70.0),
+                window("Weekly Usage", 80.0),
+            ],
+        );
+        let history = UsageHistory {
+            entries: vec![
+                UsageHistoryEntry {
+                    fetched_at: oldest_at,
+                    providers: vec![usage_with_windows(
+                        "opencode",
+                        oldest_at,
+                        vec![
+                            window("Rolling Usage", 10.0),
+                            window("Weekly Usage", 20.0),
+                            window("Monthly Usage", 30.0),
+                        ],
+                    )],
+                },
+                UsageHistoryEntry {
+                    fetched_at: middle_at,
+                    providers: vec![usage_with_windows(
+                        "opencode",
+                        middle_at,
+                        vec![window("Rolling Usage", 40.0), window("Monthly Usage", 50.0)],
+                    )],
+                },
+                UsageHistoryEntry {
+                    fetched_at: now,
+                    providers: vec![current.clone()],
+                },
+            ],
+            ..UsageHistory::default()
+        };
+
+        let trends = history.trends_for_at_with_budget(&current, 7, now, None);
+
+        assert_eq!(
+            trends
+                .iter()
+                .map(|window| window.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["quota:monthly", "quota:5h", "quota:weekly"]
+        );
+        assert_eq!(trends[0].trend.average_percent, (30.0 + 50.0 + 90.0) / 3.0);
+        assert_eq!(trends[1].trend.average_percent, 40.0);
+        assert_eq!(
+            trends[2]
+                .trend
+                .observations
+                .iter()
+                .map(|observation| observation.used_percent)
+                .collect::<Vec<_>>(),
+            vec![Some(20.0), None, Some(80.0)]
+        );
+        assert_eq!(trends[2].trend.samples, 2);
+        assert_eq!(trends[2].trend.peak_percent, 80.0);
+    }
+
+    #[test]
+    fn budget_generation_changes_do_not_truncate_quota_windows() {
+        let now = fixed_now();
+        let oldest_at = now - chrono::Duration::hours(2);
+        let middle_at = now - chrono::Duration::hours(1);
+        let current = usage_with_windows(
+            "claude",
+            now,
+            vec![
+                window("Session (5h)", 30.0),
+                budget_window("30d Spend", 40.0, 50.0),
+            ],
+        );
+        let history = UsageHistory {
+            entries: vec![
+                UsageHistoryEntry {
+                    fetched_at: oldest_at,
+                    providers: vec![usage_with_windows(
+                        "claude",
+                        oldest_at,
+                        vec![
+                            window("five_hour", 10.0),
+                            budget_window("30d Spend", 20.0, 100.0),
+                        ],
+                    )],
+                },
+                UsageHistoryEntry {
+                    fetched_at: middle_at,
+                    providers: vec![usage_with_windows(
+                        "claude",
+                        middle_at,
+                        vec![
+                            window("Session", 20.0),
+                            budget_window("30d Spend", 30.0, 50.0),
+                        ],
+                    )],
+                },
+                UsageHistoryEntry {
+                    fetched_at: now,
+                    providers: vec![current.clone()],
+                },
+            ],
+            ..UsageHistory::default()
+        };
+
+        let trends = history.trends_for_at_with_budget(&current, 7, now, Some(50.0));
+
+        assert_eq!(trends.len(), 2);
+        assert_eq!(trends[0].key.as_str(), "quota:5h");
+        assert_eq!(trends[0].trend.samples, 3);
+        assert_eq!(trends[0].trend.average_percent, 20.0);
+        assert_eq!(trends[1].key.as_str(), "budget:30d:usd");
+        assert_eq!(trends[1].trend.samples, 2);
+        assert_eq!(trends[1].trend.average_percent, 35.0);
+    }
+
+    #[test]
+    fn invalid_budget_snapshot_is_a_gap_instead_of_zero_percent_usage() {
+        let now = fixed_now();
+        let oldest_at = now - chrono::Duration::hours(2);
+        let middle_at = now - chrono::Duration::hours(1);
+        let current =
+            usage_with_windows("claude", now, vec![budget_window("30d Spend", 60.0, 50.0)]);
+        let mut unavailable_budget = budget_window("30d Spend", 0.0, 50.0);
+        unavailable_budget.limit = None;
+        let history = UsageHistory {
+            entries: vec![
+                UsageHistoryEntry {
+                    fetched_at: oldest_at,
+                    providers: vec![usage_with_windows(
+                        "claude",
+                        oldest_at,
+                        vec![budget_window("30d Spend", 20.0, 50.0)],
+                    )],
+                },
+                UsageHistoryEntry {
+                    fetched_at: middle_at,
+                    providers: vec![usage_with_windows(
+                        "claude",
+                        middle_at,
+                        vec![unavailable_budget],
+                    )],
+                },
+                UsageHistoryEntry {
+                    fetched_at: now,
+                    providers: vec![current.clone()],
+                },
+            ],
+            ..UsageHistory::default()
+        };
+
+        let trends = history.trends_for_at_with_budget(&current, 7, now, Some(50.0));
+
+        assert_eq!(trends.len(), 1);
+        assert_eq!(
+            trends[0]
+                .trend
+                .observations
+                .iter()
+                .map(|observation| observation.used_percent)
+                .collect::<Vec<_>>(),
+            vec![Some(20.0), None, Some(60.0)]
+        );
+    }
+
+    #[test]
+    fn old_history_json_without_subscription_tier_still_builds_window_trends() {
+        let now = fixed_now();
+        let json = format!(
+            r#"{{
+                "entries": [{{
+                    "fetched_at": "{now}",
+                    "providers": [{{
+                        "provider": "codex",
+                        "windows": [{{
+                            "label": "Session",
+                            "used_percent": 25.0,
+                            "limit": null,
+                            "used": null,
+                            "unit": null,
+                            "resets_at": null
+                        }}],
+                        "credits": null,
+                        "fetched_at": "{now}",
+                        "error": null
+                    }}]
+                }}]
+            }}"#
+        );
+        let history: UsageHistory = serde_json::from_str(&json).unwrap();
+        let current = &history.entries[0].providers[0];
+
+        let trends = history.trends_for_at_with_budget(current, 7, now, None);
+
+        assert_eq!(current.subscription_tier, None);
+        assert_eq!(trends.len(), 1);
+        assert_eq!(trends[0].key.as_str(), "quota:5h");
+        assert_eq!(trends[0].trend.latest_percent, 25.0);
     }
 
     #[test]
@@ -420,176 +967,6 @@ mod tests {
         let latest = history.latest_successful();
         assert_eq!(latest.len(), 1);
         assert_eq!(latest[0].max_used_percent(), 20.0);
-    }
-
-    #[test]
-    fn trend_for_computes_recent_samples() {
-        let now = fixed_now();
-        let mut history = UsageHistory::default();
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::days(1),
-            providers: vec![usage("openai", 20.0, None)],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now,
-            providers: vec![usage("openai", 50.0, None)],
-        });
-
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, None)
-            .unwrap();
-        assert_eq!(trend.samples, 2);
-        assert_eq!(trend.latest_percent, 50.0);
-        assert_eq!(trend.previous_percent, Some(20.0));
-        assert_eq!(trend.peak_percent, 50.0);
-        assert_eq!(trend.average_percent, 35.0);
-        assert_eq!(
-            trend.observations,
-            vec![
-                ProviderTrendObservation {
-                    fetched_at: now - chrono::Duration::days(1),
-                    used_percent: Some(20.0),
-                },
-                ProviderTrendObservation {
-                    fetched_at: now,
-                    used_percent: Some(50.0),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn trend_starts_a_new_generation_when_budget_changes() {
-        let now = fixed_now();
-        let mut history = UsageHistory::default();
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::hours(2),
-            providers: vec![budget_usage(20.0, 100.0)],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::hours(1),
-            providers: vec![budget_usage(30.0, 100.0)],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now,
-            providers: vec![budget_usage(60.0, 50.0)],
-        });
-
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, Some(50.0))
-            .unwrap();
-        assert_eq!(trend.samples, 1);
-        assert_eq!(trend.latest_percent, 60.0);
-        assert_eq!(trend.previous_percent, None);
-        assert_eq!(trend.average_percent, 60.0);
-        assert_eq!(trend.observations[0].fetched_at, now);
-    }
-
-    #[test]
-    fn budget_trend_preserves_partial_cost_failure_as_a_gap() {
-        let now = fixed_now();
-        let mut history = UsageHistory::default();
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::days(2),
-            providers: vec![budget_usage(20.0, 50.0)],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::days(1),
-            providers: vec![usage("openai", 90.0, None)],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now,
-            providers: vec![budget_usage(60.0, 50.0)],
-        });
-
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, Some(50.0))
-            .unwrap();
-        assert_eq!(trend.samples, 2);
-        assert_eq!(
-            trend
-                .observations
-                .iter()
-                .map(|observation| observation.used_percent)
-                .collect::<Vec<_>>(),
-            vec![Some(20.0), None, Some(60.0)]
-        );
-    }
-
-    #[test]
-    fn budget_failure_as_latest_observation_empties_bucket() {
-        let now = fixed_now();
-        let mut history = UsageHistory::default();
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::hours(2),
-            providers: vec![budget_usage(20.0, 50.0)],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::hours(1),
-            providers: vec![usage("openai", 90.0, None)],
-        });
-
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, Some(50.0))
-            .unwrap();
-        let buckets = trend.histogram_buckets(7);
-        let latest_bucket = buckets.last().unwrap();
-
-        assert_eq!(trend.samples, 1);
-        assert_eq!(latest_bucket.latest_percent, None);
-        assert_eq!(latest_bucket.average_percent, Some(20.0));
-        assert_eq!(latest_bucket.samples, 1);
-    }
-
-    #[test]
-    fn cleared_budget_does_not_reuse_old_budget_history() {
-        let now = fixed_now();
-        let mut history = UsageHistory::default();
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::days(1),
-            providers: vec![budget_usage(80.0, 100.0)],
-        });
-
-        assert!(
-            history
-                .trend_for_at_with_budget("openai", 7, now, None)
-                .is_none()
-        );
-
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now,
-            providers: vec![usage("openai", 30.0, None)],
-        });
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, None)
-            .unwrap();
-        assert_eq!(trend.samples, 1);
-        assert_eq!(trend.latest_percent, 30.0);
-        assert_eq!(trend.observations[0].fetched_at, now);
-    }
-
-    #[test]
-    fn effective_budget_limit_selects_the_matching_bedrock_generation() {
-        let now = fixed_now();
-        let mut old_budget = budget_usage(20.0, 100.0);
-        old_budget.provider = "bedrock".to_string();
-        let mut current_budget = budget_usage(40.0, 75.0);
-        current_budget.provider = "bedrock".to_string();
-        let mut history = UsageHistory::default();
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now - chrono::Duration::hours(1),
-            providers: vec![old_budget],
-        });
-        history.entries.push(UsageHistoryEntry {
-            fetched_at: now,
-            providers: vec![current_budget],
-        });
-
-        let trend = history
-            .trend_for_at_with_budget("bedrock", 7, now, Some(75.0))
-            .unwrap();
-        assert_eq!(trend.samples, 1);
-        assert_eq!(trend.latest_percent, 40.0);
     }
 
     #[test]
@@ -614,9 +991,14 @@ mod tests {
             });
         }
 
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, None)
+        let current = history
+            .entries
+            .iter()
+            .find(|entry| entry.fetched_at == now)
+            .and_then(|entry| entry.providers.first())
             .unwrap();
+        let trends = history.trends_for_at_with_budget(current, 7, now, None);
+        let trend = &trends[0].trend;
         let buckets = trend.histogram_buckets(7);
 
         assert_eq!(trend.samples, 4);
@@ -729,14 +1111,14 @@ mod tests {
             fetched_at: now - chrono::Duration::days(1),
             providers: vec![usage("openai", 0.0, Some("failed"))],
         });
+        let current = usage("openai", 30.0, None);
         history.entries.push(UsageHistoryEntry {
             fetched_at: now,
-            providers: vec![usage("openai", 30.0, None)],
+            providers: vec![current.clone()],
         });
 
-        let trend = history
-            .trend_for_at_with_budget("openai", 7, now, None)
-            .unwrap();
+        let trends = history.trends_for_at_with_budget(&current, 7, now, None);
+        let trend = &trends[0].trend;
         assert_eq!(trend.samples, 1);
         assert_eq!(trend.latest_percent, 30.0);
         assert_eq!(trend.observations[0].fetched_at, now);
@@ -754,15 +1136,17 @@ mod tests {
             fetched_at: now - chrono::Duration::hours(1),
             providers: vec![usage("gemini", 70.0, None)],
         });
+        let current = usage("openai", 90.0, None);
         history.entries.push(UsageHistoryEntry {
             fetched_at: now,
-            providers: vec![usage("openai", 90.0, None)],
+            providers: vec![current.clone()],
         });
 
+        let trends = history.trends_for_at_with_budget(&current, 7, now, Some(50.0));
         assert!(
-            history
-                .trend_for_at_with_budget("openai", 7, now, Some(50.0))
-                .is_none()
+            trends
+                .iter()
+                .all(|trend| trend.key.as_str() != "budget:30d:usd")
         );
     }
 

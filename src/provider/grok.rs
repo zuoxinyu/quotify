@@ -93,6 +93,7 @@ impl Provider for GrokProvider {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

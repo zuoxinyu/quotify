@@ -129,6 +129,7 @@ impl Provider for OpenRouterProvider {
                 total_granted: Some(total_credits),
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

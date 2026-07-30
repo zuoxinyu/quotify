@@ -119,6 +119,7 @@ impl Provider for MiniMaxProvider {
                 resets_at: reset,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

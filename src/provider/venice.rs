@@ -102,6 +102,7 @@ impl Provider for VeniceProvider {
                 total_granted: allocation,
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

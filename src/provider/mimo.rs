@@ -342,6 +342,7 @@ impl Provider for MimoProvider {
             provider: self.name().to_string(),
             windows,
             credits,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

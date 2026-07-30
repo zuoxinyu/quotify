@@ -142,6 +142,7 @@ impl Provider for CodebuffProvider {
                 total_granted: total,
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

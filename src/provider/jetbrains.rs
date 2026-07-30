@@ -60,6 +60,7 @@ impl Provider for JetBrainsProvider {
                 total_granted: maximum,
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

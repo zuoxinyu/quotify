@@ -103,6 +103,7 @@ impl Provider for GroqCloudProvider {
                 },
             ],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

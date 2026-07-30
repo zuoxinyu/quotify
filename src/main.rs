@@ -1417,6 +1417,7 @@ mod provider_budget_tests {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: chrono::Utc::now(),
             error: None,
         }
@@ -1506,6 +1507,7 @@ fn provider_error_data(provider: String, error: String) -> UsageData {
             resets_at: None,
         }],
         credits: None,
+        subscription_tier: None,
         fetched_at: chrono::Utc::now(),
         error: Some(error),
     }

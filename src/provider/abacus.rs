@@ -148,6 +148,7 @@ impl Provider for AbacusProvider {
                 total_granted: limit,
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

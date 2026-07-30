@@ -7,6 +7,8 @@ use super::{
     completed_utc_day_window, http_client,
 };
 
+const OAUTH_PROFILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct ClaudeProvider {
     credentials_path: Option<String>,
     session_key: Option<String>,
@@ -28,6 +30,16 @@ struct ClaudeOauth {
     #[serde(alias = "refreshToken")]
     #[allow(dead_code)]
     refresh_token: Option<String>,
+    #[serde(default, alias = "subscriptionType")]
+    subscription_type: Option<String>,
+    #[serde(default, alias = "rateLimitTier")]
+    rate_limit_tier: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ClaudeOauthCredentials {
+    access_token: String,
+    subscription_tier: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -53,12 +65,15 @@ struct WindowUsage {
     resets_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ClaudeWebOrganizationResponse {
     uuid: String,
-    name: Option<String>,
     #[serde(default)]
     capabilities: Vec<String>,
+    #[serde(default)]
+    organization_type: Option<String>,
+    #[serde(default)]
+    rate_limit_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +245,153 @@ fn parse_claude_usage_response(
     (windows, credits)
 }
 
+fn normalize_subscription_tier(
+    subscription_type: Option<&str>,
+    rate_limit_tier: Option<&str>,
+) -> Option<String> {
+    let subscription_type = subscription_type?.trim().to_ascii_lowercase();
+    let rate_limit_tier = rate_limit_tier.map(str::trim).map(str::to_ascii_lowercase);
+
+    let tier = match subscription_type.as_str() {
+        "claude_pro" | "pro" => "Pro",
+        "claude_max" | "max" => match rate_limit_tier.as_deref() {
+            Some("default_claude_max_5x") => "Max 5x",
+            Some("default_claude_max_20x") => "Max 20x",
+            _ => "Max",
+        },
+        "claude_team" | "team" => "Team",
+        "claude_enterprise" | "enterprise" => "Enterprise",
+        "claude_free" | "free" => "Free",
+        "claude_api" | "api" => "API",
+        _ => return None,
+    };
+
+    Some(tier.to_string())
+}
+
+fn parse_oauth_credentials(content: &str) -> Option<ClaudeOauthCredentials> {
+    let json: serde_json::Value = serde_json::from_str(content).ok()?;
+    let decoded = serde_json::from_value::<CredentialsFile>(json.clone()).ok();
+    let oauth = decoded
+        .as_ref()
+        .and_then(|credentials| credentials.claude_ai_oauth.as_ref());
+
+    let find_string = |paths: &[&str]| {
+        paths.iter().find_map(|path| {
+            json.pointer(path)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+    };
+
+    let access_token = oauth
+        .and_then(|oauth| oauth.access_token.as_deref())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .or_else(|| {
+            find_string(&[
+                "/claudeAiOauth/accessToken",
+                "/claudeAiOauth/access_token",
+                "/oauth/accessToken",
+                "/oauth/access_token",
+                "/accessToken",
+                "/access_token",
+            ])
+        })?
+        .to_string();
+
+    let subscription_type = oauth
+        .and_then(|oauth| oauth.subscription_type.as_deref())
+        .or_else(|| {
+            find_string(&[
+                "/claudeAiOauth/subscriptionType",
+                "/claudeAiOauth/subscription_type",
+                "/oauth/subscriptionType",
+                "/oauth/subscription_type",
+                "/subscriptionType",
+                "/subscription_type",
+            ])
+        });
+    let rate_limit_tier = oauth
+        .and_then(|oauth| oauth.rate_limit_tier.as_deref())
+        .or_else(|| {
+            find_string(&[
+                "/claudeAiOauth/rateLimitTier",
+                "/claudeAiOauth/rate_limit_tier",
+                "/oauth/rateLimitTier",
+                "/oauth/rate_limit_tier",
+                "/rateLimitTier",
+                "/rate_limit_tier",
+            ])
+        });
+
+    Some(ClaudeOauthCredentials {
+        access_token,
+        subscription_tier: normalize_subscription_tier(subscription_type, rate_limit_tier),
+    })
+}
+
+fn subscription_tier_from_oauth_profile(profile: &serde_json::Value) -> Option<String> {
+    let organization = profile.get("organization")?;
+    normalize_subscription_tier(
+        organization
+            .get("organization_type")
+            .and_then(|value| value.as_str()),
+        organization
+            .get("rate_limit_tier")
+            .and_then(|value| value.as_str()),
+    )
+}
+
+fn resolve_oauth_subscription_tier(
+    profile_result: Result<Option<String>>,
+    cached_tier: Option<String>,
+) -> Option<String> {
+    match profile_result {
+        Ok(profile_tier) => profile_tier.or(cached_tier),
+        Err(error) => {
+            tracing::debug!("Claude OAuth profile fetch failed: {error}");
+            cached_tier
+        }
+    }
+}
+
+fn select_web_organization(orgs: &serde_json::Value) -> Option<ClaudeWebOrganizationResponse> {
+    if let Ok(decoded) = serde_json::from_value::<Vec<ClaudeWebOrganizationResponse>>(orgs.clone())
+    {
+        let selected = decoded
+            .iter()
+            .find(|org| {
+                org.capabilities
+                    .iter()
+                    .any(|capability| capability.eq_ignore_ascii_case("chat"))
+            })
+            .or_else(|| {
+                decoded.iter().find(|org| {
+                    !(org.capabilities.len() == 1
+                        && org.capabilities[0].eq_ignore_ascii_case("api"))
+                })
+            })
+            .or_else(|| decoded.first())?;
+        return Some(selected.clone());
+    }
+
+    let org = orgs.as_array()?.first()?;
+    Some(ClaudeWebOrganizationResponse {
+        uuid: org.get("uuid")?.as_str()?.to_string(),
+        capabilities: Vec::new(),
+        organization_type: org
+            .get("organization_type")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        rate_limit_tier: org
+            .get("rate_limit_tier")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+    })
+}
+
 impl ClaudeProvider {
     pub fn new(
         credentials_path: Option<String>,
@@ -252,7 +414,7 @@ impl ClaudeProvider {
         Some(home.join(".claude").join(".credentials.json"))
     }
 
-    fn read_oauth_token(&self) -> Option<String> {
+    fn read_oauth_credentials(&self) -> Option<ClaudeOauthCredentials> {
         let path = self
             .credentials_path
             .as_ref()
@@ -264,31 +426,7 @@ impl ClaudeProvider {
         }
 
         let content = std::fs::read_to_string(&path).ok()?;
-        if let Ok(creds) = serde_json::from_str::<CredentialsFile>(&content)
-            && let Some(token) = creds
-                .claude_ai_oauth
-                .and_then(|o| o.access_token)
-                .filter(|t| !t.is_empty())
-        {
-            return Some(token);
-        }
-
-        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-        [
-            "/claudeAiOauth/accessToken",
-            "/claudeAiOauth/access_token",
-            "/oauth/accessToken",
-            "/oauth/access_token",
-            "/accessToken",
-            "/access_token",
-        ]
-        .iter()
-        .find_map(|path| {
-            json.pointer(path)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(ToString::to_string)
-        })
+        parse_oauth_credentials(&content)
     }
 
     fn read_settings(&self) -> Option<(String, Option<String>)> {
@@ -424,24 +562,38 @@ impl Provider for ClaudeProvider {
     async fn fetch_usage(&self) -> Result<UsageData> {
         let mut windows = Vec::new();
         let mut credits = None;
+        let mut subscription_tier = None;
         let mut source = "unknown";
         let admin_api_key = self.configured_admin_api_key();
 
         // Method 1: Try OAuth token (manual config / env var / credentials file)
-        let oauth_token = self
-            .access_token
-            .clone()
-            .or_else(|| {
-                std::env::var("CLAUDE_ACCESS_TOKEN")
-                    .ok()
-                    .filter(|t| !t.is_empty())
-            })
-            .or_else(|| self.read_oauth_token());
+        let configured_oauth_token = self.access_token.clone().or_else(|| {
+            std::env::var("CLAUDE_ACCESS_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+        });
+        let stored_oauth = configured_oauth_token
+            .is_none()
+            .then(|| self.read_oauth_credentials())
+            .flatten();
+        let (oauth_token, cached_subscription_tier) =
+            if let Some(access_token) = configured_oauth_token {
+                (Some(access_token), None)
+            } else if let Some(credentials) = stored_oauth {
+                (
+                    Some(credentials.access_token),
+                    credentials.subscription_tier,
+                )
+            } else {
+                (None, None)
+            };
 
         if let Some(access_token) = oauth_token {
             match self.fetch_via_oauth(&access_token).await {
-                Ok(w) => {
+                Ok((w, profile_tier)) => {
                     windows = w;
+                    subscription_tier =
+                        resolve_oauth_subscription_tier(profile_tier, cached_subscription_tier);
                     source = "oauth";
                 }
                 Err(e) => {
@@ -461,9 +613,10 @@ impl Provider for ClaudeProvider {
             if let Some(session_key) = session_key {
                 tracing::debug!("Using Claude sessionKey");
                 match self.fetch_via_cookie(&session_key).await {
-                    Ok((w, c)) => {
+                    Ok((w, c, tier)) => {
                         windows = w;
                         credits = c;
+                        subscription_tier = tier;
                         source = "cookie";
                     }
                     Err(e) => {
@@ -490,6 +643,7 @@ impl Provider for ClaudeProvider {
                     match self.fetch_via_api_key(&api_key, base_url.as_deref()).await {
                         Ok(w) => {
                             windows = w;
+                            subscription_tier = Some("API".to_string());
                             source = "api_key";
                         }
                         Err(e) => {
@@ -508,6 +662,9 @@ impl Provider for ClaudeProvider {
             match self.fetch_via_admin_api(&api_key, base_url).await {
                 Ok(cost_windows) => {
                     merge_admin_cost_windows(&mut windows, cost_windows);
+                    if source == "unknown" {
+                        subscription_tier = Some("API".to_string());
+                    }
                     source = if source == "unknown" {
                         "admin_api"
                     } else {
@@ -543,6 +700,7 @@ impl Provider for ClaudeProvider {
             provider: self.name().to_string(),
             windows,
             credits,
+            subscription_tier,
             fetched_at: Utc::now(),
             error: None,
         })
@@ -550,39 +708,77 @@ impl Provider for ClaudeProvider {
 }
 
 impl ClaudeProvider {
-    async fn fetch_via_oauth(&self, access_token: &str) -> Result<Vec<UsageWindow>> {
+    async fn fetch_via_oauth(
+        &self,
+        access_token: &str,
+    ) -> Result<(Vec<UsageWindow>, Result<Option<String>>)> {
+        let usage_request = async {
+            let resp = self
+                .client
+                .get("https://api.anthropic.com/api/oauth/usage")
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("anthropic-beta", "oauth-2025-04-20")
+                .send()
+                .await
+                .context("Failed to fetch Claude OAuth usage")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Claude OAuth usage error: {status} - {body}");
+            }
+
+            let usage: serde_json::Value = resp
+                .json()
+                .await
+                .context("Failed to parse Claude OAuth usage response")?;
+
+            let (windows, _) = parse_claude_usage_response(&usage);
+            if windows.is_empty() {
+                anyhow::bail!("Claude OAuth usage response did not contain quota windows");
+            }
+
+            Ok::<_, anyhow::Error>(windows)
+        };
+
+        let profile_request = async {
+            tokio::time::timeout(
+                OAUTH_PROFILE_TIMEOUT,
+                self.fetch_oauth_subscription_tier(access_token),
+            )
+            .await
+            .unwrap_or_else(|_| anyhow::bail!("Claude OAuth profile request timed out"))
+        };
+        let (windows, profile_result) = tokio::join!(usage_request, profile_request);
+        Ok((windows?, profile_result))
+    }
+
+    async fn fetch_oauth_subscription_tier(&self, access_token: &str) -> Result<Option<String>> {
         let resp = self
             .client
-            .get("https://api.anthropic.com/api/oauth/usage")
+            .get("https://api.anthropic.com/api/oauth/profile")
             .header("Authorization", format!("Bearer {access_token}"))
-            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("Content-Type", "application/json")
+            .header("Cache-Control", "no-cache")
             .send()
             .await
-            .context("Failed to fetch Claude OAuth usage")?;
+            .context("Failed to fetch Claude OAuth profile")?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Claude OAuth usage error: {status} - {body}");
+            anyhow::bail!("Claude OAuth profile error: {}", resp.status());
         }
 
-        let usage: serde_json::Value = resp
+        let profile: serde_json::Value = resp
             .json()
             .await
-            .context("Failed to parse Claude OAuth usage response")?;
-
-        let (windows, _) = parse_claude_usage_response(&usage);
-        if windows.is_empty() {
-            anyhow::bail!("Claude OAuth usage response did not contain quota windows");
-        }
-
-        Ok(windows)
+            .context("Failed to parse Claude OAuth profile response")?;
+        Ok(subscription_tier_from_oauth_profile(&profile))
     }
 
     async fn fetch_via_cookie(
         &self,
         session_key: &str,
-    ) -> Result<(Vec<UsageWindow>, Option<CreditsInfo>)> {
+    ) -> Result<(Vec<UsageWindow>, Option<CreditsInfo>, Option<String>)> {
         let orgs: serde_json::Value = self
             .client
             .get("https://claude.ai/api/organizations")
@@ -598,9 +794,13 @@ impl ClaudeProvider {
             .await
             .context("Failed to parse Claude orgs")?;
 
-        let org_id = self
-            .select_web_organization_id(&orgs)
-            .context("No Claude org found in cookie response")?;
+        let org =
+            select_web_organization(&orgs).context("No Claude org found in cookie response")?;
+        let org_id = org.uuid;
+        let subscription_tier = normalize_subscription_tier(
+            org.organization_type.as_deref(),
+            org.rate_limit_tier.as_deref(),
+        );
 
         let usage: serde_json::Value = self
             .client
@@ -628,41 +828,7 @@ impl ClaudeProvider {
             credits = self.fetch_credits_cookie(session_key, &org_id).await.ok();
         }
 
-        Ok((windows, credits))
-    }
-
-    fn select_web_organization_id(&self, orgs: &serde_json::Value) -> Option<String> {
-        if let Ok(decoded) =
-            serde_json::from_value::<Vec<ClaudeWebOrganizationResponse>>(orgs.clone())
-        {
-            let selected = decoded
-                .iter()
-                .find(|org| {
-                    org.capabilities
-                        .iter()
-                        .any(|capability| capability.eq_ignore_ascii_case("chat"))
-                })
-                .or_else(|| {
-                    decoded.iter().find(|org| {
-                        let caps: Vec<String> = org
-                            .capabilities
-                            .iter()
-                            .map(|capability| capability.to_ascii_lowercase())
-                            .collect();
-                        !(caps.len() == 1 && caps[0] == "api")
-                    })
-                })
-                .or_else(|| decoded.first())?;
-
-            tracing::debug!("Selected Claude org: {:?}", selected.name);
-            return Some(selected.uuid.clone());
-        }
-
-        orgs.as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|org| org.get("uuid"))
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
+        Ok((windows, credits, subscription_tier))
     }
 
     async fn fetch_credits_cookie(&self, session_key: &str, org_id: &str) -> Result<CreditsInfo> {
@@ -956,6 +1122,147 @@ mod tests {
         assert!(is_admin_api_key("sk-ant-admin01-example"));
         assert!(is_admin_api_key("sk-ant-admin-legacy"));
         assert!(!is_admin_api_key("sk-ant-api03-example"));
+    }
+
+    #[test]
+    fn normalizes_supported_subscription_tiers_and_max_levels() {
+        assert_eq!(
+            normalize_subscription_tier(Some("claude_pro"), None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            normalize_subscription_tier(Some("max"), Some("default_claude_max_5x")).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            normalize_subscription_tier(Some("claude_max"), Some("default_claude_max_20x"))
+                .as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(
+            normalize_subscription_tier(Some("claude_team"), None).as_deref(),
+            Some("Team")
+        );
+        assert_eq!(
+            normalize_subscription_tier(Some("enterprise"), None).as_deref(),
+            Some("Enterprise")
+        );
+        assert_eq!(
+            normalize_subscription_tier(Some("claude_free"), None).as_deref(),
+            Some("Free")
+        );
+        assert_eq!(
+            normalize_subscription_tier(Some("api"), None).as_deref(),
+            Some("API")
+        );
+    }
+
+    #[test]
+    fn parses_cached_oauth_subscription_metadata() {
+        let credentials = parse_oauth_credentials(
+            r#"{
+                "claudeAiOauth": {
+                    "accessToken": "redacted-test-token",
+                    "refreshToken": "redacted-refresh-token",
+                    "subscriptionType": "max",
+                    "rateLimitTier": "default_claude_max_20x"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(credentials.access_token, "redacted-test-token");
+        assert_eq!(credentials.subscription_tier.as_deref(), Some("Max 20x"));
+    }
+
+    #[test]
+    fn parses_legacy_oauth_metadata_paths() {
+        let credentials = parse_oauth_credentials(
+            r#"{
+                "oauth": {
+                    "access_token": "legacy-redacted-token",
+                    "subscription_type": "claude_pro",
+                    "rate_limit_tier": "default_claude_zero"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(credentials.access_token, "legacy-redacted-token");
+        assert_eq!(credentials.subscription_tier.as_deref(), Some("Pro"));
+    }
+
+    #[test]
+    fn profile_tier_overrides_cached_tier_and_failure_falls_back() {
+        let profile = json!({
+            "organization": {
+                "organization_type": "claude_max",
+                "rate_limit_tier": "default_claude_max_5x"
+            }
+        });
+        let remote = subscription_tier_from_oauth_profile(&profile);
+
+        assert_eq!(
+            resolve_oauth_subscription_tier(Ok(remote), Some("Pro".to_string())).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            resolve_oauth_subscription_tier(
+                Err(anyhow::anyhow!("profile unavailable")),
+                Some("Pro".to_string())
+            )
+            .as_deref(),
+            Some("Pro")
+        );
+    }
+
+    #[test]
+    fn missing_or_unknown_profile_tier_is_not_inferred_as_free() {
+        assert_eq!(
+            subscription_tier_from_oauth_profile(&json!({
+                "organization": {
+                    "billing_type": "apple_subscription"
+                }
+            })),
+            None
+        );
+        assert_eq!(
+            subscription_tier_from_oauth_profile(&json!({
+                "organization": {
+                    "organization_type": "future_plan"
+                }
+            })),
+            None
+        );
+        assert_eq!(normalize_subscription_tier(None, None), None);
+    }
+
+    #[test]
+    fn selects_chat_organization_and_uses_its_tier() {
+        let orgs = json!([
+            {
+                "uuid": "api-only",
+                "capabilities": ["api"],
+                "organization_type": "claude_enterprise"
+            },
+            {
+                "uuid": "chat-org",
+                "capabilities": ["chat", "api"],
+                "organization_type": "claude_max",
+                "rate_limit_tier": "default_claude_max_20x"
+            }
+        ]);
+
+        let selected = select_web_organization(&orgs).unwrap();
+        assert_eq!(selected.uuid, "chat-org");
+        assert_eq!(
+            normalize_subscription_tier(
+                selected.organization_type.as_deref(),
+                selected.rate_limit_tier.as_deref()
+            )
+            .as_deref(),
+            Some("Max 20x")
+        );
     }
 
     #[test]

@@ -122,6 +122,7 @@ impl OllamaProvider {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })
@@ -166,6 +167,7 @@ impl OllamaProvider {
             provider: self.name().to_string(),
             windows,
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

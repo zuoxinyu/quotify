@@ -78,6 +78,7 @@ impl Provider for VertexAiProvider {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

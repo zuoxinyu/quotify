@@ -145,6 +145,7 @@ impl Provider for GeminiProvider {
             provider: self.name().to_string(),
             windows,
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

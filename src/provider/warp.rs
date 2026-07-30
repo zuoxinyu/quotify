@@ -108,6 +108,7 @@ impl Provider for WarpProvider {
                 resets_at,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

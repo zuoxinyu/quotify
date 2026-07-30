@@ -133,6 +133,7 @@ impl Provider for AlibabaTokenProvider {
                 total_granted: (total > 0.0).then_some(total),
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

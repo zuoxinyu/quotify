@@ -120,6 +120,7 @@ impl OpenAiProvider {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })
@@ -171,6 +172,7 @@ impl OpenAiProvider {
                 total_granted: (granted > 0.0).then_some(granted),
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

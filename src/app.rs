@@ -28,7 +28,16 @@ use crate::disclosure::DisclosureAnimation;
 use crate::provider::UsageData;
 
 const CODEX_RESET_DISCLOSURE_KEY: &str = "codex-reset-credits";
-const TREND_DISCLOSURE_HEIGHT: f32 = 142.0;
+const TREND_CAPTION_HEIGHT: f32 = 24.0;
+const TREND_WINDOW_HEADER_HEIGHT: f32 = 22.0;
+const TREND_WINDOW_CHART_HEIGHT: f32 = 96.0;
+const TREND_WINDOW_GAP: f32 = 8.0;
+
+fn trend_disclosure_height(window_count: usize) -> f32 {
+    TREND_CAPTION_HEIGHT
+        + window_count as f32 * (TREND_WINDOW_HEADER_HEIGHT + TREND_WINDOW_CHART_HEIGHT)
+        + window_count.saturating_sub(1) as f32 * TREND_WINDOW_GAP
+}
 
 static COMPONENT_THEME_SETTING: OnceLock<RwLock<String>> = OnceLock::new();
 
@@ -952,7 +961,7 @@ impl QuotifyApp {
         let trend = {
             let history = self.history.read();
             self.trend_cache
-                .get_or_compute(&history, name, 7, chrono::Utc::now(), effective_budget)
+                .get_or_compute(&history, data, 7, chrono::Utc::now(), effective_budget)
         };
         let reset_credits = crate::provider::codex::reset_credits(data);
         let reset_animation = self.disclosure(CODEX_RESET_DISCLOSURE_KEY);
@@ -1179,6 +1188,20 @@ impl QuotifyApp {
             Tag::info().small().outline().child(text).into_any_element()
         });
         let mut status_tags = Vec::new();
+        if let Some(tier) = data
+            .subscription_tier
+            .as_deref()
+            .map(str::trim)
+            .filter(|tier| !tier.is_empty())
+        {
+            status_tags.push(
+                Tag::secondary()
+                    .small()
+                    .outline()
+                    .child(tier.to_string())
+                    .into_any_element(),
+            );
+        }
         if let Some(reset_tag) = reset_tag {
             status_tags.push(reset_tag);
         } else {
@@ -1229,7 +1252,7 @@ impl QuotifyApp {
         &self,
         provider: &str,
         data: &UsageData,
-        trend: Option<Arc<crate::trend_cache::CachedProviderTrend>>,
+        trend: Option<Arc<crate::trend_cache::CachedProviderTrends>>,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1358,7 +1381,7 @@ impl QuotifyApp {
     fn render_trend_section(
         &self,
         provider: &str,
-        trend: &crate::trend_cache::CachedProviderTrend,
+        trends: &crate::trend_cache::CachedProviderTrends,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1366,7 +1389,11 @@ impl QuotifyApp {
         let disclosure_key = format!("trend:{provider_key}");
         let animation = self.disclosure(&disclosure_key);
         let expanded = animation.target_is_open();
-        let trend_text = format_trend_summary(&trend.trend);
+        let window_count = trends.windows.len();
+        let trend_text = format!(
+            "7d trends · {window_count} window{}",
+            if window_count == 1 { "" } else { "s" }
+        );
         let app = cx.entity().downgrade();
         let toggle_key = disclosure_key.clone();
         let weak_text = if is_dark {
@@ -1374,8 +1401,8 @@ impl QuotifyApp {
         } else {
             gpui::rgba(0x0000007f)
         };
-        let (histogram, histogram_height) =
-            Self::render_trend_histogram(&trend.histogram_buckets, is_dark);
+        let (histograms, histogram_height) =
+            Self::render_trend_histograms(&provider_key, &trends.windows, is_dark);
 
         div()
             .mt_2()
@@ -1418,16 +1445,101 @@ impl QuotifyApp {
             .child(Self::render_animated_disclosure(
                 animation,
                 histogram_height,
-                histogram,
+                histograms,
             ))
             .into_any_element()
+    }
+
+    fn render_trend_histograms(
+        provider: &str,
+        trends: &[crate::trend_cache::CachedWindowTrend],
+        is_dark: bool,
+    ) -> (AnyElement, f32) {
+        let weak_text = if is_dark {
+            gpui::rgba(0xffffff7f)
+        } else {
+            gpui::rgba(0x0000007f)
+        };
+        let blocks = trends
+            .iter()
+            .map(|window_trend| {
+                div()
+                    .id(SharedString::from(format!(
+                        "trend-window-{provider}-{}",
+                        window_trend.key.as_str()
+                    )))
+                    .w_full()
+                    .h(px(TREND_WINDOW_HEADER_HEIGHT + TREND_WINDOW_CHART_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(TREND_WINDOW_HEADER_HEIGHT))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .text_color(weak_text)
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(window_trend.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .child(format_trend_metrics(&window_trend.trend)),
+                            ),
+                    )
+                    .child(Self::render_trend_histogram(
+                        &window_trend.histogram_buckets,
+                        is_dark,
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let disclosure_height = trend_disclosure_height(blocks.len());
+
+        (
+            div()
+                .w_full()
+                .h(px(disclosure_height))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .w_full()
+                        .h(px(TREND_CAPTION_HEIGHT))
+                        .flex_none()
+                        .text_size(px(9.0))
+                        .text_color(weak_text)
+                        .child("Latest sample per rolling 24h · relative scale"),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(TREND_WINDOW_GAP))
+                        .children(blocks),
+                )
+                .into_any_element(),
+            disclosure_height,
+        )
     }
 
     fn render_trend_histogram(
         buckets: &[crate::usage_history::ProviderTrendBucket],
         is_dark: bool,
-    ) -> (AnyElement, f32) {
+    ) -> AnyElement {
         let chart_state = crate::usage_history::classify_histogram_buckets(buckets);
+        let bucket_count = buckets.len();
         let bars = buckets
             .iter()
             .enumerate()
@@ -1436,11 +1548,12 @@ impl QuotifyApp {
                     .latest_percent
                     .filter(|value| value.is_finite())
                     .map(|value| value.max(0.0));
+                let days_ago = bucket_count.saturating_sub(index + 1);
                 TrendChartBar {
-                    label: if index == 6 {
+                    label: if days_ago == 0 {
                         "Now".into()
                     } else {
-                        format!("{}d", 6 - index).into()
+                        format!("{days_ago}d").into()
                     },
                     value: latest.unwrap_or(0.0),
                     has_data: latest.is_some(),
@@ -1452,27 +1565,15 @@ impl QuotifyApp {
         } else {
             gpui::rgba(0x0000007f)
         };
-        let disclosure_height = TREND_DISCLOSURE_HEIGHT;
 
-        let histogram = div()
+        div()
             .w_full()
-            .h(px(disclosure_height))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_end()
-                    .w_full()
-                    .h(px(24.0))
-                    .text_size(px(9.0))
-                    .text_color(weak_text)
-                    .child("Latest sample per rolling 24h · relative scale"),
-            )
+            .h(px(TREND_WINDOW_CHART_HEIGHT))
+            .flex_none()
             .child(match chart_state {
                 crate::usage_history::TrendHistogramState::Chart => div()
                     .w_full()
-                    .h(px(118.0))
+                    .h(px(TREND_WINDOW_CHART_HEIGHT))
                     .child(
                         BarChart::new(bars)
                             .x(|bar| bar.label.clone())
@@ -1503,7 +1604,7 @@ impl QuotifyApp {
                     .items_center()
                     .justify_center()
                     .w_full()
-                    .h(px(118.0))
+                    .h(px(TREND_WINDOW_CHART_HEIGHT))
                     .text_size(px(10.0))
                     .text_color(weak_text)
                     .child("Available latest samples round to 0%")
@@ -1513,15 +1614,13 @@ impl QuotifyApp {
                     .items_center()
                     .justify_center()
                     .w_full()
-                    .h(px(118.0))
+                    .h(px(TREND_WINDOW_CHART_HEIGHT))
                     .text_size(px(10.0))
                     .text_color(weak_text)
                     .child("Latest samples unavailable for these buckets")
                     .into_any_element(),
             })
-            .into_any_element();
-
-        (histogram, disclosure_height)
+            .into_any_element()
     }
 
     fn render_codex_reset_details(
@@ -3532,7 +3631,7 @@ fn usage_percent_color(percent: f64, is_dark: bool) -> gpui::Rgba {
     }
 }
 
-fn format_trend_summary(trend: &crate::usage_history::ProviderTrend) -> String {
+fn format_trend_metrics(trend: &crate::usage_history::ProviderTrend) -> String {
     let delta = trend
         .previous_percent
         .map(|previous| trend.latest_percent - previous)
@@ -3547,7 +3646,7 @@ fn format_trend_summary(trend: &crate::usage_history::ProviderTrend) -> String {
         .unwrap_or_else(|| "flat".to_string());
 
     format!(
-        "7d trend: avg {:.0}% · peak {:.0}% · {delta} · {} samples",
+        "avg {:.0}% · peak {:.0}% · {delta} · {} samples",
         trend.average_percent, trend.peak_percent, trend.samples
     )
 }

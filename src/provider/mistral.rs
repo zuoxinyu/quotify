@@ -91,6 +91,7 @@ impl Provider for MistralProvider {
                 resets_at: None,
             }],
             credits: None,
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

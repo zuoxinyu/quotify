@@ -47,6 +47,7 @@ fn usage_data_from_cost(cost: f64, fetched_at: DateTime<Utc>) -> UsageData {
             resets_at: None,
         }],
         credits: None,
+        subscription_tier: None,
         fetched_at,
         error: None,
     }

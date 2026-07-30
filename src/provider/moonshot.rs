@@ -121,6 +121,7 @@ impl Provider for MoonshotProvider {
                 total_granted: granted,
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

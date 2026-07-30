@@ -170,6 +170,8 @@ pub struct UsageData {
     pub provider: String,
     pub windows: Vec<UsageWindow>,
     pub credits: Option<CreditsInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_tier: Option<String>,
     pub fetched_at: DateTime<Utc>,
     pub error: Option<String>,
 }

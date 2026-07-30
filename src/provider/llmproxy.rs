@@ -112,6 +112,7 @@ impl Provider for LlmProxyProvider {
                 total_granted: limit,
                 topped_up: None,
             }),
+            subscription_tier: None,
             fetched_at: Utc::now(),
             error: None,
         })

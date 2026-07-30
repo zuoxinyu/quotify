@@ -581,6 +581,7 @@ mod tests {
             provider: provider.to_string(),
             windows,
             credits: None,
+            subscription_tier: None,
             fetched_at,
             error: error.map(str::to_string),
         }
