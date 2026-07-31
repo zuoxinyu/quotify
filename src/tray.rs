@@ -201,21 +201,11 @@ unsafe extern "system" fn tray_wnd_proc(
                         let _ = SetForegroundWindow(hwnd);
 
                         if let Ok(hmenu) = CreatePopupMenu() {
-                            let _ = AppendMenuW(
-                                hmenu,
-                                MF_STRING,
-                                IDM_SHOW,
-                                w!("显示面板 (Show Details)"),
-                            );
-                            let _ = AppendMenuW(
-                                hmenu,
-                                MF_STRING,
-                                IDM_REFRESH,
-                                w!("立即刷新 (Refresh Now)"),
-                            );
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_SHOW, w!("Show Details"));
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_REFRESH, w!("Refresh Now"));
                             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_ABOUT, w!("关于 (About)"));
-                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("退出 (Quit)"));
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_ABOUT, w!("About"));
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("Quit"));
 
                             let _ = TrackPopupMenu(
                                 hmenu,
