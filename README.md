@@ -123,7 +123,17 @@ are surfaced when the upstream response or local credentials expose them.
    cargo run -- tray
    ```
 
-4. **Build a Production Release**:
+4. **Open a Regular Window for UI Validation**:
+   ```powershell
+   cargo run -- window
+   ```
+   This opens a normal, resizable `Quotify Window` that uses the real local
+   configuration and provider data without creating another tray icon, writing
+   duplicate history samples, or sending notifications. It can run alongside
+   the tray app and provides a stable window target for accessibility and UI
+   automation tools.
+
+5. **Build a Production Release**:
    ```powershell
    cargo build --release
    ```

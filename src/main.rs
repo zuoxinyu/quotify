@@ -217,6 +217,8 @@ enum Commands {
     },
     Init,
     Tray,
+    /// Open Quotify as a regular desktop window without creating a tray icon.
+    Window,
     Uninstall {
         #[arg(long, help = "Keep configuration and history files")]
         keep_data: bool,
@@ -1347,12 +1349,28 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Window => {
+            #[cfg(not(test))]
+            run_window(config, config_path)?;
+        }
         Commands::Uninstall { keep_data } => {
             run_uninstall(keep_data)?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn window_subcommand_parses() {
+        let cli = Cli::try_parse_from(["quotify", "window"]).expect("window should parse");
+
+        assert!(matches!(cli.command, Some(Commands::Window)));
+    }
 }
 
 fn run_uninstall(keep_data: bool) -> Result<()> {
@@ -1767,6 +1785,221 @@ mod app_assets_tests {
             assert!(asset.starts_with(b"<svg"), "invalid SVG at {path}");
         }
     }
+}
+
+#[cfg(not(test))]
+fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>) -> Result<()> {
+    tray::ACTIVE_PAGE.store(0, Ordering::SeqCst);
+    tray::WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+
+    let history = Arc::new(RwLock::new(usage_history::UsageHistory::load()));
+    let cached_data = history.read().latest_successful();
+    let data: Arc<RwLock<Vec<UsageData>>> = Arc::new(RwLock::new(cached_data));
+    let last_refresh: Arc<RwLock<chrono::DateTime<chrono::Utc>>> = Arc::new(RwLock::new(
+        history
+            .read()
+            .entries
+            .last()
+            .map(|entry| entry.fetched_at)
+            .unwrap_or_else(chrono::Utc::now),
+    ));
+    let active_provider = Arc::new(RwLock::new(
+        config.general.active_provider.trim().to_string(),
+    ));
+
+    let refresh_interval = config.general.refresh_interval.max(10);
+    let data_bg = data.clone();
+    let last_refresh_bg = last_refresh.clone();
+    let history_bg = history.clone();
+    let config_bg = config.clone();
+    let config_path_bg = config_path.clone();
+    let active_provider_bg = active_provider.clone();
+
+    // The regular-window process may run beside the tray process. Refresh real
+    // provider data for visual and interaction testing, but keep the results in
+    // memory so this auxiliary mode cannot duplicate history or notifications.
+    std::thread::spawn(move || {
+        let bg_rt = tokio::runtime::Runtime::new().expect("Failed to create background runtime");
+        let refresh_interval_duration = std::time::Duration::from_secs(refresh_interval);
+        let mut last_fetch: Option<std::time::Instant> = None;
+
+        loop {
+            let refresh_request = tray::take_refresh_request();
+            let now = std::time::Instant::now();
+            let elapsed = last_fetch.map(|last| now.saturating_duration_since(last));
+            if refresh_request.is_some()
+                || elapsed.is_none_or(|elapsed| elapsed >= refresh_interval_duration)
+            {
+                let fetch_config = load_runtime_config(config_path_bg.as_ref(), &config_bg);
+                let mut results = bg_rt.block_on(fetch_all_providers(&fetch_config));
+                let current_config = load_runtime_config(config_path_bg.as_ref(), &fetch_config);
+
+                {
+                    let history = history_bg.read();
+                    if history.carry_forward_codex_reset_credits(&mut results, chrono::Utc::now()) {
+                        tracing::debug!(
+                            "Carried forward unexpired Codex reset credits in window mode"
+                        );
+                    }
+                }
+                for result in &mut results {
+                    apply_provider_budget(&current_config, result);
+                }
+
+                *active_provider_bg.write() =
+                    current_config.general.active_provider.trim().to_string();
+                *data_bg.write() = results;
+                *last_refresh_bg.write() = chrono::Utc::now();
+                trigger_gui_update();
+                last_fetch = Some(std::time::Instant::now());
+                continue;
+            }
+
+            let wait_for = refresh_interval_duration.saturating_sub(elapsed.unwrap_or_default());
+            tray::wait_for_refresh_or_timeout(wait_for);
+        }
+    });
+
+    let data_window = data.clone();
+    let last_refresh_window = last_refresh.clone();
+    let history_window = history.clone();
+    let config_window = config.clone();
+    let config_path_window = config_path.clone();
+    let active_provider_window = active_provider.clone();
+
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<()>(100);
+    let _ = UPDATE_CHANNEL.set(update_tx);
+
+    let app = gpui::Application::new().with_assets(AppAssets);
+    app.run(move |cx| {
+        gpui_component::init(cx);
+        app::apply_component_theme(&config_window.general.theme, None, cx);
+
+        let window_options = gpui::WindowOptions {
+            window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+                origin: gpui::Point {
+                    x: gpui::px(120.0),
+                    y: gpui::px(120.0),
+                },
+                size: gpui::size(gpui::px(400.0), gpui::px(720.0)),
+            })),
+            window_min_size: Some(gpui::size(gpui::px(400.0), gpui::px(520.0))),
+            focus: true,
+            show: true,
+            kind: gpui::WindowKind::Normal,
+            is_movable: true,
+            is_resizable: true,
+            is_minimizable: true,
+            window_background: gpui::WindowBackgroundAppearance::Opaque,
+            ..Default::default()
+        };
+
+        let backdrop_dark = match config_window.general.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => matches!(
+                cx.window_appearance(),
+                gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+            ),
+        };
+        let backdrop_setting = config_window.general.backdrop.clone();
+
+        let view = cx.new(|cx| {
+            app::QuotifyApp::new(
+                data_window,
+                last_refresh_window,
+                config_window,
+                config_path_window,
+                active_provider_window,
+                history_window,
+                cx,
+            )
+        });
+
+        let root_view = view.clone();
+        let created_hwnd = Arc::new(OnceLock::new());
+        let created_hwnd_for_builder = created_hwnd.clone();
+        let window_handle = cx
+            .open_window(window_options, move |window, cx| {
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = window.window_handle()
+                    && let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw()
+                {
+                    let hwnd = HWND(win32_handle.hwnd.get() as *mut std::ffi::c_void);
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
+                        let _ = SetWindowTextW(hwnd, windows::core::w!("Quotify Window"));
+                    }
+                    let _ = created_hwnd_for_builder.set(tray::SendHWND::new(hwnd));
+                }
+                cx.new(|cx| gpui_component::Root::new(root_view, window, cx))
+            })
+            .expect("failed to open regular window");
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                cx.observe_window_appearance(window, move |_, window, cx| {
+                    let theme_setting = app::current_component_theme_setting();
+                    if theme_setting == "system" {
+                        let dark = matches!(
+                            window.appearance(),
+                            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                        );
+                        refresh_current_backdrop(dark);
+                    }
+                    app::apply_component_theme(&theme_setting, Some(window), cx);
+                    cx.notify();
+                })
+                .detach();
+            })
+            .expect("failed to observe regular window appearance");
+
+        let created_hwnd = created_hwnd.get().copied();
+        std::thread::spawn(move || {
+            let Some(shwnd) = created_hwnd else {
+                tracing::error!("GPUI did not publish a native HWND for window mode");
+                return;
+            };
+
+            let _ = tray::MAIN_HWND.set(shwnd);
+            apply_backdrop(shwnd.raw(), backdrop_dark, &backdrop_setting);
+            trigger_gui_update();
+        });
+
+        cx.spawn(move |cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                while update_rx.recv().await.is_some() {
+                    cx.update(|cx| {
+                        window_handle.update(cx, |_, _, cx| cx.notify()).ok();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+
+        let clock_window = window_handle;
+        cx.spawn(move |cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if cx
+                        .update(|cx| {
+                            clock_window.update(cx, |_, _, cx| cx.notify()).ok();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+    });
+
+    Ok(())
 }
 
 #[cfg(not(test))]
