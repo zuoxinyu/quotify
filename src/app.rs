@@ -899,12 +899,19 @@ impl QuotifyApp {
                             .child(
                                 div()
                                     .flex()
+                                    .w_full()
                                     .gap_3()
-                                    .child(fluent_icon("\u{E721}", 15.0))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .child(fluent_icon("\u{E721}", 15.0)),
+                                    )
                                     .child(
                                         div()
                                             .flex()
                                             .flex_col()
+                                            .flex_1()
+                                            .min_w_0()
                                             .gap_1()
                                             .child(
                                                 div()
@@ -914,8 +921,10 @@ impl QuotifyApp {
                                             )
                                             .child(
                                                 div()
+                                                    .w_full()
                                                     .text_size(px(10.0))
                                                     .text_color(secondary_text)
+                                                    .whitespace_normal()
                                                     .child(
                                                         "Checks known credential locations, environment variables, and installed CLI commands.",
                                                     ),
@@ -926,12 +935,19 @@ impl QuotifyApp {
                             .child(
                                 div()
                                     .flex()
+                                    .w_full()
                                     .gap_3()
-                                    .child(fluent_icon("\u{E8D7}", 15.0))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .child(fluent_icon("\u{E8D7}", 15.0)),
+                                    )
                                     .child(
                                         div()
                                             .flex()
                                             .flex_col()
+                                            .flex_1()
+                                            .min_w_0()
                                             .gap_1()
                                             .child(
                                                 div()
@@ -941,8 +957,10 @@ impl QuotifyApp {
                                             )
                                             .child(
                                                 div()
+                                                    .w_full()
                                                     .text_size(px(10.0))
                                                     .text_color(secondary_text)
+                                                    .whitespace_normal()
                                                     .child(
                                                         "Nothing is uploaded. Detected providers are enabled so Quotify can display their usage.",
                                                     ),
