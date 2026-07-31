@@ -225,6 +225,12 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
         theme.muted = gpui::rgba(0x00000014).into();
         theme.switch = gpui::rgba(0x0000002e).into();
     }
+
+    // Slider uses independent theme tokens even though Switch uses `primary`
+    // directly. Keep their active track and thumb colors identical in both
+    // light and dark modes.
+    theme.slider_bar = theme.primary;
+    theme.slider_thumb = theme.switch_thumb;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,6 +299,7 @@ struct ProviderSelectFieldState {
 
 struct SliderFieldState {
     slider: Entity<SliderState>,
+    ready: bool,
     _subscription: Subscription,
 }
 
@@ -2470,10 +2477,27 @@ impl QuotifyApp {
             });
             SliderFieldState {
                 slider,
+                ready: false,
                 _subscription,
             }
         });
+        let refresh_slider_ready = refresh_slider.read(cx).ready;
+        let refresh_slider_state = refresh_slider.clone();
         let refresh_slider = refresh_slider.read(cx).slider.clone();
+        let expected_refresh_value = refresh_index as f32;
+        if (refresh_slider.read(cx).value().end() - expected_refresh_value).abs() > f32::EPSILON {
+            refresh_slider.update(cx, |state, cx| {
+                state.set_value(expected_refresh_value, window, cx);
+            });
+        }
+        if !refresh_slider_ready {
+            let app = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                refresh_slider_state.update(cx, |state, _| state.ready = true);
+                app.update(cx, |_, cx| cx.notify()).ok();
+            });
+            window.request_animation_frame();
+        }
 
         div()
             .flex()
@@ -2786,6 +2810,7 @@ impl QuotifyApp {
                                     .horizontal()
                                     .w_full()
                                     .h(px(28.0))
+                                    .opacity(if refresh_slider_ready { 1.0 } else { 0.0 })
                             )
                             .child(
                                 div()
@@ -2849,10 +2874,26 @@ impl QuotifyApp {
                 });
                 SliderFieldState {
                     slider,
+                    ready: false,
                     _subscription,
                 }
             });
+        let threshold_slider_ready = threshold_slider.read(cx).ready;
+        let threshold_slider_state = threshold_slider.clone();
         let threshold_slider = threshold_slider.read(cx).slider.clone();
+        if (threshold_slider.read(cx).value().end() - threshold_value).abs() > f32::EPSILON {
+            threshold_slider.update(cx, |state, cx| {
+                state.set_value(threshold_value, window, cx);
+            });
+        }
+        if !threshold_slider_ready {
+            let app = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                threshold_slider_state.update(cx, |state, _| state.ready = true);
+                app.update(cx, |_, cx| cx.notify()).ok();
+            });
+            window.request_animation_frame();
+        }
 
         div()
             .flex()
@@ -3027,7 +3068,12 @@ impl QuotifyApp {
                                             .horizontal()
                                             .disabled(!enabled || !settings.usage_threshold_enabled)
                                             .flex_1()
-                                            .h(px(28.0)),
+                                            .h(px(28.0))
+                                            .opacity(if threshold_slider_ready {
+                                                1.0
+                                            } else {
+                                                0.0
+                                            }),
                                     )
                                     .child(
                                         div()
