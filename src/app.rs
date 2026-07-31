@@ -52,9 +52,34 @@ fn weak_text_color(is_dark: bool) -> Rgba {
     }
 }
 
-/// Keep the standard compact Tag appearance while drawing a one-device-pixel
-/// outline at every Windows DPI scale.
-fn quotify_tag(tag: Tag, scale_factor: f32) -> Tag {
+#[derive(Clone, Copy)]
+enum QuotifyTagTone {
+    Info,
+    Secondary,
+    Success,
+}
+
+/// Keep the standard compact outline Tag appearance while drawing a
+/// one-device-pixel border at every Windows DPI scale. A custom variant changes
+/// the dark-mode semantic colors without adding a text style refinement, which
+/// preserves Tag's built-in `text_xs` size and padding exactly.
+fn quotify_tag(tone: QuotifyTagTone, is_dark: bool, scale_factor: f32) -> Tag {
+    let tag = if is_dark {
+        let color: Hsla = match tone {
+            QuotifyTagTone::Info => gpui::rgb(0x60cdff),
+            QuotifyTagTone::Secondary => gpui::rgb(0xc8c8c8),
+            QuotifyTagTone::Success => gpui::rgb(0x6ccb5f),
+        }
+        .into();
+        Tag::custom(color, color, color)
+    } else {
+        match tone {
+            QuotifyTagTone::Info => Tag::info(),
+            QuotifyTagTone::Secondary => Tag::secondary(),
+            QuotifyTagTone::Success => Tag::success(),
+        }
+    };
+
     tag.small().border(px(1.0 / scale_factor.max(1.0)))
 }
 
@@ -1491,7 +1516,7 @@ impl QuotifyApp {
                         .p_0()
                         .h_auto()
                         .child(
-                            quotify_tag(Tag::info(), scale_factor)
+                            quotify_tag(QuotifyTagTone::Info, is_dark, scale_factor)
                                 .outline()
                                 .gap_1()
                                 .child(format!("{} Resets", resets.available_count))
@@ -1527,7 +1552,7 @@ impl QuotifyApp {
                 used.is_finite() && *used >= 0.0 && limit.is_finite() && *limit > 0.0
             })
             .map(|(used, limit)| {
-                quotify_tag(Tag::info(), scale_factor)
+                quotify_tag(QuotifyTagTone::Info, is_dark, scale_factor)
                     .outline()
                     .child(format!(
                         "Budget: {} USD left",
@@ -1538,7 +1563,7 @@ impl QuotifyApp {
         let budget_configured = self.config.provider_budget(name).is_some();
         let budget_unavailable_tag =
             (budget_configured && budget_tag.is_none() && data.error.is_none()).then(|| {
-                quotify_tag(Tag::secondary(), scale_factor)
+                quotify_tag(QuotifyTagTone::Secondary, is_dark, scale_factor)
                     .outline()
                     .child("Budget unavailable")
                     .into_any_element()
@@ -1549,7 +1574,7 @@ impl QuotifyApp {
                 format_credits_balance(credits.balance),
                 credits.currency
             );
-            quotify_tag(Tag::info(), scale_factor)
+            quotify_tag(QuotifyTagTone::Info, is_dark, scale_factor)
                 .outline()
                 .child(text)
                 .into_any_element()
@@ -1562,7 +1587,7 @@ impl QuotifyApp {
             .filter(|tier| !tier.is_empty())
         {
             status_tags.push(
-                quotify_tag(Tag::secondary(), scale_factor)
+                quotify_tag(QuotifyTagTone::Secondary, is_dark, scale_factor)
                     .outline()
                     .child(tier.to_string())
                     .into_any_element(),
@@ -2139,12 +2164,12 @@ impl QuotifyApp {
                         .unwrap_or_else(|| "Unknown".to_string())
                 };
                 let status_tag = if status.eq_ignore_ascii_case("available") {
-                    quotify_tag(Tag::success(), scale_factor)
+                    quotify_tag(QuotifyTagTone::Success, is_dark, scale_factor)
                         .outline()
                         .child(status_text)
                         .into_any_element()
                 } else {
-                    quotify_tag(Tag::secondary(), scale_factor)
+                    quotify_tag(QuotifyTagTone::Secondary, is_dark, scale_factor)
                         .outline()
                         .child(status_text)
                         .into_any_element()
