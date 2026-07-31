@@ -36,6 +36,28 @@ const TREND_VALUE_LABEL_HEIGHT: f32 = 13.0;
 const TREND_BAR_MAX_WIDTH: f32 = 24.0;
 const PROGRESS_TRACK_HEIGHT: f32 = 8.0;
 
+fn secondary_text_color(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgb(0xa8a8a8)
+    } else {
+        gpui::rgb(0x666666)
+    }
+}
+
+fn weak_text_color(is_dark: bool) -> Rgba {
+    if is_dark {
+        gpui::rgb(0x929292)
+    } else {
+        gpui::rgb(0x808080)
+    }
+}
+
+/// Keep the standard compact Tag appearance while drawing a one-device-pixel
+/// outline at every Windows DPI scale.
+fn quotify_tag(tag: Tag, scale_factor: f32) -> Tag {
+    tag.small().border(px(1.0 / scale_factor.max(1.0)))
+}
+
 fn trend_disclosure_height(window_count: usize) -> f32 {
     TREND_CAPTION_HEIGHT
         + window_count as f32 * TREND_LEGEND_ROW_HEIGHT
@@ -830,7 +852,9 @@ impl Render for QuotifyApp {
                     .child(match active_page {
                         1 => self.render_about(cx).into_any_element(),
                         2 => self.render_settings(is_dark, window, cx).into_any_element(),
-                        _ => self.render_dashboard(is_dark, cx).into_any_element(),
+                        _ => self
+                            .render_dashboard(is_dark, window, cx)
+                            .into_any_element(),
                     })
                     .id("body_view")
                     .overflow_y_scrollbar(),
@@ -858,11 +882,7 @@ impl Render for QuotifyApp {
 impl QuotifyApp {
     fn render_agent_scan_onboarding(&self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
         let app = cx.entity().downgrade();
-        let secondary_text = if is_dark {
-            gpui::rgba(0xffffff99)
-        } else {
-            gpui::rgba(0x00000099)
-        };
+        let secondary_text = secondary_text_color(is_dark);
 
         let status_content = match &self.agent_scan_status {
             AgentScanStatus::Idle => {
@@ -1087,11 +1107,7 @@ impl QuotifyApp {
 
     fn render_header(&self, active_page: u32, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
         let app = cx.entity().downgrade();
-        let weak_text = if is_dark {
-            gpui::rgba(0xffffff99)
-        } else {
-            gpui::rgba(0x00000099)
-        };
+        let weak_text = secondary_text_color(is_dark);
 
         let refresh_age = {
             let last = *self.last_refresh.read();
@@ -1209,7 +1225,12 @@ impl QuotifyApp {
             .into_any_element()
     }
 
-    fn render_dashboard(&mut self, is_dark: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_dashboard(
+        &mut self,
+        is_dark: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let data = self.data.read().clone();
         let all_providers = provider_display_order(&self.config);
         let visible_providers = all_providers
@@ -1227,11 +1248,7 @@ impl QuotifyApp {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(if is_dark {
-                            gpui::rgba(0xffffff7f)
-                        } else {
-                            gpui::rgba(0x0000007f)
-                        })
+                        .text_color(weak_text_color(is_dark))
                         .child("No enabled providers. Configure credentials to enable cards."),
                 )
                 .into_any_element();
@@ -1246,6 +1263,7 @@ impl QuotifyApp {
                     pdata,
                     idx,
                     is_dark,
+                    window.scale_factor(),
                     cx,
                 ));
             }
@@ -1269,6 +1287,7 @@ impl QuotifyApp {
         data: &UsageData,
         row_idx: usize,
         is_dark: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let provider_name = name.to_string();
@@ -1303,11 +1322,13 @@ impl QuotifyApp {
                         show_reset_credits,
                         row_idx,
                         is_dark,
+                        scale_factor,
                         cx,
                     ))
                     .child(self.render_card_body(name, data, trend, is_dark, cx))
                     .when_some(reset_credits, |card, resets| {
-                        let (details, height) = Self::render_codex_reset_details(&resets, is_dark);
+                        let (details, height) =
+                            Self::render_codex_reset_details(&resets, is_dark, scale_factor);
                         card.child(Self::render_animated_disclosure(
                             reset_animation,
                             height,
@@ -1373,6 +1394,7 @@ impl QuotifyApp {
         show_reset_credits: bool,
         row_idx: usize,
         is_dark: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_primary = self.active_provider.read().eq_ignore_ascii_case(name);
@@ -1446,8 +1468,7 @@ impl QuotifyApp {
                         .p_0()
                         .h_auto()
                         .child(
-                            Tag::info()
-                                .small()
+                            quotify_tag(Tag::info(), scale_factor)
                                 .outline()
                                 .gap_1()
                                 .child(format!("{} Resets", resets.available_count))
@@ -1483,8 +1504,7 @@ impl QuotifyApp {
                 used.is_finite() && *used >= 0.0 && limit.is_finite() && *limit > 0.0
             })
             .map(|(used, limit)| {
-                Tag::info()
-                    .small()
+                quotify_tag(Tag::info(), scale_factor)
                     .outline()
                     .child(format!(
                         "Budget: {} USD left",
@@ -1495,8 +1515,7 @@ impl QuotifyApp {
         let budget_configured = self.config.provider_budget(name).is_some();
         let budget_unavailable_tag =
             (budget_configured && budget_tag.is_none() && data.error.is_none()).then(|| {
-                Tag::secondary()
-                    .small()
+                quotify_tag(Tag::secondary(), scale_factor)
                     .outline()
                     .child("Budget unavailable")
                     .into_any_element()
@@ -1507,7 +1526,10 @@ impl QuotifyApp {
                 format_credits_balance(credits.balance),
                 credits.currency
             );
-            Tag::info().small().outline().child(text).into_any_element()
+            quotify_tag(Tag::info(), scale_factor)
+                .outline()
+                .child(text)
+                .into_any_element()
         });
         let mut status_tags = Vec::new();
         if let Some(tier) = data
@@ -1517,8 +1539,7 @@ impl QuotifyApp {
             .filter(|tier| !tier.is_empty())
         {
             status_tags.push(
-                Tag::secondary()
-                    .small()
+                quotify_tag(Tag::secondary(), scale_factor)
                     .outline()
                     .child(tier.to_string())
                     .into_any_element(),
@@ -1718,11 +1739,7 @@ impl QuotifyApp {
         );
         let app = cx.entity().downgrade();
         let toggle_key = disclosure_key.clone();
-        let weak_text = if is_dark {
-            gpui::rgba(0xffffff7f)
-        } else {
-            gpui::rgba(0x0000007f)
-        };
+        let weak_text = weak_text_color(is_dark);
         let (histograms, histogram_height) =
             self.render_trend_histograms(&provider_key, &trends.windows, is_dark, cx);
 
@@ -1779,11 +1796,7 @@ impl QuotifyApp {
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> (AnyElement, f32) {
-        let weak_text = if is_dark {
-            gpui::rgba(0xffffff7f)
-        } else {
-            gpui::rgba(0x0000007f)
-        };
+        let weak_text = weak_text_color(is_dark);
         let bucket_count = trends
             .iter()
             .map(|trend| trend.histogram_buckets.len())
@@ -2082,12 +2095,9 @@ impl QuotifyApp {
     fn render_codex_reset_details(
         resets: &crate::provider::CodexResetCredits,
         is_dark: bool,
+        scale_factor: f32,
     ) -> (AnyElement, f32) {
-        let weak_text = if is_dark {
-            gpui::rgba(0xffffff7f)
-        } else {
-            gpui::rgba(0x0000007f)
-        };
+        let weak_text = weak_text_color(is_dark);
 
         let rows = resets
             .credits
@@ -2105,14 +2115,12 @@ impl QuotifyApp {
                         .unwrap_or_else(|| "Unknown".to_string())
                 };
                 let status_tag = if status.eq_ignore_ascii_case("available") {
-                    Tag::success()
-                        .small()
+                    quotify_tag(Tag::success(), scale_factor)
                         .outline()
                         .child(status_text)
                         .into_any_element()
                 } else {
-                    Tag::secondary()
-                        .small()
+                    quotify_tag(Tag::secondary(), scale_factor)
                         .outline()
                         .child(status_text)
                         .into_any_element()
@@ -2253,11 +2261,7 @@ impl QuotifyApp {
                     .flex()
                     .justify_end()
                     .text_size(px(10.0))
-                    .text_color(if is_dark {
-                        gpui::rgba(0xffffff7f)
-                    } else {
-                        gpui::rgba(0x0000007f)
-                    })
+                    .text_color(weak_text_color(is_dark))
                     .child(reset_time_text(w.resets_at)),
             )
             .into_any_element()
@@ -2412,11 +2416,7 @@ impl QuotifyApp {
         let agent_discovery_app = cx.entity().downgrade();
         let scan_agents_app = cx.entity().downgrade();
         let agent_scan_status = self.agent_scan_status.clone();
-        let secondary_text = if is_dark {
-            gpui::rgba(0xffffff99)
-        } else {
-            gpui::rgba(0x00000099)
-        };
+        let secondary_text = secondary_text_color(is_dark);
         let refresh_intervals = [30_u64, 60, 300, 1800, 3600];
         let refresh_index = refresh_intervals
             .iter()
@@ -2797,11 +2797,7 @@ impl QuotifyApp {
     ) -> AnyElement {
         let settings = &self.config.notifications;
         let enabled = settings.enabled;
-        let secondary_text = if is_dark {
-            gpui::rgba(0xffffff99)
-        } else {
-            gpui::rgba(0x00000099)
-        };
+        let secondary_text = secondary_text_color(is_dark);
 
         let master_app = cx.entity().downgrade();
         let monthly_app = cx.entity().downgrade();
@@ -2905,6 +2901,7 @@ impl QuotifyApp {
                         "Monthly quota reset",
                         "After a provider's monthly quota resets",
                         "notify-monthly-reset",
+                        weak_text_color(is_dark),
                         settings.monthly_resets,
                         !enabled,
                         move |checked, cx| {
@@ -2921,6 +2918,7 @@ impl QuotifyApp {
                         "Weekly quota reset",
                         "After a provider's weekly quota resets",
                         "notify-weekly-reset",
+                        weak_text_color(is_dark),
                         settings.weekly_resets,
                         !enabled,
                         move |checked, cx| {
@@ -2937,6 +2935,7 @@ impl QuotifyApp {
                         "5-hour quota reset",
                         "Session and rolling 5-hour windows",
                         "notify-five-hour-reset",
+                        weak_text_color(is_dark),
                         settings.five_hour_resets,
                         !enabled,
                         move |checked, cx| {
@@ -3027,6 +3026,7 @@ impl QuotifyApp {
                         "Silent refresh failures",
                         "When an automatic refresh starts failing",
                         "notify-silent-refresh-failure",
+                        weak_text_color(is_dark),
                         settings.silent_refresh_failures,
                         !enabled,
                         move |checked, cx| {
@@ -3570,11 +3570,7 @@ impl QuotifyApp {
                 widgets.push(
                     div()
                         .text_size(px(10.0))
-                        .text_color(if is_dark {
-                            gpui::rgba(0xffffff99)
-                        } else {
-                            gpui::rgba(0x00000099)
-                        })
+                        .text_color(secondary_text_color(is_dark))
                         .child("Uses the AWS CLI credential chain and Cost Explorer.")
                         .into_any_element(),
                 );
@@ -3639,11 +3635,7 @@ impl QuotifyApp {
             widgets.push(
                 div()
                     .text_size(px(10.0))
-                    .text_color(if is_dark {
-                        gpui::rgba(0xffffff99)
-                    } else {
-                        gpui::rgba(0x00000099)
-                    })
+                    .text_color(secondary_text_color(is_dark))
                     .child("Uses the latest 30 complete UTC days of USD spend.")
                     .into_any_element(),
             );
@@ -3754,6 +3746,7 @@ fn notification_switch_row(
     title: &'static str,
     description: &'static str,
     id: &'static str,
+    description_color: Rgba,
     checked: bool,
     disabled: bool,
     on_change: impl Fn(bool, &mut App) + 'static,
@@ -3777,7 +3770,7 @@ fn notification_switch_row(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .text_color(gpui::rgba(0x808080cc))
+                        .text_color(description_color)
                         .whitespace_normal()
                         .child(description),
                 ),
