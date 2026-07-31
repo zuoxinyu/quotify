@@ -1255,11 +1255,10 @@ impl QuotifyApp {
         }
 
         let mut cards = Vec::new();
-        for (idx, (name, display_name)) in visible_providers.iter().enumerate() {
+        for (idx, (name, _)) in visible_providers.iter().enumerate() {
             if let Some(pdata) = data.iter().find(|d| d.provider == *name) {
                 cards.push(self.render_provider_card(
                     name,
-                    SharedString::from(*display_name),
                     pdata,
                     idx,
                     is_dark,
@@ -1283,7 +1282,6 @@ impl QuotifyApp {
     fn render_provider_card(
         &mut self,
         name: &str,
-        display_name: SharedString,
         data: &UsageData,
         row_idx: usize,
         is_dark: bool,
@@ -1316,7 +1314,7 @@ impl QuotifyApp {
                     .fill()
                     .child(self.render_card_header(
                         name,
-                        display_name,
+                        SharedString::from(crate::provider::display_name(name).to_owned()),
                         data,
                         reset_credits.as_ref(),
                         show_reset_credits,
@@ -1734,7 +1732,7 @@ impl QuotifyApp {
         let expanded = animation.target_is_open();
         let window_count = trends.windows.len();
         let trend_text = format!(
-            "7d trends · {window_count} window{}",
+            "7d trends · {window_count} window{} ",
             if window_count == 1 { "" } else { "s" }
         );
         let app = cx.entity().downgrade();
@@ -2073,20 +2071,21 @@ impl QuotifyApp {
                 .h(px(disclosure_height))
                 .flex()
                 .flex_col()
+                .child(div().w_full().flex().flex_col().children(legend_rows))
+                .child(div().w_full().h(px(TREND_LEGEND_CHART_GAP)).flex_none())
+                .child(chart)
                 .child(
                     div()
                         .flex()
-                        .items_end()
+                        .items_center()
                         .w_full()
                         .h(px(TREND_CAPTION_HEIGHT))
                         .flex_none()
                         .text_size(px(9.0))
                         .text_color(weak_text)
+                        .text_align(TextAlign::Center)
                         .child("Latest sample per rolling 24h · shared relative scale"),
                 )
-                .child(div().w_full().flex().flex_col().children(legend_rows))
-                .child(div().w_full().h(px(TREND_LEGEND_CHART_GAP)).flex_none())
-                .child(chart)
                 .into_any_element(),
             disclosure_height,
         )
