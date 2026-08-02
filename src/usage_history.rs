@@ -515,8 +515,18 @@ pub fn usage_window_key(
         return Some(UsageWindowKey::budget_30d_usd());
     }
 
-    let tokens = normalized_tokens(&window.label);
     let provider = provider.trim().to_ascii_lowercase();
+    if provider == "codex"
+        && window
+            .unit
+            .as_deref()
+            .is_some_and(|unit| unit.eq_ignore_ascii_case("seconds"))
+        && let Some(period) = crate::provider::codex::rate_limit_period_key(window.limit)
+    {
+        return Some(UsageWindowKey(format!("quota:{period}")));
+    }
+
+    let tokens = normalized_tokens(&window.label);
     if let Some((period, qualifier)) =
         semantic_period_and_qualifier(&provider, &compact_label, &tokens)
     {
@@ -839,6 +849,18 @@ mod tests {
         assert_eq!(opus.as_str(), "quota:weekly:opus");
         assert_ne!(sonnet, opus);
         assert_eq!(opencodego_rolling.as_str(), "quota:5h");
+    }
+
+    #[test]
+    fn codex_duration_reclassifies_historical_primary_window_as_weekly() {
+        let mut mislabelled = window("Session (5h)", 3.0);
+        mislabelled.limit = Some(604_800.0);
+        mislabelled.used = Some(522_049.0);
+        mislabelled.unit = Some("seconds".to_string());
+
+        let key = usage_window_key("codex", &mislabelled).unwrap();
+
+        assert_eq!(key.as_str(), "quota:weekly");
     }
 
     #[test]

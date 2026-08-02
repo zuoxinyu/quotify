@@ -12,19 +12,23 @@ Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) 
 
 ## 📸 Screenshots
 
-![light mode](assets/screenshots/light.png)
+![Quotify dashboard in light mode](assets/screenshots/light.png)
 
 ---
 
 ## ✨ Core Features
 
-* **GPUI-powered UI**: Renders a premium, GPU-accelerated, high-performance interface built using the modern `GPUI` framework (developed by the Zed team).
-* **Mica & Fluent Aesthetics**: Implements native Windows 11 DWM Mica backdrop effects with semi-transparent card layouts.
+* **GPUI-powered UI**: Uses `GPUI` and `gpui-component` for a GPU-accelerated interface with standard inputs, selectors, switches, sliders, tags, and buttons.
+* **Configurable Windows Materials**: Supports system/light/dark themes and explicit Mica, Mica Alt, Acrylic, or no backdrop while preserving the native Windows 11 DWM material layer.
+* **Native Flyout and Window Modes**: Runs as a taskbar-anchored animated flyout in normal use, or as a regular resizable `Quotify Window` for accessibility and UI automation.
 * **Windows Credential Manager Security**: API keys, session tokens, and browser cookies are securely stored using Windows Credential Manager (`quotify/<provider>/<field>`), ensuring no secrets are stored in plain text.
+* **WebView Login Fallback**: OpenCode, MiMo, and Ollama can acquire and securely store credentials through an embedded WebView2 session. Automatic login can be disabled so authentication starts only from the provider card's login button.
 * **Consent-based Agent Discovery**: On first launch, Quotify asks before checking known local credential locations, environment variables, and installed coding-agent CLIs. Discovery stays local and can be changed or rerun from Settings.
 * **Smart Local History Caching**: Usage snapshots are cached locally in `%APPDATA%\quotify\usage-history.json` so you can instantly view your last fetched usage stats while background fetch is running.
-* **Expandable Usage Trends**: Each provider card can expand its 7-day trend summary into a daily usage histogram while preserving gaps where no samples were recorded.
-* **Interactive Drag-to-Reorder**: Reorder provider cards directly in the UI with a simple long-press and drag action. Your custom order is automatically updated in the config file.
+* **Per-window Usage History**: Session, weekly, monthly, billing-cycle, and budget windows retain independent semantic histories even when an upstream provider renames or moves a quota field.
+* **Expandable Usage Trends**: Each provider card can expand its 7-day trend summary into one grouped histogram with a color legend for every quota window, while preserving gaps where no samples were recorded.
+* **Direct Drag-to-Reorder**: Drag a provider card to move it directly through the list without a separate preview. The resulting order is stored in the config file.
+* **Provider Validation in Settings**: The searchable provider selector is alphabetized, supports setting the primary provider, and can test credentials through the same real fetch path used by the background service.
 * **Native Windows Notifications**: Optionally receive quota-reset, usage-threshold, and silent background-refresh failure notifications through Windows. Notifications are completely disabled by default.
 * **Windows Desktop Facilities**: Supports running as a single instance, automatically registering to start with Windows, and writing rotating daily diagnostic logs to `%APPDATA%\quotify\logs`.
 * **CDP Cookie Synchronizer**: Includes a PowerShell script to fetch and sync session cookies via Chrome DevTools Protocol (CDP) for providers that require active browser sessions.
@@ -33,64 +37,42 @@ Quotify is heavily inspired by [CodexBar](https://github.com/steipete/CodexBar) 
 
 ## 🤖 Supported Providers
 
-Quotify covers the 66 provider IDs currently registered by CodexBar through 65
-provider cards: OpenCode and OpenCode Go intentionally share one card, configuration,
-cookie, and history identity. Windows-native credential storage and UI behavior remain:
+Quotify's current catalog mirrors the 66-provider CodexBar snapshot used by the
+project through 65 provider cards. OpenCode and OpenCode Go intentionally share
+one card, configuration, cookie, and history identity.
 
 ### General & Custom LLM Providers
-* **Claude / Anthropic** (Session keys, cookies, or API keys)
-* **Gemini / Antigravity**
-* **OpenAI / Codex**
-* **DeepSeek**
-* **OpenRouter**
-* **Mistral**
-* **Grok / xAI**
-* **z.ai**
-* **MiniMax**
-* **ClinePass**
-* **DeepInfra**
-* **Chutes**
-* **NeuralWatt**
-* **xAI Management**
-* **ai&**
+
+Claude, Codex, OpenAI, Gemini, Antigravity, DeepSeek, OpenRouter, Moonshot,
+Mistral, Grok, z.ai, MiniMax, Kimi, StepFun, Doubao, Venice, Crof, Synthetic,
+and xAI.
 
 ### Coding Assistants
-* **GitHub Copilot** (OAuth token)
-* **Cursor** (Session cookies)
-* **Windsurf / Codeium** (Service keys)
-* **Augment** (Session token)
-* **Codebuff**
-* **Kiro**
-* **Kilo Code**
-* **Devin**
-* **Zed**
-* **Command Code**
-* **Qoder**
+
+OpenCode, ClinePass, GitHub Copilot, Cursor, Windsurf, Factory Droid, Devin,
+Zed, Command Code, Qoder, Codebuff, Kiro, Kilo Code, Augment, JetBrains AI,
+Amp, and MiMo.
 
 ### Cloud & Local Hostings
-* **Azure OpenAI**
-* **AWS Bedrock**
-* **Vertex AI / Google Cloud**
-* **Ollama** (Local API)
-* **LiteLLM**
-* **LLM Proxy / sub2api**
-* **ClawRouter / Wayfinder**
+
+Azure OpenAI, AWS Bedrock, Vertex AI, Ollama, LiteLLM, LLM Proxy, sub2api,
+ClawRouter, Wayfinder, DeepInfra, and GroqCloud.
 
 ### Regional & Specialized Platforms
-* **OpenCode Zen/Go**
-* **Xiaomi MiMo**
-* **Alibaba Token Plan**
-* **StepFun**
-* **Amp**
-* **Alibaba Coding Plan / Qwen Cloud**
-* **Manus / Perplexity / Poe**
-* **Sakana AI / LongCat**
-* **ZenMux / ZoomMate**
+
+ElevenLabs, Warp, Deepgram, Abacus AI, Alibaba Token, Alibaba Coding Plan,
+Qwen Cloud, T3 Chat, Manus, Perplexity, Poe, Sakana AI, Chutes, NeuralWatt,
+LongCat, ZenMux, ai&, and ZoomMate.
 
 Codex, Claude, the merged OpenCode integration, and Cursor retain their individual
 quota windows (for example 5-hour/session, weekly, monthly, or billing-cycle lanes)
 rather than collapsing a provider into one maximum percentage. Subscription tiers
-are surfaced when the upstream response or local credentials expose them.
+are surfaced when the upstream response or local credentials expose them. Codex
+windows are classified from their declared duration instead of assuming that
+`primary_window` always means 5 hours: if OpenAI temporarily exposes only the
+7-day quota in that field, Quotify continues to display and trend it as `Weekly`.
+Available Codex reset credits and their expiration times are shown separately from
+quota progress.
 
 ---
 
@@ -157,6 +139,25 @@ New installations do not scan automatically. The first-launch onboarding prompt 
 
 Discovery can be disabled or rerun from **Settings → General Settings → Local Agent Discovery**. When disabled, Quotify refreshes only providers that were explicitly enabled in Provider Settings.
 
+### Appearance and WebView Login
+
+The Settings page exposes `system`, `dark`, and `light` themes plus `Mica`,
+`Mica Alt`, `Acrylic`, and `None` backdrop choices. Their equivalent config
+values are stored under `[general]`:
+
+```toml
+[general]
+theme = "system"
+backdrop = "mica_alt"
+auto_webview_login = true
+```
+
+When automatic WebView login is enabled, a supported provider can open WebView2
+after its saved credentials are missing or rejected. When it is disabled, the
+provider card shows a login action after authentication fails. OpenCode reuses
+the persistent WebView profile and, when a workspace ID is known, resumes at
+`https://opencode.ai/workspace/{workspace_id}/go`.
+
 ### Windows Notifications
 
 All notifications are disabled by default. Set the master `enabled` switch and then opt in to only the events you want:
@@ -185,7 +186,15 @@ claude = 100.0
 bedrock = 100.0
 ```
 
-Budget progress is currently supported for OpenAI, the Claude Admin API, and AWS Bedrock, and only when the provider returns actual USD spend for the latest 30 complete UTC days. Subscription quota data or balance-only responses are not treated as spending. If spend data is unavailable, the card shows `Budget unavailable`; opted-in silent-refresh failure notifications fire once on that failure edge.
+Budget progress is supported for OpenAI, the Claude Admin API, AWS Bedrock,
+DeepInfra, LiteLLM, ClawRouter, ai&, and xAI when the provider returns a
+compatible USD spend window. OpenAI, Claude, Bedrock, ai&, and xAI use the latest
+30-day spend window: OpenAI, Claude, and Bedrock query the latest 30 complete UTC
+days, while ai& and xAI use their upstream 30-day totals. Providers with a native
+monthly/budget response retain that upstream window. Subscription quota data or
+balance-only responses are not treated as spending. If spend data is unavailable,
+the card shows `Budget unavailable`; opted-in silent-refresh failure notifications
+fire once on that failure edge.
 
 Omitting a provider removes its configured budget. The legacy `CODEXBAR_BEDROCK_BUDGET` environment variable remains accepted as an external fallback, but `[provider_budgets].bedrock` is preferred. Unset the environment variable as well when you want to disable a budget that was supplied through it.
 
@@ -201,7 +210,10 @@ Omitting a provider removes its configured budget. The legacy `CODEXBAR_BEDROCK_
 
 ## 🍪 CDP Cookie Sync Helpers
 
-Some providers (e.g. OpenCode, MiMo, Cursor) require active browser cookies. We provide an interactive PowerShell helper script to automate retrieving these cookies via Chrome DevTools Protocol:
+Some providers require active browser cookies. In addition to the built-in
+WebView2 login path for OpenCode, MiMo, and Ollama, an interactive PowerShell
+helper can import cookies from a Chrome DevTools Protocol session. This is also
+useful for providers such as Cursor that do not use the built-in WebView flow:
 
 ```powershell
 # Run the interactive setup flow
@@ -225,13 +237,14 @@ Some providers (e.g. OpenCode, MiMo, Cursor) require active browser cookies. We 
 
 This project includes a pre-configured GitHub Actions workflow:
 * **CI Checks**: Automatically runs code formatting checks (`cargo fmt`), clippy lints (`cargo clippy`), and runs unit tests on a Windows runner for every pull request and push to the main branches.
-* **Automatic Releases**: When you push a version tag (e.g., `v0.2.0`), GitHub Actions will compile the production binary, create a new GitHub Release, and automatically upload the compiled `quotify.exe` as an asset.
+* **Automatic Releases**: When you push a `vX.Y.Z` version tag, GitHub Actions will compile the production binary, create a new GitHub Release, and upload `quotify.exe` as an asset.
 
 > [!NOTE]
-> **How to release a new version**:
+> **How to release a new version** (replace `X.Y.Z` with the version from
+> `Cargo.toml`):
 > ```bash
-> git tag v0.2.0
-> git push origin v0.2.0
+> git tag vX.Y.Z
+> git push origin vX.Y.Z
 > ```
 
 ---

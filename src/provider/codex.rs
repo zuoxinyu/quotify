@@ -165,6 +165,61 @@ fn resolve_subscription_tier(
         .or_else(|| access_token.and_then(subscription_tier_from_jwt))
 }
 
+/// Classifies Codex quota windows by their declared duration instead of their
+/// position in the response. OpenAI can temporarily move the weekly quota into
+/// `primary_window` when the 5-hour quota is disabled.
+pub fn rate_limit_period_key(limit_window_seconds: Option<f64>) -> Option<&'static str> {
+    let seconds = limit_window_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0)?;
+    let approximately = |expected: f64, tolerance: f64| (seconds - expected).abs() <= tolerance;
+
+    if approximately(5.0 * 60.0 * 60.0, 60.0 * 60.0) {
+        Some("5h")
+    } else if approximately(7.0 * 24.0 * 60.0 * 60.0, 24.0 * 60.0 * 60.0) {
+        Some("weekly")
+    } else if approximately(30.0 * 24.0 * 60.0 * 60.0, 3.0 * 24.0 * 60.0 * 60.0) {
+        Some("monthly")
+    } else {
+        None
+    }
+}
+
+fn rate_limit_label(default_label: &str, limit_window_seconds: Option<f64>) -> String {
+    match rate_limit_period_key(limit_window_seconds) {
+        Some("5h") => "Session (5h)".to_string(),
+        Some("weekly") => "Weekly".to_string(),
+        Some("monthly") => "Monthly".to_string(),
+        _ => default_label.to_string(),
+    }
+}
+
+fn parse_rate_limit_window(default_label: &str, obj: &serde_json::Value) -> Option<UsageWindow> {
+    let pct = obj.get("used_percent").and_then(|value| value.as_f64());
+    let limit_seconds = obj
+        .get("limit_window_seconds")
+        .and_then(|value| value.as_f64());
+    let reset_after = obj
+        .get("reset_after_seconds")
+        .and_then(|value| value.as_f64());
+    let reset_at_epoch = obj.get("reset_at").and_then(|value| value.as_f64());
+
+    if pct.is_none() && limit_seconds.is_none() {
+        return None;
+    }
+
+    let resets_at = reset_at_epoch.and_then(|timestamp| {
+        chrono::DateTime::from_timestamp(timestamp as i64, 0).map(|date| date.to_utc())
+    });
+
+    Some(UsageWindow {
+        label: rate_limit_label(default_label, limit_seconds),
+        used_percent: pct.unwrap_or(0.0),
+        limit: limit_seconds,
+        used: reset_after,
+        unit: Some("seconds".to_string()),
+        resets_at,
+    })
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CodexUsageResponse {
@@ -420,46 +475,17 @@ impl Provider for CodexProvider {
 
                         // Parse rate_limit structure: primary_window / secondary_window
                         if let Some(rate_limit) = usage.get("rate_limit") {
-                            let parse_window = |_key: &str,
-                                                label: &str,
-                                                obj: &serde_json::Value|
-                             -> Option<UsageWindow> {
-                                let pct = obj.get("used_percent").and_then(|v| v.as_f64());
-                                let limit_seconds =
-                                    obj.get("limit_window_seconds").and_then(|v| v.as_f64());
-                                let reset_after =
-                                    obj.get("reset_after_seconds").and_then(|v| v.as_f64());
-                                let reset_at_epoch = obj.get("reset_at").and_then(|v| v.as_f64());
-
-                                if pct.is_none() && limit_seconds.is_none() {
-                                    return None;
-                                }
-
-                                let resets_at = reset_at_epoch.and_then(|ts| {
-                                    chrono::DateTime::from_timestamp(ts as i64, 0)
-                                        .map(|dt| dt.to_utc())
-                                });
-
-                                Some(UsageWindow {
-                                    label: label.to_string(),
-                                    used_percent: pct.unwrap_or(0.0),
-                                    limit: limit_seconds,
-                                    used: reset_after,
-                                    unit: Some("seconds".to_string()),
-                                    resets_at,
-                                })
-                            };
-
-                            // primary_window (session/5h)
+                            // Field position is only a fallback. The declared
+                            // duration is authoritative when OpenAI changes
+                            // which quota occupies the primary slot.
                             if let Some(pw) = rate_limit.get("primary_window")
-                                && let Some(w) = parse_window("primary_window", "Session (5h)", pw)
+                                && let Some(w) = parse_rate_limit_window("Session (5h)", pw)
                             {
                                 windows.push(w);
                             }
 
-                            // secondary_window (weekly)
                             if let Some(sw) = rate_limit.get("secondary_window")
-                                && let Some(w) = parse_window("secondary_window", "Weekly", sw)
+                                && let Some(w) = parse_rate_limit_window("Weekly", sw)
                             {
                                 windows.push(w);
                             }
@@ -583,7 +609,8 @@ mod tests {
 
     use super::{
         CHATGPT_ACCOUNT_ID_HEADER, CODEX_USER_AGENT, CodexAuthContext, CodexProvider,
-        OPENAI_AUTH_CLAIM, RESET_CREDITS_URL, USAGE_URL, jwt_auth_claim, resolve_subscription_tier,
+        OPENAI_AUTH_CLAIM, RESET_CREDITS_URL, USAGE_URL, jwt_auth_claim, parse_rate_limit_window,
+        rate_limit_period_key, resolve_subscription_tier,
     };
 
     fn fake_jwt(plan_type: Option<&str>, account_id: Option<&str>) -> String {
@@ -743,6 +770,39 @@ mod tests {
                 Some(CODEX_USER_AGENT)
             );
         }
+    }
+
+    #[test]
+    fn primary_window_uses_declared_weekly_duration_when_five_hour_limit_is_absent() {
+        let window = parse_rate_limit_window(
+            "Session (5h)",
+            &json!({
+                "used_percent": 3.0,
+                "limit_window_seconds": 604800,
+                "reset_after_seconds": 522049,
+                "reset_at": 1786168915
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(window.label, "Weekly");
+        assert_eq!(rate_limit_period_key(window.limit), Some("weekly"));
+    }
+
+    #[test]
+    fn primary_window_keeps_session_label_for_five_hour_duration() {
+        let window = parse_rate_limit_window(
+            "Session (5h)",
+            &json!({
+                "used_percent": 42.0,
+                "limit_window_seconds": 18000,
+                "reset_after_seconds": 7200
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(window.label, "Session (5h)");
+        assert_eq!(rate_limit_period_key(window.limit), Some("5h"));
     }
 
     #[test]

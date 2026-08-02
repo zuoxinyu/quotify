@@ -110,9 +110,10 @@ pub fn evaluate(
 
             let cadence_period = quota_period_from_reset_cadence(previous_window, current_window);
             if let Some(period) =
-                quota_period(&current_provider.provider, &current_window.label).or(cadence_period)
+                quota_period_for_window(&current_provider.provider, current_window)
+                    .or(cadence_period)
                 && reset_notifications_enabled(settings, period)
-                && quota_period(&previous_provider.provider, &previous_window.label)
+                && quota_period_for_window(&previous_provider.provider, previous_window)
                     .or(cadence_period)
                     == Some(period)
                 && reset_happened(previous_window, current_window, now)
@@ -350,12 +351,12 @@ fn matching_previous_window<'a>(
         return Some(exact);
     }
 
-    let period = quota_period(&current.provider, &target.label)?;
+    let period = quota_period_for_window(&current.provider, target)?;
     let current_candidates = current
         .windows
         .iter()
         .filter(|window| is_notifiable_window(window))
-        .filter(|window| quota_period(&current.provider, &window.label) == Some(period))
+        .filter(|window| quota_period_for_window(&current.provider, window) == Some(period))
         .count();
     if current_candidates != 1 {
         return None;
@@ -365,7 +366,7 @@ fn matching_previous_window<'a>(
         .windows
         .iter()
         .filter(|window| is_notifiable_window(window))
-        .filter(|window| quota_period(&previous.provider, &window.label) == Some(period));
+        .filter(|window| quota_period_for_window(&previous.provider, window) == Some(period));
     let candidate = previous_candidates.next()?;
     if previous_candidates.next().is_some() {
         return None;
@@ -505,6 +506,24 @@ fn quota_period(provider: &str, label: &str) -> Option<QuotaPeriod> {
     }
 
     None
+}
+
+fn quota_period_for_window(provider: &str, window: &UsageWindow) -> Option<QuotaPeriod> {
+    if provider.trim().eq_ignore_ascii_case("codex")
+        && window
+            .unit
+            .as_deref()
+            .is_some_and(|unit| unit.eq_ignore_ascii_case("seconds"))
+    {
+        match crate::provider::codex::rate_limit_period_key(window.limit) {
+            Some("5h") => return Some(QuotaPeriod::FiveHour),
+            Some("weekly") => return Some(QuotaPeriod::Weekly),
+            Some("monthly") => return Some(QuotaPeriod::Monthly),
+            _ => {}
+        }
+    }
+
+    quota_period(provider, &window.label)
 }
 
 fn is_notifiable_window(window: &UsageWindow) -> bool {
@@ -803,6 +822,32 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn codex_duration_matches_mislabelled_primary_window_to_weekly_window() {
+        let mut previous_window = window("Session (5h)", 79.0, None);
+        previous_window.limit = Some(604_800.0);
+        previous_window.used = Some(522_049.0);
+        previous_window.unit = Some("seconds".to_string());
+        let previous = usage("codex", vec![previous_window], None, at(10, 0));
+        let baseline_history = history(vec![entry(at(10, 0), vec![previous])]);
+
+        let mut current_window = window("Weekly", 80.0, None);
+        current_window.limit = Some(604_800.0);
+        current_window.used = Some(518_400.0);
+        current_window.unit = Some("seconds".to_string());
+        let current = vec![usage("codex", vec![current_window], None, at(10, 5))];
+
+        assert_eq!(
+            evaluate(&settings(), &baseline_history, &current, at(10, 5), true),
+            vec![NotificationEvent::UsageThresholdExceeded {
+                provider: "codex".to_string(),
+                window_label: "Weekly".to_string(),
+                used_percent: 80.0,
+                threshold_percent: 80.0,
+            }]
+        );
     }
 
     #[test]
