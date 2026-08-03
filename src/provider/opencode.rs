@@ -737,7 +737,10 @@ fn parse_subscription_usage(body: &str) -> (Vec<UsageWindow>, Option<CreditsInfo
 fn usage_window(label: &str, pct: f64, reset_in_sec: Option<f64>) -> UsageWindow {
     UsageWindow {
         label: label.to_string(),
-        used_percent: normalize_percent(pct),
+        // Callers normalize their source-specific units before constructing a
+        // display window. Applying that conversion here would turn a valid
+        // one-percent value into 100 percent.
+        used_percent: pct.clamp(0.0, 100.0),
         limit: None,
         used: None,
         unit: None,
@@ -797,7 +800,12 @@ fn parse_window_object(
         "renew_at",
     ];
 
-    let direct_percent = map_number_by_keys(usage, PERCENT_KEYS);
+    // OpenCode's original `usagePercent` field is already expressed in percent
+    // units, including values such as `1` for one percent. The broader parser
+    // below also accepts fraction-style aliases, so retain the matched field's
+    // unit instead of treating this specific OpenCode field as a fraction.
+    let opencode_usage_percent = map_number_by_keys(usage, &["usagePercent"]);
+    let direct_percent = opencode_usage_percent.or_else(|| map_number_by_keys(usage, PERCENT_KEYS));
     let percent = direct_percent.or_else(|| {
         let used =
             map_number_by_keys(usage, &["used", "usage", "consumed", "count", "usedTokens"])?;
@@ -807,7 +815,9 @@ fn parse_window_object(
         )?;
         (limit > 0.0).then_some((used / limit) * 100.0)
     })?;
-    let percent = if direct_percent.is_some() {
+    let percent = if opencode_usage_percent.is_some() {
+        percent.clamp(0.0, 100.0)
+    } else if direct_percent.is_some() {
         normalize_percent(percent)
     } else {
         percent.clamp(0.0, 100.0)
@@ -1039,5 +1049,20 @@ mod tests {
         assert_eq!(windows[1].used_percent, 40.0);
         assert_eq!(windows[2].used_percent, 75.0);
         assert!(windows.iter().all(|window| window.resets_at.is_some()));
+    }
+
+    #[test]
+    fn preserves_opencode_usage_percent_unit_at_one_percent() {
+        let body = r#"{
+            "rollingUsage": {
+                "usagePercent": 1,
+                "resetInSec": 120
+            }
+        }"#;
+
+        let (windows, _) = parse_subscription_usage(body);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Rolling Usage");
+        assert_eq!(windows[0].used_percent, 1.0);
     }
 }
