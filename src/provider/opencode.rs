@@ -911,17 +911,22 @@ fn usage_from_text(body: &str, outer_keys: &[&str]) -> Option<(f64, Option<f64>)
         "resetSec",
     ];
 
-    let percent = outer_keys.iter().find_map(|outer_key| {
-        PERCENT_KEYS
-            .iter()
-            .find_map(|field| regex_after_key_f64(body, outer_key, field))
+    let (percent_field, percent) = outer_keys.iter().find_map(|outer_key| {
+        PERCENT_KEYS.iter().find_map(|field| {
+            regex_after_key_f64(body, outer_key, field).map(|percent| (*field, percent))
+        })
     })?;
     let reset = outer_keys.iter().find_map(|outer_key| {
         RESET_KEYS
             .iter()
             .find_map(|field| regex_after_key_f64(body, outer_key, field))
     });
-    Some((normalize_percent(percent), reset))
+    let percent = if percent_field.eq_ignore_ascii_case("usagePercent") {
+        percent.clamp(0.0, 100.0)
+    } else {
+        normalize_percent(percent)
+    };
+    Some((percent, reset))
 }
 
 fn find_string_matching(
@@ -1064,5 +1069,20 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Rolling Usage");
         assert_eq!(windows[0].used_percent, 1.0);
+    }
+
+    #[test]
+    fn preserves_usage_percent_units_in_text_payloads_for_all_windows() {
+        let body = r#"
+            rollingUsage: $R[1] = { usagePercent: 1, resetInSec: 120 }
+            weeklyUsage: $R[2] = { usagePercent: 1, resetInSec: 240 }
+            monthlyUsage: $R[3] = { usagePercent: 13, resetInSec: 360 }
+        "#;
+
+        let (windows, _) = parse_subscription_usage(body);
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].used_percent, 1.0);
+        assert_eq!(windows[1].used_percent, 1.0);
+        assert_eq!(windows[2].used_percent, 13.0);
     }
 }
