@@ -1233,13 +1233,15 @@ fn publish_provider_results(
     history: &Arc<RwLock<usage_history::UsageHistory>>,
     silent_refresh: bool,
 ) {
+    let fetched_at = chrono::Utc::now();
     {
         let history = history.read();
-        if history.carry_forward_codex_reset_credits(&mut results, chrono::Utc::now()) {
+        if history.carry_forward_codex_reset_credits(&mut results, fetched_at) {
             tracing::debug!(
                 "Carried forward unexpired Codex reset credits after a partial refresh"
             );
         }
+        history.decorate_deepseek_spend_windows(&mut results, fetched_at);
     }
 
     let mut budget_refresh_failures = std::collections::BTreeSet::new();
@@ -1248,7 +1250,6 @@ fn publish_provider_results(
             budget_refresh_failures.insert(result.provider.trim().to_ascii_lowercase());
         }
     }
-    let fetched_at = chrono::Utc::now();
     let notification_events = {
         let history = history.read();
         let mut events = notifications::evaluate(
@@ -1413,6 +1414,8 @@ async fn run_fetch(config: &config::AppConfig, providers: Option<Vec<String>>) -
     });
 
     let mut results = fetch_providers(config, provider_names).await;
+    usage_history::UsageHistory::load()
+        .decorate_deepseek_spend_windows(&mut results, chrono::Utc::now());
     for result in &mut results {
         apply_provider_budget(config, result);
     }
@@ -1836,11 +1839,13 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
 
                 {
                     let history = history_bg.read();
-                    if history.carry_forward_codex_reset_credits(&mut results, chrono::Utc::now()) {
+                    let fetched_at = chrono::Utc::now();
+                    if history.carry_forward_codex_reset_credits(&mut results, fetched_at) {
                         tracing::debug!(
                             "Carried forward unexpired Codex reset credits in window mode"
                         );
                     }
+                    history.decorate_deepseek_spend_windows(&mut results, fetched_at);
                 }
                 for result in &mut results {
                     apply_provider_budget(&current_config, result);

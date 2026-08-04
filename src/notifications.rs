@@ -97,7 +97,7 @@ pub fn evaluate(
         for current_window in current_provider
             .windows
             .iter()
-            .filter(|window| is_notifiable_window(window))
+            .filter(|window| is_notifiable_window(&current_provider.provider, window))
         {
             let Some(previous_window) =
                 matching_previous_window(previous_provider, current_provider, current_window)
@@ -345,7 +345,7 @@ fn matching_previous_window<'a>(
     if let Some(exact) = previous
         .windows
         .iter()
-        .filter(|window| is_notifiable_window(window))
+        .filter(|window| is_notifiable_window(&previous.provider, window))
         .find(|window| normalized_label(&window.label) == target_key)
     {
         return Some(exact);
@@ -355,7 +355,7 @@ fn matching_previous_window<'a>(
     let current_candidates = current
         .windows
         .iter()
-        .filter(|window| is_notifiable_window(window))
+        .filter(|window| is_notifiable_window(&current.provider, window))
         .filter(|window| quota_period_for_window(&current.provider, window) == Some(period))
         .count();
     if current_candidates != 1 {
@@ -365,7 +365,7 @@ fn matching_previous_window<'a>(
     let mut previous_candidates = previous
         .windows
         .iter()
-        .filter(|window| is_notifiable_window(window))
+        .filter(|window| is_notifiable_window(&previous.provider, window))
         .filter(|window| quota_period_for_window(&previous.provider, window) == Some(period));
     let candidate = previous_candidates.next()?;
     if previous_candidates.next().is_some() {
@@ -526,10 +526,11 @@ fn quota_period_for_window(provider: &str, window: &UsageWindow) -> Option<Quota
     quota_period(provider, &window.label)
 }
 
-fn is_notifiable_window(window: &UsageWindow) -> bool {
+fn is_notifiable_window(provider: &str, window: &UsageWindow) -> bool {
     let label = normalized_label(&window.label);
     window.used_percent.is_finite()
         && !matches!(label.as_str(), "error" | "nodata" | "resetcredits")
+        && !crate::usage_history::is_deepseek_calendar_spend_window(provider, &window.label)
 }
 
 fn normalized_label(label: &str) -> String {
@@ -653,6 +654,25 @@ mod tests {
         assert_eq!(quota_period("openai", "Cost 30d"), None);
         assert_eq!(quota_period("other", "Session"), None);
         assert_eq!(quota_period("other", "Rolling Usage"), None);
+    }
+
+    #[test]
+    fn deepseek_calendar_spend_does_not_emit_quota_notifications() {
+        let previous = usage(
+            "deepseek",
+            vec![window("Week Spend", 79.0, Some(at(18, 0)))],
+            None,
+            at(10, 0),
+        );
+        let history = history(vec![entry(at(10, 0), vec![previous])]);
+        let current = vec![usage(
+            "deepseek",
+            vec![window("Week Spend", 90.0, Some(at(18, 0)))],
+            None,
+            at(12, 0),
+        )];
+
+        assert!(evaluate(&settings(), &history, &current, at(12, 0), true).is_empty());
     }
 
     #[test]

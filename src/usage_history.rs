@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -9,12 +9,66 @@ pub struct UsageHistory {
     pub entries: Vec<UsageHistoryEntry>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub budget_refresh_failures: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) deepseek_balance_samples: Vec<DeepSeekBalanceSample>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageHistoryEntry {
     pub fetched_at: DateTime<Utc>,
     pub providers: Vec<crate::provider::UsageData>,
+}
+
+const DEEPSEEK_BALANCE_RETENTION_DAYS: i64 = 40;
+const DEEPSEEK_BALANCE_MAX_SAMPLES: usize = 20_000;
+const DEEPSEEK_BALANCE_HEARTBEAT: Duration = Duration::hours(1);
+const DEEPSEEK_MAX_ATTRIBUTION_GAP: Duration = Duration::hours(2);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct DeepSeekBalanceSample {
+    observed_at: DateTime<Utc>,
+    currency: String,
+    total_balance: f64,
+    granted_balance: f64,
+    topped_up_balance: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepSeekSpendPeriod {
+    Day,
+    Week,
+    Month,
+}
+
+impl DeepSeekSpendPeriod {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Day => "Today Spend",
+            Self::Week => "Week Spend",
+            Self::Month => "Month Spend",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Day => "spend:calendar:day",
+            Self::Week => "spend:calendar:week",
+            Self::Month => "spend:calendar:month",
+        }
+    }
+}
+
+pub(crate) fn is_deepseek_calendar_spend_window(provider: &str, label: &str) -> bool {
+    provider.trim().eq_ignore_ascii_case("deepseek") && deepseek_spend_period(label).is_some()
+}
+
+fn deepseek_spend_period(label: &str) -> Option<DeepSeekSpendPeriod> {
+    match compact_normalized(label).as_str() {
+        "todayspend" => Some(DeepSeekSpendPeriod::Day),
+        "weekspend" => Some(DeepSeekSpendPeriod::Week),
+        "monthspend" => Some(DeepSeekSpendPeriod::Month),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +221,9 @@ impl UsageHistory {
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        serde_json::from_str(&content).unwrap_or_default()
+        let mut history: Self = serde_json::from_str(&content).unwrap_or_default();
+        history.bootstrap_deepseek_balance_samples();
+        history
     }
 
     pub fn save(&self) -> Result<()> {
@@ -190,13 +246,82 @@ impl UsageHistory {
             return;
         }
 
+        let fetched_at = Utc::now();
+        self.record_deepseek_balances(&providers, fetched_at);
         self.entries.push(UsageHistoryEntry {
-            fetched_at: Utc::now(),
+            fetched_at,
             providers,
         });
         // Keep enough raw snapshots for a complete seven-day trend at the
         // default five-minute refresh interval, with room for manual refreshes.
         self.prune(30, 2500);
+    }
+
+    /// Adds calendar-day, calendar-week, and calendar-month DeepSeek spend
+    /// windows from the compact balance ledger without mutating persisted
+    /// history. The current sample is included as a preview and is recorded by
+    /// `append` only in the tray process.
+    pub fn decorate_deepseek_spend_windows(
+        &self,
+        providers: &mut [crate::provider::UsageData],
+        now: DateTime<Utc>,
+    ) {
+        let Some(data) = providers
+            .iter_mut()
+            .find(|data| data.provider.eq_ignore_ascii_case("deepseek") && data.error.is_none())
+        else {
+            return;
+        };
+        let Some(sample) = deepseek_balance_sample(data, now) else {
+            return;
+        };
+
+        let mut samples = self.deepseek_balance_samples.clone();
+        record_deepseek_balance_sample(&mut samples, sample.clone());
+        data.windows.retain(|window| {
+            !is_deepseek_calendar_spend_window("deepseek", &window.label)
+                && !is_legacy_deepseek_balance_window(&window.label)
+        });
+        data.windows
+            .extend(deepseek_spend_windows(&samples, now, &sample.currency));
+    }
+
+    fn bootstrap_deepseek_balance_samples(&mut self) {
+        if !self.deepseek_balance_samples.is_empty() {
+            return;
+        }
+
+        let samples = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .providers
+                    .iter()
+                    .find(|data| {
+                        data.provider.eq_ignore_ascii_case("deepseek") && data.error.is_none()
+                    })
+                    .and_then(|data| deepseek_balance_sample(data, entry.fetched_at))
+            })
+            .collect::<Vec<_>>();
+        for sample in samples {
+            record_deepseek_balance_sample(&mut self.deepseek_balance_samples, sample);
+        }
+    }
+
+    fn record_deepseek_balances(
+        &mut self,
+        providers: &[crate::provider::UsageData],
+        observed_at: DateTime<Utc>,
+    ) {
+        let Some(sample) = providers
+            .iter()
+            .find(|data| data.provider.eq_ignore_ascii_case("deepseek") && data.error.is_none())
+            .and_then(|data| deepseek_balance_sample(data, observed_at))
+        else {
+            return;
+        };
+        record_deepseek_balance_sample(&mut self.deepseek_balance_samples, sample);
     }
 
     pub fn latest_successful(&self) -> Vec<crate::provider::UsageData> {
@@ -440,6 +565,248 @@ impl UsageHistory {
     }
 }
 
+fn deepseek_balance_sample(
+    data: &crate::provider::UsageData,
+    observed_at: DateTime<Utc>,
+) -> Option<DeepSeekBalanceSample> {
+    if !data.provider.eq_ignore_ascii_case("deepseek") || data.error.is_some() {
+        return None;
+    }
+
+    let credits = data.credits.as_ref()?;
+    let total_balance = credits.balance;
+    let granted_balance = credits.total_granted.unwrap_or(0.0);
+    let topped_up_balance = credits
+        .topped_up
+        .unwrap_or_else(|| (total_balance - granted_balance).max(0.0));
+    if [total_balance, granted_balance, topped_up_balance]
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return None;
+    }
+    let currency = credits.currency.trim();
+    if currency.is_empty() {
+        return None;
+    }
+
+    Some(DeepSeekBalanceSample {
+        observed_at,
+        currency: currency.to_ascii_uppercase(),
+        total_balance,
+        granted_balance,
+        topped_up_balance,
+    })
+}
+
+fn record_deepseek_balance_sample(
+    samples: &mut Vec<DeepSeekBalanceSample>,
+    sample: DeepSeekBalanceSample,
+) {
+    if samples
+        .last()
+        .is_some_and(|last| !last.currency.eq_ignore_ascii_case(&sample.currency))
+    {
+        // Different currencies cannot share one spend denominator. DeepSeek's
+        // API normally keeps this stable, so a change starts a fresh ledger.
+        samples.clear();
+    }
+
+    if let Some(last) = samples.last() {
+        if sample.observed_at <= last.observed_at {
+            return;
+        }
+        let changed = balance_value_changed(last.total_balance, sample.total_balance)
+            || balance_value_changed(last.granted_balance, sample.granted_balance)
+            || balance_value_changed(last.topped_up_balance, sample.topped_up_balance);
+        let heartbeat_due = sample.observed_at - last.observed_at >= DEEPSEEK_BALANCE_HEARTBEAT;
+        let local_day_changed = sample.observed_at.with_timezone(&Local).date_naive()
+            != last.observed_at.with_timezone(&Local).date_naive();
+        if !changed && !heartbeat_due && !local_day_changed {
+            return;
+        }
+    }
+
+    let cutoff = sample.observed_at - Duration::days(DEEPSEEK_BALANCE_RETENTION_DAYS);
+    samples.push(sample);
+    samples.retain(|sample| sample.observed_at >= cutoff);
+    if samples.len() > DEEPSEEK_BALANCE_MAX_SAMPLES {
+        let remove_count = samples.len() - DEEPSEEK_BALANCE_MAX_SAMPLES;
+        samples.drain(0..remove_count);
+    }
+}
+
+fn balance_value_changed(previous: f64, current: f64) -> bool {
+    (previous - current).abs() > 0.000_001
+}
+
+fn is_legacy_deepseek_balance_window(label: &str) -> bool {
+    compact_normalized(label).starts_with("balance")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeepSeekPeriodBounds {
+    period: DeepSeekSpendPeriod,
+    starts_at: DateTime<Utc>,
+    resets_at: DateTime<Utc>,
+}
+
+fn deepseek_spend_windows(
+    samples: &[DeepSeekBalanceSample],
+    now: DateTime<Utc>,
+    currency: &str,
+) -> Vec<crate::provider::UsageWindow> {
+    deepseek_period_bounds(now)
+        .into_iter()
+        .filter_map(|bounds| {
+            let (spent, funding) = deepseek_period_spend(samples, bounds.starts_at, now, currency)?;
+            let used_percent = if funding > 0.0 {
+                (spent / funding * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            Some(crate::provider::UsageWindow {
+                label: bounds.period.label().to_string(),
+                used_percent,
+                limit: (funding > 0.0).then_some(funding),
+                used: Some(spent),
+                unit: Some(currency.to_string()),
+                resets_at: Some(bounds.resets_at),
+            })
+        })
+        .collect()
+}
+
+fn deepseek_period_bounds(now: DateTime<Utc>) -> [DeepSeekPeriodBounds; 3] {
+    let local_date = now.with_timezone(&Local).date_naive();
+    let day_start = local_midnight_utc(local_date);
+    let next_day = local_midnight_utc(local_date + Duration::days(1));
+
+    let week_start_date =
+        local_date - Duration::days(i64::from(local_date.weekday().num_days_from_monday()));
+    let week_start = local_midnight_utc(week_start_date);
+    let next_week = local_midnight_utc(week_start_date + Duration::days(7));
+
+    let month_start_date = local_date.with_day(1).expect("every month has a first day");
+    let next_month_date = if month_start_date.month() == 12 {
+        NaiveDate::from_ymd_opt(month_start_date.year() + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(month_start_date.year(), month_start_date.month() + 1, 1)
+    }
+    .expect("next month start is a valid date");
+    let month_start = local_midnight_utc(month_start_date);
+    let next_month = local_midnight_utc(next_month_date);
+
+    [
+        DeepSeekPeriodBounds {
+            period: DeepSeekSpendPeriod::Day,
+            starts_at: day_start,
+            resets_at: next_day,
+        },
+        DeepSeekPeriodBounds {
+            period: DeepSeekSpendPeriod::Week,
+            starts_at: week_start,
+            resets_at: next_week,
+        },
+        DeepSeekPeriodBounds {
+            period: DeepSeekSpendPeriod::Month,
+            starts_at: month_start,
+            resets_at: next_month,
+        },
+    ]
+}
+
+fn local_midnight_utc(date: NaiveDate) -> DateTime<Utc> {
+    let naive = date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid naive time");
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .unwrap_or_else(|| Utc.from_utc_datetime(&naive).with_timezone(&Local))
+        .with_timezone(&Utc)
+}
+
+/// Returns conservative spend and the available funding denominator for one
+/// natural period. A nearby sample before the boundary is accepted as the
+/// opening balance; after a long observation gap, decreases are not guessed.
+fn deepseek_period_spend(
+    samples: &[DeepSeekBalanceSample],
+    starts_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    currency: &str,
+) -> Option<(f64, f64)> {
+    let samples = samples
+        .iter()
+        .filter(|sample| {
+            sample.observed_at <= now && sample.currency.eq_ignore_ascii_case(currency)
+        })
+        .collect::<Vec<_>>();
+    let first_in_period = samples
+        .iter()
+        .position(|sample| sample.observed_at >= starts_at)?;
+    let baseline_index = if first_in_period > 0
+        && starts_at - samples[first_in_period - 1].observed_at <= DEEPSEEK_MAX_ATTRIBUTION_GAP
+    {
+        first_in_period - 1
+    } else {
+        first_in_period
+    };
+
+    let opening_balance = samples[baseline_index].total_balance;
+    let mut spent = 0.0;
+    let mut added_funds = 0.0;
+    for pair in samples[baseline_index..].windows(2) {
+        let previous = pair[0];
+        let current = pair[1];
+        if current.observed_at < starts_at || current.observed_at > now {
+            continue;
+        }
+
+        let (interval_spend, interval_added) = deepseek_balance_change(previous, current);
+        added_funds += interval_added;
+        let interval = current.observed_at - previous.observed_at;
+        if interval >= Duration::zero() && interval <= DEEPSEEK_MAX_ATTRIBUTION_GAP {
+            spent += interval_spend;
+        }
+    }
+
+    Some((spent.max(0.0), (opening_balance + added_funds).max(0.0)))
+}
+
+fn deepseek_balance_change(
+    previous: &DeepSeekBalanceSample,
+    current: &DeepSeekBalanceSample,
+) -> (f64, f64) {
+    let components_are_reliable =
+        components_match_total(previous) && components_match_total(current);
+    if components_are_reliable {
+        let (granted_spend, granted_added) =
+            directional_balance_change(previous.granted_balance, current.granted_balance);
+        let (topped_spend, topped_added) =
+            directional_balance_change(previous.topped_up_balance, current.topped_up_balance);
+        (granted_spend + topped_spend, granted_added + topped_added)
+    } else {
+        directional_balance_change(previous.total_balance, current.total_balance)
+    }
+}
+
+fn components_match_total(sample: &DeepSeekBalanceSample) -> bool {
+    let component_total = sample.granted_balance + sample.topped_up_balance;
+    let tolerance = sample
+        .total_balance
+        .abs()
+        .max(component_total.abs())
+        .max(1.0)
+        * 0.000_001
+        + 0.000_001;
+    (sample.total_balance - component_total).abs() <= tolerance
+}
+
+fn directional_balance_change(previous: f64, current: f64) -> (f64, f64) {
+    ((previous - current).max(0.0), (current - previous).max(0.0))
+}
+
 #[derive(Debug)]
 struct WindowTrendAccumulator {
     key: UsageWindowKey,
@@ -509,6 +876,12 @@ pub fn usage_window_key(
         "" | "error" | "nodata" | "resetcredits"
     ) {
         return None;
+    }
+
+    if provider.trim().eq_ignore_ascii_case("deepseek")
+        && let Some(period) = deepseek_spend_period(&window.label)
+    {
+        return Some(UsageWindowKey(period.key().to_string()));
     }
 
     if crate::provider::is_budget_spend_window(provider, &window.label, window.unit.as_deref()) {
@@ -743,6 +1116,118 @@ mod tests {
             used: Some(percent / 100.0 * limit),
             unit: Some("USD".to_string()),
             resets_at: None,
+        }
+    }
+
+    fn deepseek_sample(
+        observed_at: DateTime<Utc>,
+        total_balance: f64,
+        granted_balance: f64,
+        topped_up_balance: f64,
+    ) -> DeepSeekBalanceSample {
+        DeepSeekBalanceSample {
+            observed_at,
+            currency: "CNY".to_string(),
+            total_balance,
+            granted_balance,
+            topped_up_balance,
+        }
+    }
+
+    fn at_day(day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, day, hour, minute, 0)
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+    fn deepseek_spend_counts_recharges_in_the_available_funding_denominator() {
+        let samples = vec![
+            deepseek_sample(at_day(1, 0, 0), 100.0, 0.0, 100.0),
+            deepseek_sample(at_day(1, 1, 0), 80.0, 0.0, 80.0),
+            deepseek_sample(at_day(1, 2, 0), 180.0, 0.0, 180.0),
+            deepseek_sample(at_day(1, 3, 0), 150.0, 0.0, 150.0),
+        ];
+
+        let (spent, funding) =
+            deepseek_period_spend(&samples, at_day(1, 0, 0), at_day(1, 3, 0), "CNY").unwrap();
+
+        assert_eq!(spent, 50.0);
+        assert_eq!(funding, 200.0);
+        assert_eq!(spent / funding * 100.0, 25.0);
+    }
+
+    #[test]
+    fn deepseek_component_balances_separate_spend_from_simultaneous_recharge() {
+        let samples = vec![
+            deepseek_sample(at_day(1, 0, 0), 100.0, 20.0, 80.0),
+            deepseek_sample(at_day(1, 1, 0), 190.0, 10.0, 180.0),
+        ];
+
+        let (spent, funding) =
+            deepseek_period_spend(&samples, at_day(1, 0, 0), at_day(1, 1, 0), "CNY").unwrap();
+
+        assert_eq!(spent, 10.0);
+        assert_eq!(funding, 200.0);
+    }
+
+    #[test]
+    fn deepseek_nearby_pre_boundary_sample_estimates_period_opening_balance() {
+        let samples = vec![
+            deepseek_sample(at_day(1, 23, 55), 100.0, 0.0, 100.0),
+            deepseek_sample(at_day(2, 0, 5), 95.0, 0.0, 95.0),
+        ];
+
+        let (spent, funding) =
+            deepseek_period_spend(&samples, at_day(2, 0, 0), at_day(2, 0, 5), "CNY").unwrap();
+
+        assert_eq!(spent, 5.0);
+        assert_eq!(funding, 100.0);
+    }
+
+    #[test]
+    fn deepseek_first_in_period_sample_is_the_fallback_baseline() {
+        let samples = vec![
+            deepseek_sample(at_day(2, 2, 0), 95.0, 0.0, 95.0),
+            deepseek_sample(at_day(2, 3, 0), 90.0, 0.0, 90.0),
+        ];
+
+        let (spent, funding) =
+            deepseek_period_spend(&samples, at_day(2, 0, 0), at_day(2, 3, 0), "CNY").unwrap();
+
+        assert_eq!(spent, 5.0);
+        assert_eq!(funding, 95.0);
+    }
+
+    #[test]
+    fn deepseek_long_offline_gap_does_not_guess_spend() {
+        let samples = vec![
+            deepseek_sample(at_day(2, 0, 0), 100.0, 0.0, 100.0),
+            deepseek_sample(at_day(2, 5, 0), 60.0, 0.0, 60.0),
+        ];
+
+        let (spent, funding) =
+            deepseek_period_spend(&samples, at_day(2, 0, 0), at_day(2, 5, 0), "CNY").unwrap();
+
+        assert_eq!(spent, 0.0);
+        assert_eq!(funding, 100.0);
+    }
+
+    #[test]
+    fn deepseek_calendar_windows_have_stable_non_quota_history_keys() {
+        for (label, expected) in [
+            ("Today Spend", "spend:calendar:day"),
+            ("Week Spend", "spend:calendar:week"),
+            ("Month Spend", "spend:calendar:month"),
+        ] {
+            let mut spend = window(label, 25.0);
+            spend.used = Some(25.0);
+            spend.limit = Some(100.0);
+            spend.unit = Some("CNY".to_string());
+            assert_eq!(
+                usage_window_key("deepseek", &spend).unwrap().as_str(),
+                expected
+            );
         }
     }
 

@@ -74,6 +74,14 @@ windows are classified from their declared duration instead of assuming that
 Available Codex reset credits and their expiration times are shown separately from
 quota progress.
 
+DeepSeek exposes balances rather than a usage ledger. Quotify therefore derives
+`Today Spend`, `Week Spend` (Monday-based), and `Month Spend` from local-time
+balance samples. Each percentage is `observed spend / (period opening balance +
+detected top-ups and grants)`. Nearby samples around a period boundary establish
+the opening balance; otherwise the first sample inside the period is used. Long
+offline gaps are not guessed, so these figures are conservative estimates and are
+most accurate while Quotify refreshes continuously.
+
 ---
 
 ## 🚀 Getting Started

@@ -1729,7 +1729,7 @@ impl QuotifyApp {
                 !data.provider.eq_ignore_ascii_case("codex")
                     || !crate::provider::codex::is_reset_credits_window(window)
             })
-            .map(|w| Self::render_progress_row(w, is_dark))
+            .map(|w| Self::render_progress_row(provider, w, is_dark))
             .collect::<Vec<_>>();
 
         if let Some(trend_val) = trend {
@@ -2255,9 +2255,14 @@ impl QuotifyApp {
         (details, details_height)
     }
 
-    fn render_progress_row(w: &crate::provider::UsageWindow, is_dark: bool) -> AnyElement {
+    fn render_progress_row(
+        provider: &str,
+        w: &crate::provider::UsageWindow,
+        is_dark: bool,
+    ) -> AnyElement {
         let pct = w.used_percent.clamp(0.0, 100.0);
         let fill_color = usage_percent_color(pct, is_dark);
+        let detail = usage_window_detail_text(provider, w);
 
         div()
             .flex()
@@ -2306,12 +2311,12 @@ impl QuotifyApp {
             )
             .child(
                 div()
-                    .w(px(42.0))
+                    .w(px(52.0))
                     .flex()
                     .justify_end()
                     .text_size(px(10.0))
                     .text_color(weak_text_color(is_dark))
-                    .child(reset_time_text(w.resets_at)),
+                    .child(detail),
             )
             .into_any_element()
     }
@@ -4277,6 +4282,25 @@ fn format_credits_balance(balance: f64) -> String {
     } else {
         format!("{:.2}", balance)
     }
+}
+
+fn usage_window_detail_text(provider: &str, window: &crate::provider::UsageWindow) -> String {
+    if crate::usage_history::is_deepseek_calendar_spend_window(provider, &window.label)
+        && let Some(spent) = window
+            .used
+            .filter(|spent| spent.is_finite() && *spent >= 0.0)
+    {
+        let amount = format_credits_balance(spent);
+        return match window.unit.as_deref().map(str::trim) {
+            Some(unit) if unit.eq_ignore_ascii_case("CNY") => format!("¥{amount}"),
+            Some(unit) if unit.eq_ignore_ascii_case("USD") => format!("${amount}"),
+            Some(unit) if unit.eq_ignore_ascii_case("EUR") => format!("€{amount}"),
+            Some(unit) if !unit.is_empty() => format!("{amount} {unit}"),
+            _ => amount,
+        };
+    }
+
+    reset_time_text(window.resets_at)
 }
 
 fn format_reset_credit_expiry(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> String {

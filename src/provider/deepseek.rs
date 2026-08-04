@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::Deserialize;
 
-use super::{CreditsInfo, Provider, UsageData, UsageWindow, http_client};
+use super::{CreditsInfo, Provider, UsageData, http_client};
 
 pub struct DeepSeekProvider {
     api_key: String,
@@ -74,63 +74,36 @@ impl Provider for DeepSeekProvider {
             .await
             .context("Failed to parse DeepSeek balance response")?;
 
-        let mut windows = Vec::new();
-        let mut credits = None;
+        let info = balance
+            .balance_infos
+            .first()
+            .context("DeepSeek balance response did not contain balance information")?;
+        let total: f64 = info
+            .total_balance
+            .parse()
+            .context("Failed to parse total_balance")?;
+        let granted: f64 = info
+            .granted_balance
+            .parse()
+            .context("Failed to parse granted_balance")?;
+        let topped_up: f64 = info
+            .topped_up_balance
+            .parse()
+            .context("Failed to parse topped_up_balance")?;
 
-        if let Some(info) = balance.balance_infos.first() {
-            let total: f64 = info
-                .total_balance
-                .parse()
-                .context("Failed to parse total_balance")?;
-            let granted: f64 = info
-                .granted_balance
-                .parse()
-                .context("Failed to parse granted_balance")?;
-            let topped_up: f64 = info
-                .topped_up_balance
-                .parse()
-                .context("Failed to parse topped_up_balance")?;
-
-            let total_with_granted = if total > 0.0 { total } else { granted };
-            let used_pct = if total_with_granted > 0.0 {
-                ((total_with_granted - total) / total_with_granted * 100.0).abs()
-            } else {
-                0.0
-            };
-
-            if total > 0.0 {
-                windows.push(UsageWindow {
-                    label: format!("Balance ({})", info.currency),
-                    used_percent: used_pct,
-                    limit: Some(total_with_granted),
-                    used: Some(total_with_granted - total),
-                    unit: Some(info.currency.clone()),
-                    resets_at: None,
-                });
-            }
-
-            credits = Some(CreditsInfo {
-                balance: total,
-                currency: info.currency.clone(),
-                total_granted: Some(granted),
-                topped_up: Some(topped_up),
-            });
-        }
-
-        if windows.is_empty() && credits.is_none() {
-            windows.push(UsageWindow {
-                label: "Balance".to_string(),
-                used_percent: 0.0,
-                limit: None,
-                used: None,
-                unit: None,
-                resets_at: None,
-            });
-        }
+        // DeepSeek exposes current balances rather than a usage endpoint. The
+        // natural-period spend windows are derived from persisted balance
+        // samples by `usage_history` after this fetch completes.
+        let credits = Some(CreditsInfo {
+            balance: total,
+            currency: info.currency.clone(),
+            total_granted: Some(granted),
+            topped_up: Some(topped_up),
+        });
 
         Ok(UsageData {
             provider: self.name().to_string(),
-            windows,
+            windows: Vec::new(),
             credits,
             subscription_tier: None,
             fetched_at: Utc::now(),
