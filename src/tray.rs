@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONUP,
     WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 pub const WM_TRAYICON: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 pub const WM_APP_SHOW: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
@@ -201,11 +201,22 @@ unsafe extern "system" fn tray_wnd_proc(
                         let _ = SetForegroundWindow(hwnd);
 
                         if let Ok(hmenu) = CreatePopupMenu() {
-                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_SHOW, w!("Show Details"));
-                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_REFRESH, w!("Refresh Now"));
+                            let show = wide_null(crate::i18n::text(crate::i18n::Text::ShowDetails));
+                            let refresh =
+                                wide_null(crate::i18n::text(crate::i18n::Text::RefreshNow));
+                            let about = wide_null(crate::i18n::text(crate::i18n::Text::About));
+                            let quit = wide_null(crate::i18n::text(crate::i18n::Text::Quit));
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_SHOW, PCWSTR(show.as_ptr()));
+                            let _ = AppendMenuW(
+                                hmenu,
+                                MF_STRING,
+                                IDM_REFRESH,
+                                PCWSTR(refresh.as_ptr()),
+                            );
                             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
-                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_ABOUT, w!("About"));
-                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("Quit"));
+                            let _ =
+                                AppendMenuW(hmenu, MF_STRING, IDM_ABOUT, PCWSTR(about.as_ptr()));
+                            let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, PCWSTR(quit.as_ptr()));
 
                             let _ = TrackPopupMenu(
                                 hmenu,
@@ -271,6 +282,10 @@ unsafe extern "system" fn tray_wnd_proc(
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
+}
+
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn tooltip_utf16(tooltip: &str) -> [u16; 128] {

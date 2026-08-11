@@ -1,4 +1,5 @@
 use crate::provider::UsageData;
+use crate::{i18n, i18n::Text};
 use windows::Win32::Foundation::TRUE;
 use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
@@ -351,7 +352,11 @@ pub fn tray_tooltip(data: &[UsageData], active_provider: Option<&str>) -> String
         .filter(|provider| !provider.is_empty())
     else {
         let pct = aggregate_percent(data);
-        return format!("Quotify - AI Quota Monitor\nAll providers: {pct:.0}%");
+        return format!(
+            "Quotify - {}\n{}: {pct:.0}%",
+            i18n::text(Text::QuotaMonitor),
+            i18n::text(Text::AllProviders)
+        );
     };
 
     let display_name = provider_display_name(active_provider);
@@ -359,26 +364,44 @@ pub fn tray_tooltip(data: &[UsageData], active_provider: Option<&str>) -> String
         .iter()
         .find(|data| data.provider.eq_ignore_ascii_case(active_provider))
     else {
-        return format!("Quotify - {display_name}\nNo usage data");
+        return format!(
+            "Quotify - {display_name}\n{}",
+            i18n::text(Text::NoUsageData)
+        );
     };
 
     if let Some(error) = provider.error.as_deref() {
-        return format!("Quotify - {display_name}\nError: {error}");
+        return format!(
+            "Quotify - {display_name}\n{}: {error}",
+            i18n::text(Text::Error)
+        );
     }
 
     let windows = valid_windows(provider);
     if windows.is_empty() {
-        return format!("Quotify - {display_name}\nNo usage data");
+        return format!(
+            "Quotify - {display_name}\n{}",
+            i18n::text(Text::NoUsageData)
+        );
     }
 
     let max_pct = provider_percent(provider).unwrap_or(0.0);
     let details = windows
         .into_iter()
         .take(3)
-        .map(|window| format!("{} {:.0}%", window.label, window.used_percent))
+        .map(|window| {
+            format!(
+                "{} {:.0}%",
+                i18n::window_label(&window.label),
+                window.used_percent
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("Quotify - {display_name}\nMax {max_pct:.0}%\n{details}")
+    format!(
+        "Quotify - {display_name}\n{} {max_pct:.0}%\n{details}",
+        i18n::text(Text::Max)
+    )
 }
 
 fn provider_percent(data: &UsageData) -> Option<f64> {

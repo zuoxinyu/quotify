@@ -12,6 +12,8 @@ pub struct GeneralConfig {
     pub provider_order: Vec<String>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default = "default_backdrop")]
     pub backdrop: String,
     #[serde(default = "default_auto_webview_login")]
@@ -29,6 +31,10 @@ fn default_refresh_interval() -> u64 {
 }
 
 fn default_theme() -> String {
+    "system".to_string()
+}
+
+fn default_language() -> String {
     "system".to_string()
 }
 
@@ -55,6 +61,7 @@ impl Default for GeneralConfig {
             active_provider: String::new(),
             provider_order: Vec::new(),
             theme: default_theme(),
+            language: default_language(),
             backdrop: default_backdrop(),
             auto_webview_login: default_auto_webview_login(),
             start_with_windows: false,
@@ -606,6 +613,7 @@ mod tests {
         "#;
         let gen_config: GeneralConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(gen_config.theme, "system");
+        assert_eq!(gen_config.language, "system");
         assert_eq!(gen_config.backdrop, "mica_alt");
         assert!(gen_config.auto_webview_login);
         assert!(gen_config.local_agent_discovery);
@@ -616,11 +624,13 @@ mod tests {
             active_provider = "openai"
             provider_order = []
             theme = "dark"
+            language = "ja"
             backdrop = "acrylic"
             auto_webview_login = false
         "#;
         let gen_config2: GeneralConfig = toml::from_str(toml_str_with_theme).unwrap();
         assert_eq!(gen_config2.theme, "dark");
+        assert_eq!(gen_config2.language, "ja");
         assert_eq!(gen_config2.backdrop, "acrylic");
         assert!(!gen_config2.auto_webview_login);
     }

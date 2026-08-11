@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::config::NotificationConfig;
+use crate::i18n::{self, Language};
 use crate::provider::{UsageData, UsageWindow};
 use crate::usage_history::UsageHistory;
 
@@ -16,11 +17,20 @@ pub enum QuotaPeriod {
 }
 
 impl QuotaPeriod {
-    fn label(self) -> &'static str {
-        match self {
-            Self::FiveHour => "5h",
-            Self::Weekly => "weekly",
-            Self::Monthly => "monthly",
+    fn label(self, language: Language) -> &'static str {
+        match (self, language) {
+            (Self::FiveHour, Language::English) => "5h",
+            (Self::Weekly, Language::English) => "weekly",
+            (Self::Monthly, Language::English) => "monthly",
+            (Self::FiveHour, Language::SimplifiedChinese) => "5 小时",
+            (Self::Weekly, Language::SimplifiedChinese) => "每周",
+            (Self::Monthly, Language::SimplifiedChinese) => "每月",
+            (Self::FiveHour, Language::TraditionalChinese) => "5 小時",
+            (Self::Weekly, Language::TraditionalChinese) => "每週",
+            (Self::Monthly, Language::TraditionalChinese) => "每月",
+            (Self::FiveHour, Language::Japanese) => "5時間",
+            (Self::Weekly, Language::Japanese) => "週間",
+            (Self::Monthly, Language::Japanese) => "月間",
         }
     }
 }
@@ -171,7 +181,15 @@ pub fn evaluate_budget_refresh_failures(
 
 /// Collapse all events from one refresh into the single title/body pair
 /// accepted by the native tray notification backend.
+#[cfg(test)]
 pub fn aggregate(events: &[NotificationEvent]) -> Option<(String, String)> {
+    aggregate_for_language(events, Language::English)
+}
+
+pub fn aggregate_for_language(
+    events: &[NotificationEvent],
+    language: Language,
+) -> Option<(String, String)> {
     if events.is_empty() {
         return None;
     }
@@ -189,12 +207,33 @@ pub fn aggregate(events: &[NotificationEvent]) -> Option<(String, String)> {
         .iter()
         .any(|event| matches!(event, NotificationEvent::BudgetRefreshFailed { .. }));
 
-    let title = match (has_reset, has_threshold, has_failure, has_budget_failure) {
-        (true, false, false, false) => "Quota reset",
-        (false, true, false, false) => "Quota threshold reached",
-        (false, false, true, false) => "Refresh failed",
-        (false, false, false, true) => "Budget refresh failed",
-        _ => "Quotify notifications",
+    let title = match (
+        language,
+        has_reset,
+        has_threshold,
+        has_failure,
+        has_budget_failure,
+    ) {
+        (Language::English, true, false, false, false) => "Quota reset",
+        (Language::English, false, true, false, false) => "Quota threshold reached",
+        (Language::English, false, false, true, false) => "Refresh failed",
+        (Language::English, false, false, false, true) => "Budget refresh failed",
+        (Language::English, _, _, _, _) => "Quotify notifications",
+        (Language::SimplifiedChinese, true, false, false, false) => "额度已重置",
+        (Language::SimplifiedChinese, false, true, false, false) => "用量已达到阈值",
+        (Language::SimplifiedChinese, false, false, true, false) => "刷新失败",
+        (Language::SimplifiedChinese, false, false, false, true) => "预算刷新失败",
+        (Language::SimplifiedChinese, _, _, _, _) => "Quotify 通知",
+        (Language::TraditionalChinese, true, false, false, false) => "額度已重設",
+        (Language::TraditionalChinese, false, true, false, false) => "用量已達到閾值",
+        (Language::TraditionalChinese, false, false, true, false) => "重新整理失敗",
+        (Language::TraditionalChinese, false, false, false, true) => "預算重新整理失敗",
+        (Language::TraditionalChinese, _, _, _, _) => "Quotify 通知",
+        (Language::Japanese, true, false, false, false) => "クォータがリセットされました",
+        (Language::Japanese, false, true, false, false) => "使用量がしきい値に達しました",
+        (Language::Japanese, false, false, true, false) => "更新に失敗しました",
+        (Language::Japanese, false, false, false, true) => "予算の更新に失敗しました",
+        (Language::Japanese, _, _, _, _) => "Quotify の通知",
     }
     .to_string();
 
@@ -206,29 +245,24 @@ pub fn aggregate(events: &[NotificationEvent]) -> Option<(String, String)> {
                 window_label,
                 period,
                 ..
-            } => format!(
-                "{}: {} reset ({})",
-                display_name(provider),
-                single_line(window_label),
-                period.label()
-            ),
+            } => quota_reset_line(language, provider, window_label, *period),
             NotificationEvent::UsageThresholdExceeded {
                 provider,
                 window_label,
                 used_percent,
                 threshold_percent,
-            } => format!(
-                "{}: {} {}% (threshold {}%)",
-                display_name(provider),
-                single_line(window_label),
-                format_percent(*used_percent),
-                format_percent(*threshold_percent)
+            } => threshold_line(
+                language,
+                provider,
+                window_label,
+                *used_percent,
+                *threshold_percent,
             ),
             NotificationEvent::SilentRefreshFailed { provider } => {
-                format!("{}: background refresh failed", display_name(provider))
+                refresh_failure_line(language, provider)
             }
             NotificationEvent::BudgetRefreshFailed { provider } => {
-                format!("{}: 30-day spend data unavailable", display_name(provider))
+                budget_failure_line(language, provider)
             }
         })
         .map(|line| truncate_utf16_with_ellipsis(&line, MAX_NOTIFICATION_LINE_UTF16))
@@ -236,6 +270,68 @@ pub fn aggregate(events: &[NotificationEvent]) -> Option<(String, String)> {
     let body = fit_notification_lines(&lines);
 
     Some((title, body))
+}
+
+fn localized_window_label(language: Language, label: &str) -> String {
+    single_line(i18n::window_label_for(language, label).as_ref())
+}
+
+fn quota_reset_line(
+    language: Language,
+    provider: &str,
+    window_label: &str,
+    period: QuotaPeriod,
+) -> String {
+    let provider = display_name(provider);
+    let window = localized_window_label(language, window_label);
+    let period = period.label(language);
+    match language {
+        Language::English => format!("{provider}: {window} reset ({period})"),
+        Language::SimplifiedChinese => format!("{provider}：{window}已重置（{period}）"),
+        Language::TraditionalChinese => format!("{provider}：{window}已重設（{period}）"),
+        Language::Japanese => format!("{provider}: {window}をリセットしました（{period}）"),
+    }
+}
+
+fn threshold_line(
+    language: Language,
+    provider: &str,
+    window_label: &str,
+    used_percent: f64,
+    threshold_percent: f64,
+) -> String {
+    let provider = display_name(provider);
+    let window = localized_window_label(language, window_label);
+    let used = format_percent(used_percent);
+    let threshold = format_percent(threshold_percent);
+    match language {
+        Language::English => format!("{provider}: {window} {used}% (threshold {threshold}%)"),
+        Language::SimplifiedChinese => format!("{provider}：{window} {used}%（阈值 {threshold}%）"),
+        Language::TraditionalChinese => {
+            format!("{provider}：{window} {used}%（閾值 {threshold}%）")
+        }
+        Language::Japanese => format!("{provider}: {window} {used}%（しきい値 {threshold}%）"),
+    }
+}
+
+fn refresh_failure_line(language: Language, provider: &str) -> String {
+    let provider = display_name(provider);
+    match language {
+        Language::English => format!("{provider}: background refresh failed"),
+        Language::SimplifiedChinese => format!("{provider}：后台刷新失败"),
+        Language::TraditionalChinese => format!("{provider}：背景重新整理失敗"),
+        Language::Japanese => format!("{provider}: バックグラウンド更新に失敗しました"),
+    }
+}
+
+fn budget_failure_line(language: Language, provider: &str) -> String {
+    let provider = display_name(provider);
+    match language {
+        Language::English => format!("{provider}: 30-day spend data unavailable"),
+        Language::SimplifiedChinese => format!("{provider}：无法获取 30 天费用数据"),
+        Language::TraditionalChinese => format!("{provider}：無法取得 30 天費用資料"),
+        Language::Japanese => format!("{provider}: 30日間の支出データを取得できません"),
+    }
 }
 
 fn fit_notification_lines(lines: &[String]) -> String {
@@ -1176,6 +1272,31 @@ mod tests {
         assert!(body.contains("OpenCode: background refresh failed"));
         assert!(body.contains("OpenAI: 30-day spend data unavailable"));
         assert!(!body.contains("secret"));
+    }
+
+    #[test]
+    fn aggregate_localizes_supported_languages() {
+        let events = vec![NotificationEvent::QuotaReset {
+            provider: "codex".to_string(),
+            window_label: "Weekly".to_string(),
+            period: QuotaPeriod::Weekly,
+            next_reset_at: at(18, 0),
+        }];
+
+        for (language, expected_title, expected_body) in [
+            (Language::English, "Quota reset", "Weekly Usage reset"),
+            (Language::SimplifiedChinese, "额度已重置", "周用量已重置"),
+            (Language::TraditionalChinese, "額度已重設", "週用量已重設"),
+            (
+                Language::Japanese,
+                "クォータがリセットされました",
+                "週間使用量をリセット",
+            ),
+        ] {
+            let (title, body) = aggregate_for_language(&events, language).unwrap();
+            assert_eq!(title, expected_title);
+            assert!(body.contains(expected_body), "unexpected body: {body}");
+        }
     }
 
     #[test]

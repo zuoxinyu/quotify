@@ -74,6 +74,9 @@ windows are classified from their declared duration instead of assuming that
 Available Codex reset credits and their expiration times are shown separately from
 quota progress.
 
+The interface can follow the Windows display language or be set explicitly to
+English, Simplified Chinese, Traditional Chinese, or Japanese from Settings.
+
 DeepSeek exposes balances rather than a usage ledger. Quotify therefore derives
 `Today Spend`, `Week Spend` (Monday-based), and `Month Spend` from local-time
 balance samples. Each percentage is `observed spend / (period opening balance +

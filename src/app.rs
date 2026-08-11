@@ -24,6 +24,7 @@ use std::{
 };
 
 use crate::disclosure::DisclosureAnimation;
+use crate::i18n::{self, Text};
 use crate::provider::UsageData;
 
 const CODEX_RESET_DISCLOSURE_KEY: &str = "codex-reset-credits";
@@ -314,10 +315,16 @@ pub struct ProviderDragState {
 struct InputFieldState {
     input: Entity<InputState>,
     masked: bool,
+    placeholder: SharedString,
     _subscription: Subscription,
 }
 
 struct ProviderSelectFieldState {
+    select: Entity<SelectState<SearchableVec<String>>>,
+    _subscription: Subscription,
+}
+
+struct LanguageSelectFieldState {
     select: Entity<SelectState<SearchableVec<String>>>,
     _subscription: Subscription,
 }
@@ -359,6 +366,7 @@ impl QuotifyApp {
         history: Arc<RwLock<crate::usage_history::UsageHistory>>,
         _cx: &mut Context<Self>,
     ) -> Self {
+        i18n::set_current_language(&config.general.language);
         let show_agent_scan_onboarding = !config.general.agent_scan_onboarding_completed;
         Self {
             data,
@@ -383,6 +391,7 @@ impl QuotifyApp {
     }
 
     fn save_config(&self) {
+        i18n::set_current_language(&self.config.general.language);
         let mut config_to_save = self.config.clone();
         crate::secrets::store_and_scrub_config(&mut config_to_save);
         let res = if let Some(ref path) = self.config_path {
@@ -613,20 +622,15 @@ impl QuotifyApp {
                     .spawn(async move {
                         let provider = crate::create_provider(&provider_id_clone, &config)
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "Provider could not be created from the current settings"
-                                )
+                                anyhow::anyhow!(i18n::text(Text::ProviderCouldNotCreate))
                             })?;
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()?;
                         let mut data = rt.block_on(provider.fetch_usage())?;
-                        let budget_unavailable =
-                            crate::apply_provider_budget(&config, &mut data);
+                        let budget_unavailable = crate::apply_provider_budget(&config, &mut data);
                         if budget_unavailable {
-                            anyhow::bail!(
-                                "A 30-day budget is configured, but this provider did not return a 30-day USD spend window"
-                            );
+                            anyhow::bail!(i18n::text(Text::BudgetWindowMissing));
                         }
                         Ok::<UsageData, anyhow::Error>(data)
                     })
@@ -933,11 +937,7 @@ impl QuotifyApp {
                                     .flex()
                                     .w_full()
                                     .gap_3()
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .child(fluent_icon("\u{E721}", 15.0)),
-                                    )
+                                    .child(div().flex_none().child(fluent_icon("\u{E721}", 15.0)))
                                     .child(
                                         div()
                                             .flex()
@@ -949,7 +949,7 @@ impl QuotifyApp {
                                                 div()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_size(px(12.0))
-                                                    .child("Local-only discovery"),
+                                                    .child(i18n::text(Text::LocalOnlyDiscovery)),
                                             )
                                             .child(
                                                 div()
@@ -957,9 +957,9 @@ impl QuotifyApp {
                                                     .text_size(px(10.0))
                                                     .text_color(secondary_text)
                                                     .whitespace_normal()
-                                                    .child(
-                                                        "Checks known credential locations, environment variables, and installed CLI commands.",
-                                                    ),
+                                                    .child(i18n::text(
+                                                        Text::LocalOnlyDiscoveryDescription,
+                                                    )),
                                             ),
                                     ),
                             )
@@ -969,11 +969,7 @@ impl QuotifyApp {
                                     .flex()
                                     .w_full()
                                     .gap_3()
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .child(fluent_icon("\u{E8D7}", 15.0)),
-                                    )
+                                    .child(div().flex_none().child(fluent_icon("\u{E8D7}", 15.0)))
                                     .child(
                                         div()
                                             .flex()
@@ -985,7 +981,7 @@ impl QuotifyApp {
                                                 div()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_size(px(12.0))
-                                                    .child("You stay in control"),
+                                                    .child(i18n::text(Text::YouStayInControl)),
                                             )
                                             .child(
                                                 div()
@@ -993,9 +989,9 @@ impl QuotifyApp {
                                                     .text_size(px(10.0))
                                                     .text_color(secondary_text)
                                                     .whitespace_normal()
-                                                    .child(
-                                                        "Nothing is uploaded. Detected providers are enabled so Quotify can display their usage.",
-                                                    ),
+                                                    .child(i18n::text(
+                                                        Text::YouStayInControlDescription,
+                                                    )),
                                             ),
                                     ),
                             ),
@@ -1009,7 +1005,7 @@ impl QuotifyApp {
                             .gap_2()
                             .child(
                                 Button::new("onboarding_skip_agent_scan")
-                                    .label("Not now")
+                                    .label(i18n::text(Text::NotNow))
                                     .on_click(move |_, _, cx| {
                                         decline_app
                                             .update(cx, |this, cx| {
@@ -1023,7 +1019,7 @@ impl QuotifyApp {
                                 Button::new("onboarding_allow_agent_scan")
                                     .primary()
                                     .child(fluent_icon("\u{E721}", 11.0))
-                                    .child("Allow & Scan")
+                                    .child(i18n::text(Text::AllowAndScan))
                                     .on_click(move |_, _, cx| {
                                         scan_app
                                             .update(cx, |this, cx| {
@@ -1047,26 +1043,22 @@ impl QuotifyApp {
                     div()
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_size(px(13.0))
-                        .child("Scanning for local agents..."),
+                        .child(i18n::text(Text::ScanningAgents)),
                 )
                 .child(
                     div()
                         .text_size(px(10.0))
                         .text_color(secondary_text)
-                        .child("This usually takes only a few seconds."),
+                        .child(i18n::text(Text::ScanFewSeconds)),
                 )
                 .into_any_element(),
             AgentScanStatus::Complete(detected) => {
                 let continue_app = app.clone();
                 let detected_count = detected.len();
                 let result_message = if detected.is_empty() {
-                    "No ready agents were found. You can configure providers manually in Settings."
-                        .to_string()
+                    i18n::text(Text::NoReadyAgentsOnboarding).to_string()
                 } else {
-                    format!(
-                        "Found and enabled {detected_count} local agent{}.",
-                        if detected_count == 1 { "" } else { "s" }
-                    )
+                    i18n::scan_complete_message(detected_count)
                 };
 
                 div()
@@ -1076,7 +1068,7 @@ impl QuotifyApp {
                     .gap_3()
                     .child(
                         Alert::success("agent-scan-complete", result_message)
-                            .title("Scan complete"),
+                            .title(i18n::text(Text::ScanComplete)),
                     )
                     .when(!detected.is_empty(), |view| {
                         view.child(
@@ -1105,7 +1097,7 @@ impl QuotifyApp {
                         div().flex().justify_end().child(
                             Button::new("onboarding_finish_agent_scan")
                                 .primary()
-                                .label("Continue")
+                                .label(i18n::text(Text::Continue))
                                 .on_click(move |_, _, cx| {
                                     continue_app
                                         .update(cx, |this, cx| {
@@ -1140,13 +1132,13 @@ impl QuotifyApp {
                                 div()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_size(px(18.0))
-                                    .child("Welcome to Quotify"),
+                                    .child(i18n::text(Text::WelcomeTitle)),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(secondary_text)
-                                    .child("Find your coding agents and get set up faster."),
+                                    .child(i18n::text(Text::WelcomeSubtitle)),
                             ),
                     ),
             )
@@ -1163,13 +1155,7 @@ impl QuotifyApp {
             let last = *self.last_refresh.read();
             let elapsed = chrono::Utc::now() - last;
             let secs = elapsed.num_seconds();
-            if secs < 0 {
-                "just now".to_string()
-            } else if secs < 60 {
-                format!("{secs}s ago")
-            } else {
-                format!("{}m ago", secs / 60)
-            }
+            i18n::refresh_age(secs)
         };
 
         div()
@@ -1192,7 +1178,7 @@ impl QuotifyApp {
                             .w(px(26.0))
                             .h(px(26.0))
                             .child(fluent_icon("\u{E72B}", 12.0))
-                            .tooltip("Back")
+                            .tooltip(i18n::text(Text::Back))
                             .on_click({
                                 let app = app.clone();
                                 move |_, _, cx| {
@@ -1208,7 +1194,7 @@ impl QuotifyApp {
                             .w(px(26.0))
                             .h(px(26.0))
                             .child(img("assets/icons/quotify.svg").w(px(18.0)).h(px(18.0)))
-                            .tooltip("About Quotify")
+                            .tooltip(i18n::text(Text::AboutQuotify))
                             .on_click({
                                 let app = app.clone();
                                 move |_, _, cx| {
@@ -1222,8 +1208,8 @@ impl QuotifyApp {
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_size(px(16.0))
                             .child(match active_page {
-                                1 => "About",
-                                2 => "Settings",
+                                1 => i18n::text(Text::About),
+                                2 => i18n::text(Text::Settings),
                                 _ => "Quotify",
                             }),
                     ),
@@ -1247,7 +1233,7 @@ impl QuotifyApp {
                             .w(px(26.0))
                             .h(px(26.0))
                             .child(fluent_icon("\u{E72C}", 12.0))
-                            .tooltip("Refresh usage")
+                            .tooltip(i18n::text(Text::RefreshUsage))
                             .on_click(move |_, _, _| {
                                 crate::tray::request_refresh();
                             }),
@@ -1260,7 +1246,7 @@ impl QuotifyApp {
                             .w(px(26.0))
                             .h(px(26.0))
                             .child(fluent_icon("\u{E713}", 12.0))
-                            .tooltip("Settings")
+                            .tooltip(i18n::text(Text::Settings))
                             .on_click({
                                 let app = app.clone();
                                 move |_, _, cx| {
@@ -1299,7 +1285,7 @@ impl QuotifyApp {
                     div()
                         .text_size(px(12.0))
                         .text_color(weak_text_color(is_dark))
-                        .child("No enabled providers. Configure credentials to enable cards."),
+                        .child(i18n::text(Text::NoEnabledProviders)),
                 )
                 .into_any_element();
         }
@@ -1519,13 +1505,13 @@ impl QuotifyApp {
                             quotify_tag(QuotifyTagTone::Info, is_dark, scale_factor)
                                 .outline()
                                 .gap_1()
-                                .child(format!("{} Resets", resets.available_count))
+                                .child(i18n::reset_count(resets.available_count))
                                 .child(if show_reset_credits { "▴" } else { "▾" }),
                         )
                         .tooltip(if show_reset_credits {
-                            "Hide reset credit expiration details"
+                            i18n::text(Text::HideResetDetails)
                         } else {
-                            "Show reset credit expiration details"
+                            i18n::text(Text::ShowResetDetails)
                         })
                         .on_click(move |_, _, cx| {
                             app.update(cx, |this, cx| {
@@ -1554,10 +1540,9 @@ impl QuotifyApp {
             .map(|(used, limit)| {
                 quotify_tag(QuotifyTagTone::Info, is_dark, scale_factor)
                     .outline()
-                    .child(format!(
-                        "Budget: {} USD left",
-                        format_credits_balance((limit - used).max(0.0))
-                    ))
+                    .child(i18n::budget_left(&format_credits_balance(
+                        (limit - used).max(0.0),
+                    )))
                     .into_any_element()
             });
         let budget_configured = self.config.provider_budget(name).is_some();
@@ -1565,7 +1550,7 @@ impl QuotifyApp {
             (budget_configured && budget_tag.is_none() && data.error.is_none()).then(|| {
                 quotify_tag(QuotifyTagTone::Secondary, is_dark, scale_factor)
                     .outline()
-                    .child("Budget unavailable")
+                    .child(i18n::text(Text::BudgetUnavailable))
                     .into_any_element()
             });
         let credits_tag = data.credits.as_ref().map(|credits| {
@@ -1682,11 +1667,11 @@ impl QuotifyApp {
                                 .primary()
                                 .small()
                                 .label(if logging_in {
-                                    "Waiting for login..."
+                                    i18n::text(Text::WaitingForLogin)
                                 } else if login_error.is_some() {
-                                    "Retry login"
+                                    i18n::text(Text::RetryLogin)
                                 } else {
-                                    "Log in"
+                                    i18n::text(Text::LogIn)
                                 })
                                 .loading(logging_in)
                                 .disabled(logging_in)
@@ -1706,7 +1691,7 @@ impl QuotifyApp {
                                     "provider-webview-login-error-{}",
                                     data.provider
                                 )),
-                                format!("Login failed: {error}"),
+                                format!("{}: {error}", i18n::text(Text::LoginFailed)),
                             )
                             .small(),
                         )
@@ -1781,10 +1766,7 @@ impl QuotifyApp {
         let animation = self.disclosure(&disclosure_key);
         let expanded = animation.target_is_open();
         let window_count = trends.windows.len();
-        let trend_text = format!(
-            "7d trends · {window_count} window{} ",
-            if window_count == 1 { "" } else { "s" }
-        );
+        let trend_text = i18n::trend_count(window_count);
         let app = cx.entity().downgrade();
         let toggle_key = disclosure_key.clone();
         let weak_text = weak_text_color(is_dark);
@@ -1817,9 +1799,9 @@ impl QuotifyApp {
                             )),
                     )
                     .tooltip(if expanded {
-                        "Hide 7-day usage histogram"
+                        i18n::text(Text::HideUsageHistogram)
                     } else {
-                        "Show 7-day usage histogram"
+                        i18n::text(Text::ShowUsageHistogram)
                     })
                     .on_click(move |_, _, cx| {
                         app.update(cx, |this, cx| {
@@ -1923,7 +1905,7 @@ impl QuotifyApp {
                                 div()
                                     .text_size(px(10.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(window_trend.label.clone()),
+                                    .child(i18n::window_label(&window_trend.label).into_owned()),
                             ),
                     )
                     .child(
@@ -1940,11 +1922,7 @@ impl QuotifyApp {
                 let mut bucket_groups = Vec::with_capacity(bucket_count);
                 for bucket_index in 0..bucket_count {
                     let days_ago = bucket_count.saturating_sub(bucket_index + 1);
-                    let bucket_label: SharedString = if days_ago == 0 {
-                        "Now".into()
-                    } else {
-                        format!("{days_ago}d").into()
-                    };
+                    let bucket_label: SharedString = i18n::histogram_day_label(days_ago).into();
                     let mut series_bars = Vec::with_capacity(trends.len());
 
                     for (series_index, window_trend) in trends.iter().enumerate() {
@@ -2100,7 +2078,7 @@ impl QuotifyApp {
                 .h(px(TREND_CHART_HEIGHT))
                 .text_size(px(10.0))
                 .text_color(weak_text)
-                .child("Available latest samples round to 0%")
+                .child(i18n::text(Text::HistogramZero))
                 .into_any_element(),
             crate::usage_history::TrendHistogramState::LatestUnavailable => div()
                 .flex()
@@ -2110,7 +2088,7 @@ impl QuotifyApp {
                 .h(px(TREND_CHART_HEIGHT))
                 .text_size(px(10.0))
                 .text_color(weak_text)
-                .child("Latest samples unavailable for these buckets")
+                .child(i18n::text(Text::HistogramUnavailable))
                 .into_any_element(),
         };
         let disclosure_height = trend_disclosure_height(trends.len());
@@ -2134,7 +2112,7 @@ impl QuotifyApp {
                         .text_size(px(9.0))
                         .text_color(weak_text)
                         .text_align(TextAlign::Center)
-                        .child("Latest sample per rolling 24h · shared relative scale"),
+                        .child(i18n::text(Text::HistogramCaption)),
                 )
                 .into_any_element(),
             disclosure_height,
@@ -2154,15 +2132,7 @@ impl QuotifyApp {
             .enumerate()
             .map(|(index, credit)| {
                 let status = credit.status.trim();
-                let status_text = if status.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    let mut chars = status.chars();
-                    chars
-                        .next()
-                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                        .unwrap_or_else(|| "Unknown".to_string())
-                };
+                let status_text = i18n::credit_status(status).into_owned();
                 let status_tag = if status.eq_ignore_ascii_case("available") {
                     quotify_tag(QuotifyTagTone::Success, is_dark, scale_factor)
                         .outline()
@@ -2234,8 +2204,8 @@ impl QuotifyApp {
                     .h(px(20.0))
                     .text_size(px(10.0))
                     .text_color(weak_text)
-                    .child("Reset credit")
-                    .child("Expires"),
+                    .child(i18n::text(Text::ResetCredit))
+                    .child(i18n::text(Text::Expires)),
             )
             .when(rows.is_empty(), |details| {
                 details.child(
@@ -2246,7 +2216,7 @@ impl QuotifyApp {
                         .h(px(36.0))
                         .text_size(px(10.0))
                         .text_color(weak_text)
-                        .child("No reset credit details returned."),
+                        .child(i18n::text(Text::NoResetCreditDetails)),
                 )
             })
             .children(rows)
@@ -2276,7 +2246,7 @@ impl QuotifyApp {
                     .font_family("Segoe UI")
                     .font_weight(gpui::FontWeight::EXTRA_LIGHT)
                     .text_size(px(11.0))
-                    .child(w.label.clone()),
+                    .child(i18n::window_label(&w.label).into_owned()),
             )
             .child(
                 div()
@@ -2358,10 +2328,18 @@ impl QuotifyApp {
                                     .text_size(px(18.0))
                                     .child("Quotify"),
                             )
-                            .child(div().text_size(px(12.0)).child(format!("Version: {ver}"))),
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .child(format!("{}: {ver}", i18n::text(Text::Version))),
+                            ),
                     ),
             )
-            .child(div().text_size(px(12.0)).child("Author: zuoxinyu"))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .child(format!("{}: zuoxinyu", i18n::text(Text::Author))),
+            )
             .child(
                 div().flex().gap_2().child("GitHub: ").child(
                     Link::new("github_link")
@@ -2384,14 +2362,14 @@ impl QuotifyApp {
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_size(px(14.0))
-                    .child("Check for Updates"),
+                    .child(i18n::text(Text::CheckForUpdates)),
             )
             .child(
                 Button::new("check_updates_btn")
                     .primary()
                     .small()
                     .w(px(130.0))
-                    .label("Check now")
+                    .label(i18n::text(Text::CheckNow))
                     .loading(checking)
                     .disabled(checking)
                     .on_click(move |_, _, cx| {
@@ -2400,11 +2378,13 @@ impl QuotifyApp {
                     }),
             )
             .child(match status {
-                UpdateStatus::Checking => Alert::info("update-checking", "Checking for updates...")
-                    .small()
-                    .into_any_element(),
+                UpdateStatus::Checking => {
+                    Alert::info("update-checking", i18n::text(Text::CheckingUpdates))
+                        .small()
+                        .into_any_element()
+                }
                 UpdateStatus::UpToDate { .. } => {
-                    Alert::success("update-current", "App is up to date.")
+                    Alert::success("update-current", i18n::text(Text::AppUpToDate))
                         .small()
                         .into_any_element()
                 }
@@ -2418,7 +2398,7 @@ impl QuotifyApp {
                     .child(
                         Alert::warning(
                             "update-available",
-                            format!("New version {latest_version} available!"),
+                            i18n::new_version_available(&latest_version),
                         )
                         .small(),
                     )
@@ -2426,14 +2406,15 @@ impl QuotifyApp {
                         Link::new("view_release_page_link")
                             .href(release_url)
                             .text_size(px(11.0))
-                            .child("View Release Page"),
+                            .child(i18n::text(Text::ViewReleasePage)),
                     )
                     .into_any_element(),
-                UpdateStatus::Error(err) => {
-                    Alert::error("update-error", format!("Update check failed: {err}"))
-                        .small()
-                        .into_any_element()
-                }
+                UpdateStatus::Error(err) => Alert::error(
+                    "update-error",
+                    format!("{}: {err}", i18n::text(Text::UpdateCheckFailed)),
+                )
+                .small()
+                .into_any_element(),
                 _ => div().into_any_element(),
             })
             .into_any_element()
@@ -2464,6 +2445,7 @@ impl QuotifyApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let start_with_windows_app = cx.entity().downgrade();
+        let language_app = cx.entity().downgrade();
         let theme_app = cx.entity().downgrade();
         let backdrop_app = cx.entity().downgrade();
         let auto_webview_app = cx.entity().downgrade();
@@ -2471,6 +2453,64 @@ impl QuotifyApp {
         let scan_agents_app = cx.entity().downgrade();
         let agent_scan_status = self.agent_scan_status.clone();
         let secondary_text = secondary_text_color(is_dark);
+        let language_options = i18n::LanguageSetting::ALL
+            .iter()
+            .map(|setting| setting.display_name().to_string())
+            .collect::<Vec<_>>();
+        let configured_language = i18n::LanguageSetting::from_config(&self.config.general.language);
+        let language_index = i18n::LanguageSetting::ALL
+            .iter()
+            .position(|setting| *setting == configured_language)
+            .unwrap_or(0);
+        let language_select =
+            window.use_keyed_state("language-select-state", cx, move |window, cx| {
+                let select = cx.new(|cx| {
+                    SelectState::new(
+                        SearchableVec::new(language_options),
+                        Some(IndexPath::default().row(language_index)),
+                        window,
+                        cx,
+                    )
+                    .searchable(false)
+                });
+                let _subscription = cx.subscribe(
+                    &select,
+                    move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                        let SelectEvent::Confirm(Some(display_name)) = event else {
+                            return;
+                        };
+                        let Some(setting) = i18n::LanguageSetting::ALL
+                            .iter()
+                            .copied()
+                            .find(|setting| setting.display_name() == display_name)
+                        else {
+                            return;
+                        };
+                        language_app
+                            .update(cx, |this, cx| {
+                                this.config.general.language = setting.config_value().to_string();
+                                i18n::set_current_language(&this.config.general.language);
+                                *this.provider_test_status.lock() = ProviderTestStatus::Idle;
+                                this.budget_input_errors.clear();
+                                this.save_config();
+                                let active_provider = this.active_provider.read().clone();
+                                update_tray_icon_for_active_provider(&active_provider, &this.data);
+                                cx.notify();
+                            })
+                            .ok();
+                    },
+                );
+                LanguageSelectFieldState {
+                    select,
+                    _subscription,
+                }
+            });
+        let language_select = language_select.read(cx).select.clone();
+        let select_bg = if is_dark {
+            gpui::rgb(0x202020)
+        } else {
+            gpui::rgb(0xf3f3f3)
+        };
         let refresh_intervals = [30_u64, 60, 300, 1800, 3600];
         let refresh_index = refresh_intervals
             .iter()
@@ -2533,10 +2573,35 @@ impl QuotifyApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(13.0)).child("General Settings"))
+            .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(13.0)).child(i18n::text(Text::GeneralSettings)))
             .child(
                 GroupBox::new()
                     .fill()
+                    .child(
+                        div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child(i18n::text(Text::Language)))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child(i18n::text(Text::LanguageDescription)))
+                            )
+                            .child(
+                                div().w(px(140.0)).flex_none().child(
+                                    SelectPopoverSurface::new(
+                                        Select::new(&language_select)
+                                            .bg(select_bg)
+                                            .w(px(140.0)),
+                                    ),
+                                ),
+                            ),
+                    )
+                    .child(Divider::horizontal())
                     .child(
                         // Theme Select
                         div()
@@ -2549,8 +2614,8 @@ impl QuotifyApp {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Theme"))
-                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Configure app color palette"))
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child(i18n::text(Text::Theme)))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child(i18n::text(Text::ThemeDescription)))
                             )
                             .child(
                                 div()
@@ -2559,8 +2624,13 @@ impl QuotifyApp {
                                     .children(vec!["system", "dark", "light"].into_iter().enumerate().map(|(idx, t)| {
                                         let is_sel = self.config.general.theme == t;
                                         let theme_app = theme_app.clone();
+                                        let label = match t {
+                                            "dark" => i18n::text(Text::Dark),
+                                            "light" => i18n::text(Text::Light),
+                                            _ => i18n::text(Text::System),
+                                        };
                                         Button::new(("theme_btn", idx))
-                                            .label(t)
+                                            .label(label)
                                             .small()
                                             .compact()
                                             .selected(is_sel)
@@ -2597,8 +2667,8 @@ impl QuotifyApp {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Backdrop"))
-                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Windows material effect"))
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child(i18n::text(Text::Backdrop)))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child(i18n::text(Text::BackdropDescription)))
                             )
                             .child(
                                 div()
@@ -2608,7 +2678,7 @@ impl QuotifyApp {
                                         ("mica", "Mica"),
                                         ("mica_alt", "Mica Alt"),
                                         ("acrylic", "Acrylic"),
-                                        ("none", "None"),
+                                        ("none", i18n::text(Text::None)),
                                     ].into_iter().enumerate().map(|(idx, (value, label))| {
                                         let configured = match self.config.general.backdrop.as_str() {
                                             "mica" | "mica_alt" | "acrylic" | "none" => self.config.general.backdrop.as_str(),
@@ -2652,8 +2722,8 @@ impl QuotifyApp {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Automatic WebView Login"))
-                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Open WebView when authentication fails"))
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child(i18n::text(Text::AutomaticWebViewLogin)))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child(i18n::text(Text::AutomaticWebViewLoginDescription)))
                             )
                             .child(
                                 Switch::new("auto_webview_login")
@@ -2681,36 +2751,42 @@ impl QuotifyApp {
                                 div()
                                     .flex()
                                     .items_center()
+                                    .gap_2()
                                     .justify_between()
                                     .child(
                                         div()
                                             .flex()
                                             .flex_col()
+                                            .flex_1()
+                                            .min_w_0()
                                             .child(
                                                 div()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_size(px(12.0))
-                                                    .child("Local Agent Discovery"),
+                                                    .child(i18n::text(Text::LocalAgentDiscovery)),
                                             )
                                             .child(
                                                 div()
+                                                    .w_full()
+                                                    .truncate()
                                                     .text_size(px(10.0))
                                                     .text_color(secondary_text)
-                                                    .child(
-                                                        "Check known local auth locations and installed agent CLIs",
-                                                    ),
+                                                    .child(i18n::text(
+                                                        Text::LocalAgentDiscoveryDescription,
+                                                    )),
                                             ),
                                     )
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_none()
                                             .items_center()
                                             .gap_2()
                                             .child(
                                                 Button::new("scan_local_agents_btn")
                                                     .small()
                                                     .compact()
-                                                    .label("Scan now")
+                                                    .label(i18n::text(Text::ScanNow))
                                                     .loading(matches!(
                                                         &agent_scan_status,
                                                         AgentScanStatus::Scanning
@@ -2768,20 +2844,19 @@ impl QuotifyApp {
                                 AgentScanStatus::Complete(detected) if detected.is_empty() => {
                                     Alert::info(
                                         "settings-agent-scan-empty",
-                                        "No ready local agents were found.",
+                                        i18n::text(Text::NoReadyLocalAgents),
                                     )
                                     .small()
                                     .into_any_element()
                                 }
                                 AgentScanStatus::Complete(detected) => Alert::success(
                                     "settings-agent-scan-complete",
-                                    format!(
-                                        "Enabled: {}",
-                                        detected
+                                    i18n::enabled_agents(
+                                        &detected
                                             .iter()
                                             .map(|agent| agent.display_name)
                                             .collect::<Vec<_>>()
-                                            .join(", ")
+                                            .join(", "),
                                     ),
                                 )
                                 .small()
@@ -2800,8 +2875,8 @@ impl QuotifyApp {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Start with Windows"))
-                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child("Launch Quotify when you sign in"))
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child(i18n::text(Text::StartWithWindows)))
+                                    .child(div().text_size(px(10.0)).text_color(secondary_text).child(i18n::text(Text::StartWithWindowsDescription)))
                             )
                             .child(
                                 Switch::new("start_with_windows")
@@ -2832,7 +2907,7 @@ impl QuotifyApp {
                                     .flex()
                                     .items_center()
                                     .justify_between()
-                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child("Refresh Interval"))
+                                    .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(12.0)).child(i18n::text(Text::RefreshInterval)))
                                     .child(div().text_size(px(11.0)).child(format!("{}s", self.config.general.refresh_interval)))
                             )
                             .child(
@@ -2855,7 +2930,7 @@ impl QuotifyApp {
                     .child(Divider::horizontal())
                     .child(
                         // Network Proxy input field
-                        self.render_input_field(is_dark, "proxy".into(), "Network Proxy".into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
+                        self.render_input_field(is_dark, "proxy".into(), i18n::text(Text::NetworkProxy).into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
                     )
             )
             .into_any_element()
@@ -2933,7 +3008,7 @@ impl QuotifyApp {
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_size(px(13.0))
-                    .child("Notifications"),
+                    .child(i18n::text(Text::Notifications)),
             )
             .child(
                 GroupBox::new()
@@ -2956,16 +3031,16 @@ impl QuotifyApp {
                                         div()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_size(px(12.0))
-                                            .child("Windows Notifications"),
+                                            .child(i18n::text(Text::WindowsNotifications)),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.0))
                                             .text_color(secondary_text)
                                             .whitespace_normal()
-                                            .child(
-                                                "Disabled by default; respects Windows quiet hours",
-                                            ),
+                                            .child(i18n::text(
+                                                Text::WindowsNotificationsDescription,
+                                            )),
                                     ),
                             )
                             .child(
@@ -2986,8 +3061,8 @@ impl QuotifyApp {
                     )
                     .child(Divider::horizontal())
                     .child(notification_switch_row(
-                        "Monthly quota reset",
-                        "After a provider's monthly quota resets",
+                        i18n::text(Text::MonthlyQuotaReset),
+                        i18n::text(Text::MonthlyQuotaResetDescription),
                         "notify-monthly-reset",
                         weak_text_color(is_dark),
                         settings.monthly_resets,
@@ -3003,8 +3078,8 @@ impl QuotifyApp {
                         },
                     ))
                     .child(notification_switch_row(
-                        "Weekly quota reset",
-                        "After a provider's weekly quota resets",
+                        i18n::text(Text::WeeklyQuotaReset),
+                        i18n::text(Text::WeeklyQuotaResetDescription),
                         "notify-weekly-reset",
                         weak_text_color(is_dark),
                         settings.weekly_resets,
@@ -3020,8 +3095,8 @@ impl QuotifyApp {
                         },
                     ))
                     .child(notification_switch_row(
-                        "5-hour quota reset",
-                        "Session and rolling 5-hour windows",
+                        i18n::text(Text::FiveHourQuotaReset),
+                        i18n::text(Text::FiveHourQuotaResetDescription),
                         "notify-five-hour-reset",
                         weak_text_color(is_dark),
                         settings.five_hour_resets,
@@ -3059,14 +3134,18 @@ impl QuotifyApp {
                                             .overflow_hidden()
                                             .pr_3()
                                             .child(
-                                                div().text_size(px(11.0)).child("Usage threshold"),
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .child(i18n::text(Text::UsageThreshold)),
                                             )
                                             .child(
                                                 div()
                                                     .text_size(px(10.0))
                                                     .text_color(secondary_text)
                                                     .whitespace_normal()
-                                                    .child("Once when usage crosses the threshold"),
+                                                    .child(i18n::text(
+                                                        Text::UsageThresholdDescription,
+                                                    )),
                                             ),
                                     )
                                     .child(
@@ -3116,8 +3195,8 @@ impl QuotifyApp {
                     )
                     .child(Divider::horizontal())
                     .child(notification_switch_row(
-                        "Silent refresh failures",
-                        "When an automatic refresh starts failing",
+                        i18n::text(Text::SilentRefreshFailures),
+                        i18n::text(Text::SilentRefreshFailuresDescription),
                         "notify-silent-refresh-failure",
                         weak_text_color(is_dark),
                         settings.silent_refresh_failures,
@@ -3203,7 +3282,7 @@ impl QuotifyApp {
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_size(px(13.0))
-                    .child("Provider Settings"),
+                    .child(i18n::text(Text::ProviderSettings)),
             )
             .child(
                 GroupBox::new()
@@ -3213,7 +3292,7 @@ impl QuotifyApp {
                         SelectPopoverSurface::new(
                             Select::new(&provider_select)
                                 .bg(bg_fill)
-                                .search_placeholder("Search providers")
+                                .search_placeholder(i18n::text(Text::SearchProviders))
                                 .w_full(),
                         ),
                     )
@@ -3237,7 +3316,7 @@ impl QuotifyApp {
             .child(
                 Link::new("open_config_file_link")
                     .text_size(px(11.0))
-                    .child("Open config file")
+                    .child(i18n::text(Text::OpenConfigFile))
                     .on_click(move |_, _, _| {
                         let _ = open_config_file(config_path.as_ref());
                     }),
@@ -3246,7 +3325,7 @@ impl QuotifyApp {
             .child(
                 Link::new("open_logs_link")
                     .text_size(px(11.0))
-                    .child("Open logs")
+                    .child(i18n::text(Text::OpenLogs))
                     .on_click(move |_, _, _| {
                         let _ = open_folder(&crate::diagnostics::log_dir());
                     }),
@@ -3255,7 +3334,7 @@ impl QuotifyApp {
             .child(
                 Link::new("create_diagnostic_report_link")
                     .text_size(px(11.0))
-                    .child("Create diagnostic report")
+                    .child(i18n::text(Text::CreateDiagnosticReport))
                     .on_click(move |_, _, _| {
                         let _ = crate::diagnostics::write_diagnostic_report(
                             report_config_path.as_deref(),
@@ -3279,6 +3358,7 @@ impl QuotifyApp {
     ) -> AnyElement {
         let initial_value = config_field_value(&self.config, field_id.as_ref());
         let masked = is_password;
+        let initial_placeholder = placeholder.clone();
         let app = cx.entity().downgrade();
         let subscription_field = field_id.to_string();
         let input_state = window.use_keyed_state(
@@ -3288,7 +3368,7 @@ impl QuotifyApp {
                 let input = cx.new(|cx| {
                     InputState::new(window, cx)
                         .default_value(initial_value)
-                        .placeholder(placeholder)
+                        .placeholder(initial_placeholder.clone())
                         .masked(masked)
                 });
                 let _subscription =
@@ -3316,8 +3396,7 @@ impl QuotifyApp {
                                 } else if subscription_field.ends_with("_budget") {
                                     this.budget_input_errors.insert(
                                         subscription_field.clone(),
-                                        "Enter a positive USD amount, or leave the field empty."
-                                            .to_string(),
+                                        i18n::text(Text::BudgetPositive).to_string(),
                                     );
                                 }
                                 cx.notify();
@@ -3329,18 +3408,29 @@ impl QuotifyApp {
                 InputFieldState {
                     input,
                     masked,
+                    placeholder: initial_placeholder,
                     _subscription,
                 }
             },
         );
 
         let input = input_state.read(cx).input.clone();
-        if input_state.read(cx).masked != masked {
+        let masked_changed = input_state.read(cx).masked != masked;
+        let placeholder_changed = input_state.read(cx).placeholder != placeholder;
+        if masked_changed || placeholder_changed {
             input_state.update(cx, |state, cx| {
-                state.masked = masked;
-                state
-                    .input
-                    .update(cx, |input, cx| input.set_masked(masked, window, cx));
+                if masked_changed {
+                    state.masked = masked;
+                    state
+                        .input
+                        .update(cx, |input, cx| input.set_masked(masked, window, cx));
+                }
+                if placeholder_changed {
+                    state.placeholder = placeholder.clone();
+                    state.input.update(cx, |input, cx| {
+                        input.set_placeholder(placeholder.clone(), window, cx);
+                    });
+                }
             });
         }
         let bg_fill = if is_dark {
@@ -3390,7 +3480,11 @@ impl QuotifyApp {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_size(px(11.0)).child("Primary Provider"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .child(i18n::text(Text::PrimaryProvider)),
+                )
                 .child(
                     Button::new("set_primary_provider_btn")
                         .primary()
@@ -3398,9 +3492,9 @@ impl QuotifyApp {
                         .disabled(is_primary)
                         .child(fluent_icon("\u{E735}", 11.0))
                         .child(if is_primary {
-                            "Primary"
+                            i18n::text(Text::Primary)
                         } else {
-                            "Set as Primary"
+                            i18n::text(Text::SetAsPrimary)
                         })
                         .on_click(move |_, _, cx| {
                             primary_provider_app
@@ -3439,7 +3533,11 @@ impl QuotifyApp {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_size(px(11.0)).child("Enable Provider"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .child(i18n::text(Text::EnableProvider)),
+                )
                 .child(
                     Switch::new("enable_provider_switch")
                         .checked(enabled)
@@ -3482,8 +3580,8 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "deepseek_key".into(),
-                        "API Key".into(),
-                        "Paste DeepSeek Key".into(),
+                        i18n::text(Text::ApiKey).into(),
+                        i18n::paste_named("DeepSeek Key").into(),
                         true,
                         window,
                         cx,
@@ -3496,7 +3594,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "claude_key".into(),
-                        "API Key".into(),
+                        i18n::text(Text::ApiKey).into(),
                         "Claude Admin Key".into(),
                         true,
                         window,
@@ -3508,7 +3606,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "claude_session".into(),
-                        "Session Key".into(),
+                        i18n::text(Text::SessionKey).into(),
                         "Claude Session Key".into(),
                         true,
                         window,
@@ -3520,7 +3618,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "claude_token".into(),
-                        "Access Token".into(),
+                        i18n::text(Text::AccessToken).into(),
                         "Claude Access Token".into(),
                         true,
                         window,
@@ -3532,7 +3630,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "claude_auth".into(),
-                        "Auth File Path".into(),
+                        i18n::text(Text::AuthFilePath).into(),
                         "e.g. C:\\Users\\Admin\\.claude\\session.toml".into(),
                         false,
                         window,
@@ -3546,7 +3644,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "codex_auth".into(),
-                        "Auth File Path".into(),
+                        i18n::text(Text::AuthFilePath).into(),
                         "e.g. C:\\Users\\Admin\\.codex\\token.json".into(),
                         false,
                         window,
@@ -3560,8 +3658,8 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "gemini_key".into(),
-                        "API Key".into(),
-                        "Paste Gemini Key".into(),
+                        i18n::text(Text::ApiKey).into(),
+                        i18n::paste_named("Gemini Key").into(),
                         true,
                         window,
                         cx,
@@ -3574,8 +3672,8 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "antigravity_key".into(),
-                        "API Key".into(),
-                        "Paste Antigravity Key".into(),
+                        i18n::text(Text::ApiKey).into(),
+                        i18n::paste_named("Antigravity Key").into(),
                         true,
                         window,
                         cx,
@@ -3588,7 +3686,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "opencode_key".into(),
-                        "API Key".into(),
+                        i18n::text(Text::ApiKey).into(),
                         "OpenCode Workspaces Key".into(),
                         true,
                         window,
@@ -3600,8 +3698,8 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "opencode_workspace".into(),
-                        "Workspace ID".into(),
-                        "Paste Workspace ID".into(),
+                        i18n::text(Text::WorkspaceId).into(),
+                        i18n::paste_named("Workspace ID").into(),
                         false,
                         window,
                         cx,
@@ -3612,7 +3710,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "opencode_auth".into(),
-                        "Auth Cookie".into(),
+                        i18n::text(Text::AuthCookie).into(),
                         "OpenCode Auth Cookie".into(),
                         true,
                         window,
@@ -3626,7 +3724,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "mimo_key".into(),
-                        "API Key".into(),
+                        i18n::text(Text::ApiKey).into(),
                         "MiMo Token Key".into(),
                         true,
                         window,
@@ -3638,7 +3736,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "mimo_token".into(),
-                        "Service Token".into(),
+                        i18n::text(Text::ServiceToken).into(),
                         "MiMo Service Token".into(),
                         true,
                         window,
@@ -3650,7 +3748,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         "mimo_cookie".into(),
-                        "Cookie Header".into(),
+                        i18n::text(Text::CookieHeader).into(),
                         "MiMo Cookie Header".into(),
                         true,
                         window,
@@ -3664,7 +3762,7 @@ impl QuotifyApp {
                     div()
                         .text_size(px(10.0))
                         .text_color(secondary_text_color(is_dark))
-                        .child("Uses the AWS CLI credential chain and Cost Explorer.")
+                        .child(i18n::text(Text::BedrockDescription))
                         .into_any_element(),
                 );
             }
@@ -3676,8 +3774,8 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         key_field,
-                        "API Key / Token".into(),
-                        "Paste provider credential".into(),
+                        i18n::text(Text::ApiKeyToken).into(),
+                        i18n::text(Text::PasteProviderCredential).into(),
                         true,
                         window,
                         cx,
@@ -3688,7 +3786,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         url_field,
-                        "Base URL".into(),
+                        i18n::text(Text::BaseUrl).into(),
                         "e.g. http://127.0.0.1:8000/v1".into(),
                         false,
                         window,
@@ -3700,7 +3798,7 @@ impl QuotifyApp {
                     self.render_input_field(
                         is_dark,
                         dep_field,
-                        "Deployment / Model Name".into(),
+                        i18n::text(Text::DeploymentModelName).into(),
                         "e.g. gpui-4o-mini".into(),
                         false,
                         window,
@@ -3717,8 +3815,8 @@ impl QuotifyApp {
                 self.render_input_field(
                     is_dark,
                     SharedString::from(budget_field.clone()),
-                    "30-Day API Budget (USD)".into(),
-                    "e.g. 100; leave empty to disable".into(),
+                    i18n::text(Text::ApiBudget30d).into(),
+                    i18n::text(Text::ApiBudgetPlaceholder).into(),
                     false,
                     window,
                     cx,
@@ -3729,7 +3827,7 @@ impl QuotifyApp {
                 div()
                     .text_size(px(10.0))
                     .text_color(secondary_text_color(is_dark))
-                    .child("Uses the latest 30 complete UTC days of USD spend.")
+                    .child(i18n::text(Text::BudgetDescription))
                     .into_any_element(),
             );
             if provider_id == "bedrock"
@@ -3740,7 +3838,7 @@ impl QuotifyApp {
                 widgets.push(
                     Alert::info(
                         "bedrock-budget-environment-override",
-                        "CODEXBAR_BEDROCK_BUDGET is set and remains active until the environment variable is removed.",
+                        i18n::text(Text::BedrockEnvironmentOverride),
                     )
                     .small()
                     .into_any_element(),
@@ -3778,7 +3876,7 @@ impl QuotifyApp {
                         .primary()
                         .small()
                         .w(px(110.0))
-                        .label("Test Provider")
+                        .label(i18n::text(Text::TestProvider))
                         .loading(testing_this)
                         .disabled(testing_other)
                         .on_click(move |_, _, cx| {
@@ -3802,24 +3900,25 @@ impl QuotifyApp {
                     } if provider == provider_id => Alert::success(
                         "provider-test-success",
                         format!(
-                            "Test passed at {}. {summary}",
+                            "{} {}. {summary}",
+                            i18n::text(Text::TestPassed),
                             fetched_at.with_timezone(&chrono::Local).format("%H:%M:%S")
                         ),
                     )
                     .small()
                     .into_any_element(),
                     ProviderTestStatus::Error { provider, message } if provider == provider_id => {
-                        Alert::error("provider-test-error", format!("Test failed: {message}"))
-                            .small()
-                            .into_any_element()
-                    }
-                    ProviderTestStatus::Testing { provider } if provider == provider_id => {
-                        Alert::info(
-                            "provider-test-running",
-                            "Fetching usage with current provider settings...",
+                        Alert::error(
+                            "provider-test-error",
+                            format!("{}: {message}", i18n::text(Text::TestFailed)),
                         )
                         .small()
                         .into_any_element()
+                    }
+                    ProviderTestStatus::Testing { provider } if provider == provider_id => {
+                        Alert::info("provider-test-running", i18n::text(Text::FetchingUsage))
+                            .small()
+                            .into_any_element()
                     }
                     _ => div().into_any_element(),
                 })
@@ -4257,22 +4356,23 @@ fn set_provider_enabled_value(
 fn summarize_provider_test(data: &UsageData) -> String {
     let max_percent = data.max_used_percent();
     let windows = data.windows.len();
-    let credits = data
-        .credits
-        .as_ref()
-        .map(|credits| {
-            format!(
-                " Credits: {} {}.",
-                format_credits_balance(credits.balance),
-                credits.currency
-            )
-        })
-        .unwrap_or_default();
+    let credits = data.credits.as_ref().map(|credits| {
+        (
+            format_credits_balance(credits.balance),
+            credits.currency.as_str(),
+        )
+    });
 
     if windows == 0 && data.credits.is_none() {
-        "Provider responded, but no usage windows or credits were returned.".to_string()
+        i18n::text(Text::ProviderNoUsage).to_string()
     } else {
-        format!("Returned {windows} usage window(s), max usage {max_percent:.0}%.{credits}")
+        i18n::provider_test_summary(
+            windows,
+            max_percent,
+            credits
+                .as_ref()
+                .map(|(balance, currency)| (balance.as_str(), *currency)),
+        )
     }
 }
 
@@ -4311,7 +4411,7 @@ fn format_reset_credit_expiry(expires_at: Option<chrono::DateTime<chrono::Utc>>)
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|| "No expiration".to_string())
+        .unwrap_or_else(|| i18n::text(Text::NoExpiration).to_string())
 }
 
 fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
@@ -4321,20 +4421,14 @@ fn reset_time_text(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
 
     let remaining = resets - chrono::Utc::now();
     if remaining.num_seconds() <= 0 {
-        return "resetting".to_string();
+        return i18n::text(Text::Resetting).to_string();
     }
 
     let days = remaining.num_days();
     let hours = remaining.num_hours() % 24;
     let minutes = remaining.num_minutes() % 60;
 
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{minutes}m")
-    }
+    i18n::reset_duration(days, hours, minutes)
 }
 
 use crate::version::is_newer;
@@ -4408,22 +4502,13 @@ fn usage_percent_color(percent: f64, is_dark: bool) -> gpui::Rgba {
 }
 
 fn format_trend_metrics(trend: &crate::usage_history::ProviderTrend) -> String {
-    let delta = trend
-        .previous_percent
-        .map(|previous| trend.latest_percent - previous)
-        .filter(|value| value.abs() >= 0.05)
-        .map(|value| {
-            if value >= 0.0 {
-                format!("+{value:.1} pp")
-            } else {
-                format!("{value:.1} pp")
-            }
-        })
-        .unwrap_or_else(|| "flat".to_string());
-
-    format!(
-        "avg {:.0}% · peak {:.0}% · {delta} · {} samples",
-        trend.average_percent, trend.peak_percent, trend.samples
+    i18n::trend_metrics(
+        trend.average_percent,
+        trend.peak_percent,
+        trend
+            .previous_percent
+            .map(|previous| trend.latest_percent - previous),
+        trend.samples,
     )
 }
 

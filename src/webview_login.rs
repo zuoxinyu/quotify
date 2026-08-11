@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_SIZE, WM_TIMER,
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 use wry::WebViewBuilder;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -38,9 +38,22 @@ pub fn login_required_error(provider: &str, reason: impl std::fmt::Display) -> a
 }
 
 pub fn login_required_message(error: &str) -> Option<String> {
-    error
-        .find(LOGIN_REQUIRED_PREFIX)
-        .map(|index| error[index..].to_string())
+    login_required_message_for_language(error, crate::i18n::current_language())
+}
+
+fn login_required_message_for_language(
+    error: &str,
+    language: crate::i18n::Language,
+) -> Option<String> {
+    let index = error.find(LOGIN_REQUIRED_PREFIX)?;
+    let details = error[index + LOGIN_REQUIRED_PREFIX.len()..].trim();
+    let details = details.strip_prefix("for ").unwrap_or(details);
+    let (provider, reason) = details.split_once(':').unwrap_or((details, ""));
+    Some(crate::i18n::login_required_for(
+        language,
+        provider.trim(),
+        reason.trim(),
+    ))
 }
 
 pub fn login_and_store_for_provider(provider: &str, force_reauth: bool) -> Result<String> {
@@ -412,11 +425,18 @@ fn run_login_flow(
                 LoginMode::OpenCode => w!("QuotifyOpenCodeLoginClass"),
                 LoginMode::Ollama => w!("QuotifyOllamaLoginClass"),
             };
-            let title = match mode {
-                LoginMode::Mimo => w!("Xiaomi Mimo Login (Please login to continue)"),
-                LoginMode::OpenCode => w!("OpenCode Login (Please login to continue)"),
-                LoginMode::Ollama => w!("Ollama Login (Please login to continue)"),
+            let provider_name = match mode {
+                LoginMode::Mimo => "Xiaomi Mimo",
+                LoginMode::OpenCode => "OpenCode",
+                LoginMode::Ollama => "Ollama",
             };
+            let title = format!(
+                "{provider_name} — {}",
+                crate::i18n::text(crate::i18n::Text::PleaseLoginToContinue)
+            )
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
 
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(window_proc),
@@ -430,7 +450,7 @@ fn run_login_flow(
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                title,
+                PCWSTR(title.as_ptr()),
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -590,7 +610,7 @@ mod tests {
     fn marks_and_extracts_login_required_errors() {
         let error = login_required_error("mimo", "credentials expired").to_string();
         assert_eq!(
-            login_required_message(&error).as_deref(),
+            login_required_message_for_language(&error, crate::i18n::Language::English).as_deref(),
             Some("WebView login required for mimo: credentials expired")
         );
         assert!(login_required_message("ordinary network error").is_none());

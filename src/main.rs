@@ -8,6 +8,7 @@ mod app;
 mod config;
 mod diagnostics;
 mod disclosure;
+mod i18n;
 mod icon;
 mod notifications;
 mod provider;
@@ -1279,7 +1280,10 @@ fn publish_provider_results(
         }
     }
 
-    if let Some((title, body)) = notifications::aggregate(&notification_events) {
+    if let Some((title, body)) = notifications::aggregate_for_language(
+        &notification_events,
+        i18n::LanguageSetting::from_config(&config.general.language).effective(),
+    ) {
         let severity = if notification_events.iter().any(|event| {
             matches!(
                 event,
@@ -1317,6 +1321,7 @@ fn main() -> Result<()> {
         config::AppConfig::load()?
     };
     secrets::hydrate_config(&mut config);
+    i18n::set_current_language(&config.general.language);
 
     match cli.command.unwrap_or(Commands::Tray) {
         Commands::Fetch {
@@ -1686,6 +1691,7 @@ fn load_runtime_config(
         fallback.clone()
     });
     secrets::hydrate_config(&mut config);
+    i18n::set_current_language(&config.general.language);
     config
 }
 
