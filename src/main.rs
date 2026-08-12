@@ -5,6 +5,7 @@
 mod agent_scan;
 #[cfg(not(test))]
 mod app;
+mod card_motion;
 mod config;
 mod diagnostics;
 mod disclosure;

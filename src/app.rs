@@ -23,6 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::card_motion::{CardMotionElement, CardSlot, drop_target_index};
 use crate::disclosure::DisclosureAnimation;
 use crate::i18n::{self, Text};
 use crate::provider::UsageData;
@@ -312,6 +313,13 @@ pub struct ProviderDragState {
     order_changed: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ProviderCardRenderContext {
+    is_dark: bool,
+    scale_factor: f32,
+    animations_enabled: bool,
+}
+
 struct InputFieldState {
     input: Entity<InputState>,
     masked: bool,
@@ -352,6 +360,8 @@ pub struct QuotifyApp {
     agent_scan_status: AgentScanStatus,
     disclosures: HashMap<String, DisclosureAnimation>,
     disclosure_frame_at: Option<Instant>,
+    provider_card_slots: Arc<RwLock<Vec<CardSlot>>>,
+    provider_order_revision: u64,
     trend_cache: crate::trend_cache::TrendCache,
     hovered_trend_series: Option<String>,
 }
@@ -385,6 +395,8 @@ impl QuotifyApp {
             agent_scan_status: AgentScanStatus::Idle,
             disclosures: HashMap::new(),
             disclosure_frame_at: None,
+            provider_card_slots: Arc::new(RwLock::new(Vec::new())),
+            provider_order_revision: 0,
             trend_cache: crate::trend_cache::TrendCache::new(),
             hovered_trend_series: None,
         }
@@ -527,7 +539,65 @@ impl QuotifyApp {
             full_order[slot] = provider;
         }
         self.config.general.provider_order = full_order;
+        self.provider_order_revision = self.provider_order_revision.wrapping_add(1);
         true
+    }
+
+    fn finish_provider_drag(&mut self) -> bool {
+        if self.drag.order_changed {
+            self.save_config();
+        }
+        if self.drag.held_provider.is_none() {
+            return false;
+        }
+
+        self.drag = ProviderDragState::default();
+        true
+    }
+
+    fn handle_provider_drag_move(
+        &mut self,
+        position: Point<Pixels>,
+        left_button_pressed: bool,
+    ) -> bool {
+        if !left_button_pressed {
+            return self.finish_provider_drag();
+        }
+
+        let Some(held_provider) = self.drag.held_provider.clone() else {
+            return false;
+        };
+
+        let mut needs_render = false;
+        if !self.drag.dragging
+            && let Some(start_pos) = self.drag.drag_start_pos
+        {
+            let dx = (position.x - start_pos.x) / px(1.0);
+            let dy = (position.y - start_pos.y) / px(1.0);
+            if dx.abs() + dy.abs() > 6.0 {
+                self.finish_disclosure_animations();
+                self.drag.dragging = true;
+                needs_render = true;
+            }
+        }
+
+        if !self.drag.dragging {
+            return needs_render;
+        }
+
+        let target_index = {
+            let slots = self.provider_card_slots.read();
+            drop_target_index(&slots, position.x / px(1.0), position.y / px(1.0))
+        };
+
+        if let Some(target_index) = target_index
+            && self.move_dragged_provider_to(&held_provider, target_index)
+        {
+            self.drag.order_changed = true;
+            needs_render = true;
+        }
+
+        needs_render
     }
 
     fn disclosure(&self, key: &str) -> DisclosureAnimation {
@@ -895,6 +965,16 @@ impl Render for QuotifyApp {
                     .id("body_view")
                     .overflow_y_scrollbar(),
             )
+            .on_mouse_move(cx.listener(
+                |this: &mut Self,
+                 event: &MouseMoveEvent,
+                 _window: &mut Window,
+                 cx: &mut Context<Self>| {
+                    if this.handle_provider_drag_move(event.position, event.dragging()) {
+                        cx.notify();
+                    }
+                },
+            ))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(
@@ -902,11 +982,7 @@ impl Render for QuotifyApp {
                      _event: &MouseUpEvent,
                      _window: &mut Window,
                      cx: &mut Context<Self>| {
-                        if this.drag.order_changed {
-                            this.save_config();
-                        }
-                        if this.drag.held_provider.is_some() {
-                            this.drag = ProviderDragState::default();
+                        if this.finish_provider_drag() {
                             cx.notify();
                         }
                     },
@@ -1275,6 +1351,7 @@ impl QuotifyApp {
             .collect::<Vec<_>>();
 
         if visible_providers.is_empty() {
+            self.provider_card_slots.write().clear();
             return div()
                 .flex()
                 .flex_col()
@@ -1290,19 +1367,18 @@ impl QuotifyApp {
                 .into_any_element();
         }
 
+        let card_context = ProviderCardRenderContext {
+            is_dark,
+            scale_factor: window.scale_factor(),
+            animations_enabled: client_area_animations_enabled(),
+        };
         let mut cards = Vec::new();
         for (idx, (name, _)) in visible_providers.iter().enumerate() {
             if let Some(pdata) = data.iter().find(|d| d.provider == *name) {
-                cards.push(self.render_provider_card(
-                    name,
-                    pdata,
-                    idx,
-                    is_dark,
-                    window.scale_factor(),
-                    cx,
-                ));
+                cards.push(self.render_provider_card(name, pdata, idx, card_context, cx));
             }
         }
+        let provider_card_slots = self.provider_card_slots.clone();
 
         div()
             .flex()
@@ -1312,6 +1388,10 @@ impl QuotifyApp {
             .pb(px(20.0))
             .gap_5()
             .children(cards)
+            .on_children_prepainted(move |bounds, _, _| {
+                *provider_card_slots.write() =
+                    bounds.into_iter().map(CardSlot::from_bounds).collect();
+            })
             .into_any_element()
     }
 
@@ -1320,13 +1400,16 @@ impl QuotifyApp {
         name: &str,
         data: &UsageData,
         row_idx: usize,
-        is_dark: bool,
-        scale_factor: f32,
+        card_context: ProviderCardRenderContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ProviderCardRenderContext {
+            is_dark,
+            scale_factor,
+            animations_enabled,
+        } = card_context;
         let provider_name = name.to_string();
         let mouse_down_provider = provider_name.clone();
-        let mouse_move_provider = provider_name.clone();
         let card_elt_id = SharedString::from(format!("card_{name}"));
 
         let effective_budget = self
@@ -1342,7 +1425,7 @@ impl QuotifyApp {
         let reset_animation = self.disclosure(CODEX_RESET_DISCLOSURE_KEY);
         let show_reset_credits = reset_credits.is_some() && reset_animation.target_is_open();
 
-        div()
+        let card = div()
             .w_full()
             .id(card_elt_id)
             .child(
@@ -1385,37 +1468,15 @@ impl QuotifyApp {
                         cx.notify();
                     },
                 ),
-            )
-            .on_mouse_move(cx.listener(
-                move |this: &mut Self,
-                      event: &MouseMoveEvent,
-                      _window: &mut gpui::Window,
-                      cx: &mut gpui::Context<Self>| {
-                    let Some(held_provider) = this.drag.held_provider.clone() else {
-                        return;
-                    };
+            );
 
-                    if !this.drag.dragging
-                        && let Some(start_pos) = this.drag.drag_start_pos
-                    {
-                        let dx = (event.position.x - start_pos.x) / px(1.0);
-                        let dy = (event.position.y - start_pos.y) / px(1.0);
-                        if dx.abs() + dy.abs() > 6.0 {
-                            this.finish_disclosure_animations();
-                            this.drag.dragging = true;
-                        }
-                    }
-
-                    if this.drag.dragging
-                        && !held_provider.eq_ignore_ascii_case(&mouse_move_provider)
-                        && this.move_dragged_provider_to(&held_provider, row_idx)
-                    {
-                        this.drag.order_changed = true;
-                        cx.notify();
-                    }
-                },
-            ))
-            .into_any_element()
+        CardMotionElement::new(
+            provider_name,
+            self.provider_order_revision,
+            animations_enabled,
+            card,
+        )
+        .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
