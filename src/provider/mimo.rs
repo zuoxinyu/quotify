@@ -173,7 +173,12 @@ impl Provider for MimoProvider {
             }
 
             tracing::info!("MiMo token expired. Attempting WebView2 login...");
-            let full_cookie = crate::webview_login::login_and_store_async("mimo", true).await?;
+            // Mirror the OpenCode flow: never clear the WebView profile's auth
+            // cookie here. The browser session often remains valid after
+            // Quotify's saved copy expires, and reusing it lets the login flow
+            // silently recapture a fresh token; the window only shows when the
+            // platform actually requires a new login.
+            let full_cookie = crate::webview_login::login_and_store_async("mimo", false).await?;
 
             current_cookie_header = full_cookie;
 

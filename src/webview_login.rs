@@ -131,6 +131,7 @@ thread_local! {
     static OPENCODE_AUTH_CALLBACK_SEEN: RefCell<bool> = const { RefCell::new(false) };
     static OPENCODE_TARGET_URL: RefCell<Option<String>> = const { RefCell::new(None) };
     static OPENCODE_TARGET_PAGE_LOADED: RefCell<bool> = const { RefCell::new(false) };
+    static MIMO_INITIAL_TOKENS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 struct RawWindow {
@@ -214,9 +215,20 @@ unsafe extern "system" fn window_proc(
 
                             match mode {
                                 LoginMode::Mimo => {
-                                    // MiMo often uses api-platform_serviceToken or serviceToken
-                                    if name.to_lowercase().contains("servicetoken") && !value.is_empty() {
-                                        tracing::info!("MiMo: Detected relevant token: {}", name);
+                                    // MiMo often uses api-platform_serviceToken or serviceToken.
+                                    // Only trust a token issued during this login attempt: the
+                                    // persistent WebView profile may still hold an expired token
+                                    // that the platform has not cleared yet, and accepting it
+                                    // would silently fail the caller's retry. Mirror the
+                                    // OpenCode flow: reuse the browser session, never delete it,
+                                    // and wait for fresh credentials.
+                                    if name.to_lowercase().contains("servicetoken")
+                                        && !value.is_empty()
+                                        && MIMO_INITIAL_TOKENS.with(|seen| {
+                                            is_fresh_mimo_token(value, &seen.borrow())
+                                        })
+                                    {
+                                        tracing::info!("MiMo: Detected fresh service token: {}", name);
                                         token_found = true;
                                     }
                                 }
@@ -351,6 +363,13 @@ fn is_login_cookie(mode: LoginMode, name: &str) -> bool {
     }
 }
 
+/// A MiMo service token is only trustworthy when the platform issued it during
+/// this login attempt. Tokens already present in the persistent WebView profile
+/// may be expired copies that the platform has not cleared yet.
+fn is_fresh_mimo_token(value: &str, initial_tokens: &[String]) -> bool {
+    !initial_tokens.iter().any(|old| old == value)
+}
+
 fn login_url(mode: LoginMode, initial_url: Option<&str>) -> String {
     match mode {
         LoginMode::Mimo => "https://platform.xiaomimimo.com".to_string(),
@@ -418,6 +437,7 @@ fn run_login_flow(
             OPENCODE_AUTH_CALLBACK_SEEN.with(|value| *value.borrow_mut() = false);
             OPENCODE_TARGET_URL.with(|value| *value.borrow_mut() = requested_initial_url.clone());
             OPENCODE_TARGET_PAGE_LOADED.with(|value| *value.borrow_mut() = false);
+            MIMO_INITIAL_TOKENS.with(|value| value.borrow_mut().clear());
 
             let hinstance = GetModuleHandleW(None).unwrap_or_default();
             let class_name = match mode {
@@ -549,6 +569,23 @@ fn run_login_flow(
                 .into(),
             });
 
+            if matches!(mode, LoginMode::Mimo) {
+                // Snapshot the tokens the persistent profile already holds so the
+                // timer below can tell a stale token apart from a fresh one issued
+                // by the platform during this login attempt.
+                if let Ok(cookies) = webview.cookies() {
+                    let mut initial_tokens = Vec::new();
+                    for cookie in cookies {
+                        if is_login_cookie(LoginMode::Mimo, cookie.name())
+                            && !cookie.value().is_empty()
+                        {
+                            initial_tokens.push(cookie.value().to_string());
+                        }
+                    }
+                    MIMO_INITIAL_TOKENS.with(|value| *value.borrow_mut() = initial_tokens);
+                }
+            }
+
             WEBVIEW.with(|wv| {
                 *wv.borrow_mut() = Some(webview);
             });
@@ -579,6 +616,7 @@ fn run_login_flow(
             });
             OPENCODE_TARGET_URL.with(|value| *value.borrow_mut() = None);
             OPENCODE_TARGET_PAGE_LOADED.with(|value| *value.borrow_mut() = false);
+            MIMO_INITIAL_TOKENS.with(|value| value.borrow_mut().clear());
             let _ = DestroyWindow(hwnd);
         }
     });
@@ -629,6 +667,14 @@ mod tests {
             LoginMode::Ollama,
             "__Host-next-auth.session-token"
         ));
+    }
+
+    #[test]
+    fn mimo_rejects_stale_profile_tokens_but_accepts_fresh_ones() {
+        let initial = vec!["stale-token".to_string()];
+        assert!(!is_fresh_mimo_token("stale-token", &initial));
+        assert!(is_fresh_mimo_token("fresh-token", &initial));
+        assert!(is_fresh_mimo_token("token", &[]));
     }
 
     #[test]
