@@ -247,7 +247,86 @@ struct CodexRateWindow {
     used_percent: Option<f64>,
     resets_at: Option<String>,
     limit: Option<f64>,
-    used: Option<f64>,
+        used: Option<f64>,
+}
+
+/// True for a Codex session line that records token counts. Newer CLI versions
+/// wrap these in an `event_msg` envelope (`payload.type == "token_count"`);
+/// older versions emit them as a flat `type == "token_count"` object.
+fn is_token_count_event(json: &serde_json::Value) -> bool {
+    if json.get("type").and_then(|v| v.as_str()) == Some("token_count") {
+        return true;
+    }
+    json.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+        && json
+            .get("payload")
+            .and_then(|p| p.get("type"))
+            .and_then(|v| v.as_str())
+            == Some("token_count")
+}
+
+/// Locates the token-usage object for a session line: `last_token_usage` (per
+/// turn) or `total_token_usage` (cumulative) in the nested `event_msg` format,
+/// or a legacy flat `tokens` object, whichever is present.
+fn token_usage_object(json: &serde_json::Value) -> Option<&serde_json::Value> {
+    if json.get("type").and_then(|v| v.as_str()) == Some("event_msg") {
+        let info = json.get("payload").and_then(|p| p.get("info"))?;
+        info.get("last_token_usage")
+            .or_else(|| info.get("total_token_usage"))
+    } else {
+        json.get("tokens")
+    }
+}
+
+/// Reads the input/output token counts recorded by a Codex `token_count` session
+/// event. The returned pair is that turn's token usage.
+fn token_count_amounts(json: &serde_json::Value) -> (f64, f64) {
+    let Some(usage) = token_usage_object(json) else {
+        return (0.0, 0.0);
+    };
+    let input = usage
+        .get("input")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let output = usage
+        .get("output")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    (input, output)
+}
+
+/// The event's timestamp as epoch seconds for ordering rate-limit snapshots. Codex
+/// records it as an integer in the flat format and as an RFC3339 string in the
+/// `event_msg` format.
+fn event_timestamp(json: &serde_json::Value) -> Option<i64> {
+    let timestamp = json.get("timestamp")?;
+    if let Some(epoch) = timestamp.as_i64() {
+        return Some(epoch);
+    }
+    let text = timestamp.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|date| date.timestamp())
+}
+
+/// Builds a raw token-usage window from locally aggregated counts, mirroring the
+/// "Token Usage (local stats)" window Claude exposes. Returns `None` when there is
+/// no recorded usage to display.
+fn local_token_usage_window(total_input: f64, total_output: f64) -> Option<UsageWindow> {
+    let used = total_input + total_output;
+    if used <= 0.0 {
+        return None;
+    }
+    Some(UsageWindow {
+        label: "Token Usage (local stats)".to_string(),
+        used_percent: 0.0,
+        limit: None,
+        used: Some(used),
+        unit: Some("tokens".to_string()),
+        resets_at: None,
+    })
 }
 
 impl CodexProvider {
@@ -333,7 +412,6 @@ impl CodexProvider {
         }
     }
 
-    #[allow(dead_code)]
     fn parse_session_files(&self) -> Result<Vec<UsageWindow>> {
         let home = dirs::home_dir().context("Cannot find home directory")?;
         let sessions_dir = home.join(".codex").join("sessions");
@@ -343,6 +421,10 @@ impl CodexProvider {
         }
 
         let mut windows = Vec::new();
+        // Sum token usage across every `token_count` event. Each event records the
+        // token consumption of one turn, so the totals approximate session-local use.
+        let mut total_input = 0.0f64;
+        let mut total_output = 0.0f64;
         let mut latest_primary: Option<CodexRateWindow> = None;
         let mut latest_secondary: Option<CodexRateWindow> = None;
         let mut latest_ts: i64 = 0;
@@ -361,13 +443,27 @@ impl CodexProvider {
                 use std::io::{BufRead, BufReader};
                 let reader = BufReader::new(file);
                 for line in reader.lines().map_while(Result::ok) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
-                        && json.get("type").and_then(|v| v.as_str()) == Some("token_count")
-                        && let Some(ts) = json.get("timestamp").and_then(|v| v.as_i64())
+                    let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    if !is_token_count_event(&json) {
+                        continue;
+                    }
+
+                    // Aggregated token usage for this turn.
+                    let (turn_input, turn_output) = token_count_amounts(&json);
+                    total_input += turn_input;
+                    total_output += turn_output;
+
+                    if let Some(ts) = event_timestamp(&json)
                         && ts > latest_ts
                     {
                         latest_ts = ts;
-                        if let Some(rl) = json.get("rate_limits")
+                        let rate_limits = json
+                            .get("payload")
+                            .and_then(|p| p.get("rate_limits"))
+                            .or_else(|| json.get("rate_limits"));
+                        if let Some(rl) = rate_limits
                             && let Ok(parsed) =
                                 serde_json::from_value::<CodexRateLimits>(rl.clone())
                         {
@@ -377,6 +473,10 @@ impl CodexProvider {
                     }
                 }
             }
+        }
+
+        if let Some(token_window) = local_token_usage_window(total_input, total_output) {
+            windows.push(token_window);
         }
 
         if let Some(p) = latest_primary {
@@ -575,6 +675,23 @@ impl Provider for CodexProvider {
             }
         }
 
+        // Merge locally derived windows (token stats) from the Codex sessions dir.
+        // Session rate-limit windows are treated as a fallback and skipped when the
+        // network response already supplied quota; token usage is only ever available
+        // from local session files, so it is appended when not already present.
+        if let Ok(session_windows) = self.parse_session_files() {
+            for session_window in session_windows {
+                let is_token = session_window.unit.as_deref() == Some("tokens");
+                let duplicate = windows.iter().any(|existing| {
+                    existing.label == session_window.label
+                        && existing.unit == session_window.unit
+                });
+                if is_token && !duplicate {
+                    windows.push(session_window);
+                }
+            }
+        }
+
         if windows.is_empty() {
             windows.push(UsageWindow {
                 label: "No data".to_string(),
@@ -609,8 +726,9 @@ mod tests {
 
     use super::{
         CHATGPT_ACCOUNT_ID_HEADER, CODEX_USER_AGENT, CodexAuthContext, CodexProvider,
-        OPENAI_AUTH_CLAIM, RESET_CREDITS_URL, USAGE_URL, jwt_auth_claim, parse_rate_limit_window,
-        rate_limit_period_key, resolve_subscription_tier,
+        OPENAI_AUTH_CLAIM, RESET_CREDITS_URL, USAGE_URL, jwt_auth_claim,
+        local_token_usage_window, parse_rate_limit_window, rate_limit_period_key,
+        resolve_subscription_tier, token_count_amounts,
     };
 
     fn fake_jwt(plan_type: Option<&str>, account_id: Option<&str>) -> String {
@@ -864,5 +982,41 @@ mod tests {
         assert_eq!(decoded.available_count, 1);
         assert_eq!(decoded.credits.len(), 1);
         assert_eq!(decoded.credits[0].status, "available");
+    }
+
+    #[test]
+    fn token_count_amounts_reads_input_and_output_from_events() {
+        let event = json!({
+            "type": "token_count",
+            "timestamp": 1710000000,
+            "tokens": { "input": 120, "output": 45 },
+            "cached_tokens": 30
+        });
+        assert_eq!(token_count_amounts(&event), (120.0, 45.0));
+    }
+
+    #[test]
+    fn token_count_amounts_ignores_non_token_count_events_and_missing_tokens() {
+        let not_token_count = json!({ "type": "message", "tokens": { "input": 1, "output": 2 } });
+        assert_eq!(token_count_amounts(&not_token_count), (0.0, 0.0));
+
+        let missing_tokens = json!({ "type": "token_count", "timestamp": 1 });
+        assert_eq!(token_count_amounts(&missing_tokens), (0.0, 0.0));
+    }
+
+    #[test]
+    fn local_token_usage_window_aggregates_and_labels_usage() {
+        let window = local_token_usage_window(120.0, 45.0).unwrap();
+        assert_eq!(window.label, "Token Usage (local stats)");
+        assert_eq!(window.used, Some(165.0));
+        assert_eq!(window.unit.as_deref(), Some("tokens"));
+        assert_eq!(window.limit, None);
+        assert_eq!(window.used_percent, 0.0);
+        assert!(window.resets_at.is_none());
+    }
+
+    #[test]
+    fn local_token_usage_window_is_absent_without_usage() {
+        assert!(local_token_usage_window(0.0, 0.0).is_none());
     }
 }

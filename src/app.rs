@@ -4461,7 +4461,34 @@ fn usage_window_detail_text(provider: &str, window: &crate::provider::UsageWindo
         };
     }
 
+    // Token consumption statistics (e.g. Codex "Token Usage (local stats)", Claude
+    // "Token Usage (local stats)") carry a raw count with no quota limit or a natural
+    // reset time; surface the consumed amount instead of a placeholder reset time.
+    if window.resets_at.is_none()
+        && window.limit.is_none()
+        && window
+            .unit
+            .as_deref()
+            .is_some_and(|unit| matches!(unit.trim(), "token" | "tokens"))
+        && let Some(used) = window.used.filter(|used| used.is_finite() && *used >= 0.0)
+    {
+        return format_token_count(used);
+    }
+
     reset_time_text(window.resets_at)
+}
+
+/// Formats a raw token amount with a compact suffix, e.g. 1234567 -> "1.2M".
+fn format_token_count(used: f64) -> String {
+    if used >= 1_000_000.0 {
+        format!("{:.1}M", used / 1_000_000.0)
+    } else if used >= 1_000.0 {
+        format!("{:.0}k", used / 1_000.0)
+    } else if used.fract() == 0.0 {
+        format!("{:.0}", used)
+    } else {
+        format!("{:.1}", used)
+    }
 }
 
 fn format_reset_credit_expiry(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
