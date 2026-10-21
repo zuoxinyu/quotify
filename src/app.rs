@@ -10,7 +10,7 @@ use gpui_component::{
     link::Link,
     progress::Progress,
     scroll::ScrollableElement,
-    select::{SearchableVec, Select, SelectEvent, SelectState},
+    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     tag::Tag,
@@ -327,8 +327,136 @@ struct InputFieldState {
     _subscription: Subscription,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+struct ProviderSelectItem {
+    id: String,
+    name: String,
+    enabled: bool,
+    is_dark: bool,
+}
+
+impl SelectItem for ProviderSelectItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        SharedString::from(self.name.clone())
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        self.name.to_lowercase().contains(&query) || self.id.to_lowercase().contains(&query)
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let title = self.name.clone();
+        let is_enabled = self.enabled;
+        let is_dark = self.is_dark;
+
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .when(is_enabled, |this| this.font_weight(gpui::FontWeight::BOLD))
+                        .child(title),
+                )
+                .when(is_enabled, |this| {
+                    this.child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .rounded(px(3.0))
+                            .px(px(5.0))
+                            .py(px(0.5))
+                            .bg(if is_dark {
+                                gpui::rgba(0x22c55e25)
+                            } else {
+                                gpui::rgba(0x10b98120)
+                            })
+                            .text_color(if is_dark {
+                                gpui::rgb(0x34d399)
+                            } else {
+                                gpui::rgb(0x059669)
+                            })
+                            .child(crate::i18n::text(crate::i18n::Text::Enabled)),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let is_enabled = self.enabled;
+        let is_dark = self.is_dark;
+        let title = self.name.clone();
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .py(px(2.0))
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .when(is_enabled, |this| {
+                this.font_weight(gpui::FontWeight::BOLD).bg(if is_dark {
+                    gpui::rgba(0x22c55e18)
+                } else {
+                    gpui::rgba(0x10b98114)
+                })
+            })
+            .when(!is_enabled, |this| {
+                this.text_color(if is_dark {
+                    gpui::rgba(0xffffff70)
+                } else {
+                    gpui::rgba(0x00000070)
+                })
+            })
+            .child(
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .when(is_enabled, |this| {
+                            this.text_color(if is_dark {
+                                gpui::rgb(0xffffff)
+                            } else {
+                                gpui::rgb(0x111827)
+                            })
+                        })
+                        .child(title),
+                ),
+            )
+            .when(is_enabled, |this| {
+                this.child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .rounded(px(3.0))
+                        .px(px(5.0))
+                        .py(px(1.0))
+                        .bg(if is_dark {
+                            gpui::rgba(0x22c55e30)
+                        } else {
+                            gpui::rgba(0x10b98125)
+                        })
+                        .text_color(if is_dark {
+                            gpui::rgb(0x34d399)
+                        } else {
+                            gpui::rgb(0x059669)
+                        })
+                        .child(crate::i18n::text(crate::i18n::Text::Enabled)),
+                )
+            })
+    }
+}
+
 struct ProviderSelectFieldState {
-    select: Entity<SelectState<SearchableVec<String>>>,
+    select: Entity<SelectState<SearchableVec<ProviderSelectItem>>>,
     _subscription: Subscription,
 }
 
@@ -3285,50 +3413,61 @@ impl QuotifyApp {
         let select_app = cx.entity().downgrade();
 
         let settings_catalog = provider_settings_catalog();
-        let provider_names = settings_catalog
+        let items = settings_catalog
             .iter()
-            .map(|(_, display)| display.to_string())
+            .map(|(id, display)| ProviderSelectItem {
+                id: (*id).to_string(),
+                name: (*display).to_string(),
+                enabled: self.config.provider_explicitly_enabled(id),
+                is_dark,
+            })
             .collect::<Vec<_>>();
-        let selected_index = settings_catalog
+        let selected_index = items
             .iter()
-            .position(|(id, _)| *id == self.selected_setting_provider)
+            .position(|item| item.id == self.selected_setting_provider)
             .unwrap_or(0);
-        let provider_select =
-            window.use_keyed_state("provider-select-state", cx, move |window, cx| {
-                let select = cx.new(|cx| {
-                    SelectState::new(
-                        SearchableVec::new(provider_names),
-                        Some(IndexPath::default().row(selected_index)),
-                        window,
-                        cx,
-                    )
-                    .searchable(true)
-                });
-                let _subscription = cx.subscribe(
-                    &select,
-                    move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
-                        let SelectEvent::Confirm(Some(display_name)) = event else {
-                            return;
-                        };
-                        if let Some((provider_id, _)) = provider_catalog()
-                            .iter()
-                            .find(|(_, display)| *display == display_name)
-                        {
-                            let provider_id = provider_id.to_string();
-                            select_app
-                                .update(cx, |this, cx| {
-                                    this.selected_setting_provider = provider_id;
-                                    cx.notify();
-                                })
-                                .ok();
-                        }
-                    },
-                );
-                ProviderSelectFieldState {
-                    select,
-                    _subscription,
-                }
+        let enabled_fingerprint = items
+            .iter()
+            .filter(|item| item.enabled)
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let state_key = SharedString::from(format!(
+            "provider-select-state-{}-{}-{}",
+            i18n::text(Text::Enabled),
+            if is_dark { "dark" } else { "light" },
+            enabled_fingerprint
+        ));
+        let provider_select = window.use_keyed_state(state_key, cx, move |window, cx| {
+            let select = cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(items),
+                    Some(IndexPath::default().row(selected_index)),
+                    window,
+                    cx,
+                )
+                .searchable(true)
             });
+            let _subscription = cx.subscribe(
+                &select,
+                move |_, _, event: &SelectEvent<SearchableVec<ProviderSelectItem>>, cx| {
+                    let SelectEvent::Confirm(Some(provider_id)) = event else {
+                        return;
+                    };
+                    let provider_id = provider_id.clone();
+                    select_app
+                        .update(cx, |this, cx| {
+                            this.selected_setting_provider = provider_id;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+            );
+            ProviderSelectFieldState {
+                select,
+                _subscription,
+            }
+        });
         let provider_select = provider_select.read(cx).select.clone();
         let bg_fill = if is_dark {
             gpui::rgb(0x202020)
@@ -4643,5 +4782,23 @@ mod tests {
         assert_eq!(format_histogram_percent(0.04), "0.0%");
         assert_eq!(format_histogram_percent(0.6), "0.6%");
         assert_eq!(format_histogram_percent(11.4), "11%");
+    }
+
+    #[test]
+    fn provider_select_item_properties() {
+        use super::ProviderSelectItem;
+        use gpui_component::select::SelectItem;
+
+        let item = ProviderSelectItem {
+            id: "mimo".to_string(),
+            name: "Xiaomi MiMo".to_string(),
+            enabled: true,
+            is_dark: true,
+        };
+        assert_eq!(item.title(), SharedString::from("Xiaomi MiMo"));
+        assert_eq!(item.value(), &"mimo".to_string());
+        assert!(item.matches("mimo"));
+        assert!(item.matches("Xiaomi"));
+        assert!(!item.matches("openai"));
     }
 }

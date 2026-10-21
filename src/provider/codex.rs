@@ -247,7 +247,7 @@ struct CodexRateWindow {
     used_percent: Option<f64>,
     resets_at: Option<String>,
     limit: Option<f64>,
-        used: Option<f64>,
+    used: Option<f64>,
 }
 
 /// True for a Codex session line that records token counts. Newer CLI versions
@@ -281,6 +281,9 @@ fn token_usage_object(json: &serde_json::Value) -> Option<&serde_json::Value> {
 /// Reads the input/output token counts recorded by a Codex `token_count` session
 /// event. The returned pair is that turn's token usage.
 fn token_count_amounts(json: &serde_json::Value) -> (f64, f64) {
+    if !is_token_count_event(json) {
+        return (0.0, 0.0);
+    }
     let Some(usage) = token_usage_object(json) else {
         return (0.0, 0.0);
     };
@@ -683,8 +686,7 @@ impl Provider for CodexProvider {
             for session_window in session_windows {
                 let is_token = session_window.unit.as_deref() == Some("tokens");
                 let duplicate = windows.iter().any(|existing| {
-                    existing.label == session_window.label
-                        && existing.unit == session_window.unit
+                    existing.label == session_window.label && existing.unit == session_window.unit
                 });
                 if is_token && !duplicate {
                     windows.push(session_window);
@@ -726,9 +728,9 @@ mod tests {
 
     use super::{
         CHATGPT_ACCOUNT_ID_HEADER, CODEX_USER_AGENT, CodexAuthContext, CodexProvider,
-        OPENAI_AUTH_CLAIM, RESET_CREDITS_URL, USAGE_URL, jwt_auth_claim,
-        local_token_usage_window, parse_rate_limit_window, rate_limit_period_key,
-        resolve_subscription_tier, token_count_amounts,
+        OPENAI_AUTH_CLAIM, RESET_CREDITS_URL, USAGE_URL, jwt_auth_claim, local_token_usage_window,
+        parse_rate_limit_window, rate_limit_period_key, resolve_subscription_tier,
+        token_count_amounts,
     };
 
     fn fake_jwt(plan_type: Option<&str>, account_id: Option<&str>) -> String {

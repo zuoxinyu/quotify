@@ -593,7 +593,6 @@ fn run_login_flow(
                 .into(),
             });
 
-
             WEBVIEW.with(|wv| {
                 *wv.borrow_mut() = Some(webview);
             });
@@ -696,7 +695,9 @@ mod tests {
 
     #[test]
     fn mimo_url_matching() {
-        assert!(is_mimo_console_url("https://platform.xiaomimimo.com/console"));
+        assert!(is_mimo_console_url(
+            "https://platform.xiaomimimo.com/console"
+        ));
         assert!(is_mimo_console_url(
             "https://platform.xiaomimimo.com/console/balance"
         ));
@@ -704,7 +705,9 @@ mod tests {
         assert!(is_mimo_login_url(
             "https://account.xiaomi.com/fe/service/login/password"
         ));
-        assert!(!is_mimo_login_url("https://platform.xiaomimimo.com/console"));
+        assert!(!is_mimo_login_url(
+            "https://platform.xiaomimimo.com/console"
+        ));
     }
 
     #[test]
