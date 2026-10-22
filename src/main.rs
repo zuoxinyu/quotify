@@ -1,6 +1,7 @@
 #![recursion_limit = "1024"]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![cfg_attr(test, allow(dead_code, unused_variables, unused_imports))]
+#![allow(clippy::double_must_use)]
 
 mod agent_scan;
 #[cfg(not(test))]

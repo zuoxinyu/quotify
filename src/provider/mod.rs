@@ -248,6 +248,7 @@ impl UsageData {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
