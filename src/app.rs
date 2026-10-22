@@ -59,6 +59,7 @@ enum QuotifyTagTone {
     Info,
     Secondary,
     Success,
+    Warning,
 }
 
 /// Keep the standard compact outline Tag appearance while drawing a
@@ -71,6 +72,7 @@ fn quotify_tag(tone: QuotifyTagTone, is_dark: bool, scale_factor: f32) -> Tag {
             QuotifyTagTone::Info => gpui::rgb(0x60cdff),
             QuotifyTagTone::Secondary => gpui::rgb(0xc8c8c8),
             QuotifyTagTone::Success => gpui::rgb(0x6ccb5f),
+            QuotifyTagTone::Warning => gpui::rgb(0xf59e0b),
         }
         .into();
         Tag::custom(color, color, color)
@@ -79,6 +81,12 @@ fn quotify_tag(tone: QuotifyTagTone, is_dark: bool, scale_factor: f32) -> Tag {
             QuotifyTagTone::Info => Tag::info(),
             QuotifyTagTone::Secondary => Tag::secondary(),
             QuotifyTagTone::Success => Tag::success(),
+            QuotifyTagTone::Warning => {
+                let border: Hsla = gpui::rgb(0xd97706).into();
+                let text: Hsla = gpui::rgb(0xb45309).into();
+                let bg: Hsla = gpui::rgba(0xfef3c780).into();
+                Tag::custom(bg, text, border)
+            }
         }
     };
 
@@ -1540,16 +1548,31 @@ impl QuotifyApp {
         let mouse_down_provider = provider_name.clone();
         let card_elt_id = SharedString::from(format!("card_{name}"));
 
+        let cached_data = if data.error.is_some() {
+            self.history
+                .read()
+                .latest_successful_for(name)
+                .filter(|cached| !cached.windows.is_empty())
+        } else {
+            None
+        };
+        let effective_data = cached_data.as_ref().unwrap_or(data);
+
         let effective_budget = self
             .config
             .provider_budget(name)
             .or_else(|| crate::legacy_bedrock_budget(&self.config, name));
         let trend = {
             let history = self.history.read();
-            self.trend_cache
-                .get_or_compute(&history, data, 7, chrono::Utc::now(), effective_budget)
+            self.trend_cache.get_or_compute(
+                &history,
+                effective_data,
+                7,
+                chrono::Utc::now(),
+                effective_budget,
+            )
         };
-        let reset_credits = crate::provider::codex::reset_credits(data);
+        let reset_credits = crate::provider::codex::reset_credits(effective_data);
         let reset_animation = self.disclosure(CODEX_RESET_DISCLOSURE_KEY);
         let show_reset_credits = reset_credits.is_some() && reset_animation.target_is_open();
 
@@ -1562,7 +1585,8 @@ impl QuotifyApp {
                     .child(self.render_card_header(
                         name,
                         SharedString::from(crate::provider::display_name(name).to_owned()),
-                        data,
+                        effective_data,
+                        cached_data.as_ref(),
                         reset_credits.as_ref(),
                         show_reset_credits,
                         row_idx,
@@ -1570,7 +1594,14 @@ impl QuotifyApp {
                         scale_factor,
                         cx,
                     ))
-                    .child(self.render_card_body(name, data, trend, is_dark, cx))
+                    .child(self.render_card_body(
+                        name,
+                        data,
+                        cached_data.as_ref(),
+                        trend,
+                        is_dark,
+                        cx,
+                    ))
                     .when_some(reset_credits, |card, resets| {
                         let (details, height) =
                             Self::render_codex_reset_details(&resets, is_dark, scale_factor);
@@ -1613,6 +1644,7 @@ impl QuotifyApp {
         name: &str,
         display_name: SharedString,
         data: &UsageData,
+        cached_data: Option<&UsageData>,
         reset_credits: Option<&crate::provider::CodexResetCredits>,
         show_reset_credits: bool,
         row_idx: usize,
@@ -1779,6 +1811,15 @@ impl QuotifyApp {
                 status_tags.push(budget_unavailable_tag);
             }
         }
+        if let Some(cached) = cached_data {
+            let age = i18n::refresh_age((chrono::Utc::now() - cached.fetched_at).num_seconds());
+            status_tags.push(
+                quotify_tag(QuotifyTagTone::Warning, is_dark, scale_factor)
+                    .outline()
+                    .child(format!("{}: {age}", i18n::text(Text::Cached)))
+                    .into_any_element(),
+            );
+        }
 
         div()
             .flex()
@@ -1817,10 +1858,13 @@ impl QuotifyApp {
         &self,
         provider: &str,
         data: &UsageData,
+        cached_data: Option<&UsageData>,
         trend: Option<Arc<crate::trend_cache::CachedProviderTrends>>,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let mut alert_element: Option<AnyElement> = None;
+
         if let Some(ref error) = data.error {
             let login_message = crate::webview_login::login_required_message(error);
             if let Some(login_message) = login_message
@@ -1835,7 +1879,7 @@ impl QuotifyApp {
                 let provider = provider.to_string();
                 let app = cx.entity().downgrade();
 
-                return div()
+                let login_ui = div()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -1886,21 +1930,38 @@ impl QuotifyApp {
                         )
                     })
                     .into_any_element();
-            }
 
-            return Alert::error(
-                SharedString::from(format!("provider-error-{provider}")),
-                error.clone(),
-            )
-            .small()
-            .into_any_element();
+                if cached_data.is_none() {
+                    return login_ui;
+                }
+                alert_element = Some(login_ui);
+            } else {
+                if cached_data.is_none() {
+                    return Alert::error(
+                        SharedString::from(format!("provider-error-{provider}")),
+                        error.clone(),
+                    )
+                    .small()
+                    .into_any_element();
+                }
+
+                alert_element = Some(
+                    Alert::warning(
+                        SharedString::from(format!("provider-cache-warning-{provider}")),
+                        error.clone(),
+                    )
+                    .small()
+                    .into_any_element(),
+                );
+            }
         }
 
-        let mut children = data
+        let display_data = cached_data.unwrap_or(data);
+        let mut children = display_data
             .windows
             .iter()
             .filter(|window| {
-                !data.provider.eq_ignore_ascii_case("codex")
+                !display_data.provider.eq_ignore_ascii_case("codex")
                     || !crate::provider::codex::is_reset_credits_window(window)
             })
             .map(|w| Self::render_progress_row(provider, w, is_dark))
@@ -1910,12 +1971,23 @@ impl QuotifyApp {
             children.push(self.render_trend_section(provider, trend_val.as_ref(), is_dark, cx));
         }
 
-        div()
+        let progress_section = div()
             .flex()
             .flex_col()
             .gap(px(12.0)) // 8px gap between progress rows matches egui's default spacing
-            .children(children)
-            .into_any_element()
+            .children(children);
+
+        if let Some(alert) = alert_element {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(alert)
+                .child(progress_section)
+                .into_any_element()
+        } else {
+            progress_section.into_any_element()
+        }
     }
 
     fn render_animated_disclosure(

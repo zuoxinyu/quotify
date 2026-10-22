@@ -285,6 +285,7 @@ pub enum Text {
     NoUsageData,
     Error,
     Max,
+    Cached,
 }
 
 fn translations(key: Text) -> [&'static str; 4] {
@@ -813,6 +814,7 @@ fn translations(key: Text) -> [&'static str; 4] {
         ],
         Error => ["Error", "错误", "錯誤", "エラー"],
         Max => ["Max", "最高", "最高", "最大"],
+        Cached => ["Cached", "缓存", "快取", "キャッシュ"],
     }
 }
 
@@ -823,18 +825,50 @@ pub fn refresh_age(seconds: i64) -> String {
     }
     let (value, unit) = if seconds < 60 {
         (seconds, "second")
-    } else {
+    } else if seconds < 3600 {
         (seconds / 60, "minute")
+    } else if seconds < 86400 {
+        (seconds / 3600, "hour")
+    } else {
+        (seconds / 86400, "day")
     };
     match language {
-        Language::English => format!("{value}{} ago", if unit == "second" { "s" } else { "m" }),
+        Language::English => {
+            let suffix = match unit {
+                "second" => "s",
+                "minute" => "m",
+                "hour" => "h",
+                _ => "d",
+            };
+            format!("{value}{suffix} ago")
+        }
         Language::SimplifiedChinese => {
-            format!("{value}{}前", if unit == "second" { "秒" } else { "分钟" })
+            let unit_str = match unit {
+                "second" => "秒",
+                "minute" => "分钟",
+                "hour" => "小时",
+                _ => "天",
+            };
+            format!("{value}{unit_str}前")
         }
         Language::TraditionalChinese => {
-            format!("{value}{}前", if unit == "second" { "秒" } else { "分鐘" })
+            let unit_str = match unit {
+                "second" => "秒",
+                "minute" => "分鐘",
+                "hour" => "小時",
+                _ => "天",
+            };
+            format!("{value}{unit_str}前")
         }
-        Language::Japanese => format!("{value}{}前", if unit == "second" { "秒" } else { "分" }),
+        Language::Japanese => {
+            let unit_str = match unit {
+                "second" => "秒",
+                "minute" => "分",
+                "hour" => "時間",
+                _ => "日",
+            };
+            format!("{value}{unit_str}前")
+        }
     }
 }
 
@@ -1139,6 +1173,22 @@ mod tests {
             assert!(!language.text(Text::Settings).is_empty());
             assert!(!language.text(Text::Notifications).is_empty());
             assert!(!language.text(Text::ProviderSettings).is_empty());
+            assert!(!language.text(Text::Cached).is_empty());
         }
+    }
+
+    #[test]
+    fn refresh_age_formats_units() {
+        set_current_language("en");
+        assert_eq!(refresh_age(10), "10s ago");
+        assert_eq!(refresh_age(120), "2m ago");
+        assert_eq!(refresh_age(7200), "2h ago");
+        assert_eq!(refresh_age(172800), "2d ago");
+
+        set_current_language("zh-CN");
+        assert_eq!(refresh_age(10), "10秒前");
+        assert_eq!(refresh_age(120), "2分钟前");
+        assert_eq!(refresh_age(7200), "2小时前");
+        assert_eq!(refresh_age(172800), "2天前");
     }
 }
