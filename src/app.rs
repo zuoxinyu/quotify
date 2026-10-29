@@ -2510,10 +2510,10 @@ impl QuotifyApp {
                     .h(px(PROGRESS_TRACK_HEIGHT))
                     .rounded_full()
                     .overflow_hidden()
-                    .child(Progress::new("spend-track").value(0.0).bg(fill_color).w_full().h_full())
+                    .child(Progress::new(format!("{provider}-{}-track", w.label)).value(0.0).bg(fill_color).w_full().h_full())
                     .when(pct > 0.0, |track| {
                         track.child(
-                            Progress::new("spend-fill")
+                            Progress::new(format!("{provider}-{}-fill", w.label))
                                 .value(100.0)
                                 .bg(fill_color)
                                 .absolute()
