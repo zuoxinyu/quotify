@@ -1883,7 +1883,9 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<()>(100);
     let _ = UPDATE_CHANNEL.set(update_tx);
 
-    let app = gpui::application().with_assets(AppAssets);
+    let app = gpui::application()
+        .with_assets(AppAssets)
+        .with_quit_mode(gpui::QuitMode::Explicit);
     app.run(move |cx| {
         gpui_component::init(cx);
         app::apply_component_theme(&config_window.general.theme, None, cx);
@@ -2212,7 +2214,9 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<()>(100);
     let _ = UPDATE_CHANNEL.set(update_tx);
 
-    let app = gpui::application().with_assets(AppAssets);
+    let app = gpui::application()
+        .with_assets(AppAssets)
+        .with_quit_mode(gpui::QuitMode::Explicit);
     app.run(move |cx| {
         gpui_component::init(cx);
         app::apply_component_theme(&config_window.general.theme, None, cx);
