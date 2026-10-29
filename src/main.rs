@@ -1883,7 +1883,7 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<()>(100);
     let _ = UPDATE_CHANNEL.set(update_tx);
 
-    let app = gpui::Application::new().with_assets(AppAssets);
+    let app = gpui::application().with_assets(AppAssets);
     app.run(move |cx| {
         gpui_component::init(cx);
         app::apply_component_theme(&config_window.general.theme, None, cx);
@@ -1985,8 +1985,7 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
                 while update_rx.recv().await.is_some() {
                     cx.update(|cx| {
                         window_handle.update(cx, |_, _, cx| cx.notify()).ok();
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -1999,9 +1998,7 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
                     if cx
-                        .update(|cx| {
-                            clock_window.update(cx, |_, _, cx| cx.notify()).ok();
-                        })
+                        .update(|cx| clock_window.update(cx, |_, _, cx| cx.notify()))
                         .is_err()
                     {
                         break;
@@ -2215,7 +2212,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<()>(100);
     let _ = UPDATE_CHANNEL.set(update_tx);
 
-    let app = gpui::Application::new().with_assets(AppAssets);
+    let app = gpui::application().with_assets(AppAssets);
     app.run(move |cx| {
         gpui_component::init(cx);
         app::apply_component_theme(&config_window.general.theme, None, cx);
@@ -2379,8 +2376,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                                 cx.notify();
                             })
                             .ok();
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -2403,9 +2399,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
                     }
 
                     if cx
-                        .update(|cx| {
-                            clock_window.update(cx, |_, _, cx| cx.notify()).ok();
-                        })
+                        .update(|cx| clock_window.update(cx, |_, _, cx| cx.notify()))
                         .is_err()
                     {
                         break;

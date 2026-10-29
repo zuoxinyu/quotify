@@ -4,7 +4,7 @@ use gpui_component::{
     Disableable, IndexPath, Selectable, Sizable,
     alert::Alert,
     button::{Button, ButtonVariants},
-    divider::Divider,
+    separator::Separator,
     group_box::{GroupBox, GroupBoxVariants},
     input::{Input, InputEvent, InputState},
     link::Link,
@@ -592,7 +592,7 @@ impl QuotifyApp {
                     .await;
 
                 cx.update(|cx| {
-                    this.update(cx, |view, cx| {
+                    let _ = this.update(cx, |view, cx| {
                         view.config.general.local_agent_discovery = true;
                         view.config.general.agent_scan_onboarding_completed = true;
                         for agent in &detected {
@@ -614,10 +614,8 @@ impl QuotifyApp {
                         view.save_config();
                         crate::tray::request_refresh();
                         cx.notify();
-                    })
-                    .ok();
-                })
-                .ok();
+                    });
+                });
             }
         })
         .detach();
@@ -864,12 +862,10 @@ impl QuotifyApp {
                 };
 
                 cx.update(|cx| {
-                    this.update(cx, |_view, cx| {
+                    let _ = this.update(cx, |_view, cx| {
                         cx.notify();
-                    })
-                    .ok();
-                })
-                .ok();
+                    });
+                });
             }
         })
         .detach();
@@ -977,12 +973,10 @@ impl QuotifyApp {
                 };
 
                 cx.update(|cx| {
-                    this.update(cx, |_view, cx| {
+                    let _ = this.update(cx, |_view, cx| {
                         cx.notify();
-                    })
-                    .ok();
-                })
-                .ok();
+                    });
+                });
             }
         })
         .detach();
@@ -1082,7 +1076,7 @@ impl Render for QuotifyApp {
             )
             .child(
                 // Line separator
-                Divider::horizontal().mt(px(4.0)).color(border_color),
+                Separator::horizontal().mt(px(4.0)).color(border_color),
             )
             .child(
                 // Body View
@@ -1175,7 +1169,7 @@ impl QuotifyApp {
                                             ),
                                     ),
                             )
-                            .child(Divider::horizontal())
+                            .child(Separator::horizontal())
                             .child(
                                 div()
                                     .flex()
@@ -1354,7 +1348,7 @@ impl QuotifyApp {
                             ),
                     ),
             )
-            .child(Divider::horizontal())
+            .child(Separator::horizontal())
             .child(status_content)
             .into_any_element()
     }
@@ -2454,7 +2448,7 @@ impl QuotifyApp {
                     .items_end()
                     .w_full()
                     .h(px(9.0))
-                    .child(Divider::horizontal()),
+                    .child(Separator::horizontal()),
             )
             .child(
                 div()
@@ -2516,10 +2510,10 @@ impl QuotifyApp {
                     .h(px(PROGRESS_TRACK_HEIGHT))
                     .rounded_full()
                     .overflow_hidden()
-                    .child(Progress::new().value(0.0).bg(fill_color).w_full().h_full())
+                    .child(Progress::new("spend-track").value(0.0).bg(fill_color).w_full().h_full())
                     .when(pct > 0.0, |track| {
                         track.child(
-                            Progress::new()
+                            Progress::new("spend-fill")
                                 .value(100.0)
                                 .bg(fill_color)
                                 .absolute()
@@ -2558,7 +2552,7 @@ impl QuotifyApp {
         GroupBox::new()
             .fill()
             .child(self.render_about_header(ver))
-            .child(Divider::horizontal())
+            .child(Separator::horizontal())
             .child(self.render_update_section(cx))
             .into_any_element()
     }
@@ -2789,22 +2783,23 @@ impl QuotifyApp {
                     .default_value(refresh_index as f32)
             });
             let _subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
                 let index = value
                     .end()
                     .round()
                     .clamp(0.0, (refresh_intervals.len() - 1) as f32)
                     as usize;
                 let refresh_interval = refresh_intervals[index];
-                slider_app
+                let _ = slider_app
                     .update(cx, |this, cx| {
                         if this.config.general.refresh_interval != refresh_interval {
                             this.config.general.refresh_interval = refresh_interval;
                             this.save_config();
                             cx.notify();
                         }
-                    })
-                    .ok();
+                    });
             });
             SliderFieldState {
                 slider,
@@ -2862,7 +2857,7 @@ impl QuotifyApp {
                                 ),
                             ),
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Theme Select
                         div()
@@ -2917,7 +2912,7 @@ impl QuotifyApp {
                                     }))
                             )
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Windows backdrop material
                         div()
@@ -2972,7 +2967,7 @@ impl QuotifyApp {
                                     }))
                             )
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // WebView authentication policy
                         div()
@@ -3001,7 +2996,7 @@ impl QuotifyApp {
                                     })
                             )
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Local agent discovery consent and manual scan.
                         div()
@@ -3125,7 +3120,7 @@ impl QuotifyApp {
                                 _ => div().into_any_element(),
                             }),
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Start with Windows
                         div()
@@ -3156,7 +3151,7 @@ impl QuotifyApp {
                                     })
                             )
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Refresh Interval
                         div()
@@ -3188,7 +3183,7 @@ impl QuotifyApp {
                                     .child("3600s")
                             )
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Network Proxy input field
                         self.render_input_field(is_dark, "proxy".into(), i18n::text(Text::NetworkProxy).into(), "e.g. http://127.0.0.1:7890".into(), false, window, cx)
@@ -3226,17 +3221,18 @@ impl QuotifyApp {
                         .default_value(threshold_value)
                 });
                 let _subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
-                    let SliderEvent::Change(value) = event;
+                    let SliderEvent::Change(value) = event else {
+                        return;
+                    };
                     let threshold = value.end().round().clamp(1.0, 100.0) as f64;
-                    threshold_slider_app
+                    let _ = threshold_slider_app
                         .update(cx, |this, cx| {
                             if this.config.notifications.usage_threshold_percent != threshold {
                                 this.config.notifications.usage_threshold_percent = threshold;
                                 this.save_config();
                                 cx.notify();
                             }
-                        })
-                        .ok();
+                        });
                 });
                 SliderFieldState {
                     slider,
@@ -3320,7 +3316,7 @@ impl QuotifyApp {
                                     }),
                             ),
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(notification_switch_row(
                         i18n::text(Text::MonthlyQuotaReset),
                         i18n::text(Text::MonthlyQuotaResetDescription),
@@ -3372,7 +3368,7 @@ impl QuotifyApp {
                                 .ok();
                         },
                     ))
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         div()
                             .flex()
@@ -3454,7 +3450,7 @@ impl QuotifyApp {
                                     ),
                             ),
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(notification_switch_row(
                         i18n::text(Text::SilentRefreshFailures),
                         i18n::text(Text::SilentRefreshFailuresDescription),
@@ -3568,7 +3564,7 @@ impl QuotifyApp {
                                 .w_full(),
                         ),
                     )
-                    .child(Divider::horizontal())
+                    .child(Separator::horizontal())
                     .child(
                         // Provider fields list based on selection
                         self.render_selected_provider_fields(is_dark, window, cx),
@@ -3593,7 +3589,7 @@ impl QuotifyApp {
                         let _ = open_config_file(config_path.as_ref());
                     }),
             )
-            .child(Divider::vertical().h(px(12.0)))
+            .child(Separator::vertical().h(px(12.0)))
             .child(
                 Link::new("open_logs_link")
                     .text_size(px(11.0))
@@ -3602,7 +3598,7 @@ impl QuotifyApp {
                         let _ = open_folder(&crate::diagnostics::log_dir());
                     }),
             )
-            .child(Divider::vertical().h(px(12.0)))
+            .child(Separator::vertical().h(px(12.0)))
             .child(
                 Link::new("create_diagnostic_report_link")
                     .text_size(px(11.0))
