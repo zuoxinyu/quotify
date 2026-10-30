@@ -1905,7 +1905,7 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
             is_movable: true,
             is_resizable: true,
             is_minimizable: true,
-            window_background: gpui::WindowBackgroundAppearance::Opaque,
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             ..Default::default()
         };
 
@@ -2244,7 +2244,7 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             // GPUI's Transparent mode installs ACCENT_ENABLE_TRANSPARENTGRADIENT on Windows.
             // Keep that legacy effect disabled so transparent DirectComposition pixels reveal
             // the DWM system backdrop instead.
-            window_background: gpui::WindowBackgroundAppearance::Opaque,
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             ..Default::default()
         };
 

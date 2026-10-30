@@ -141,6 +141,7 @@ impl SelectPopoverSurface {
         {
             let theme = gpui_component::Theme::global_mut(cx);
             theme.background = popover;
+            theme.tokens.background = popover.into();
             theme.foreground = popover_foreground;
         }
 
@@ -149,6 +150,7 @@ impl SelectPopoverSurface {
         {
             let theme = gpui_component::Theme::global_mut(cx);
             theme.background = background;
+            theme.tokens.background = background.into();
             theme.foreground = foreground;
         }
 
@@ -242,23 +244,37 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
     theme.progress_bar = gpui::rgb(0x0067c0).into();
 
     if mode.is_dark() {
-        // gpui-component 0.5.1 uses `background` for both Root and the Select menu.
-        // Keep enough tint for Select readability without hiding the DWM Mica layer.
+        // gpui-component 0.8.1 uses `tokens.background` for Root.
+        // Keep background transparent so the DWM Mica/Acrylic layer shows through.
         theme.background = gpui::rgba(0x20202000).into();
+        theme.tokens.background = theme.background.into();
         theme.group_box = gpui::rgba(0x2b2b2b78).into();
+        theme.tokens.group_box = theme.group_box.into();
         theme.popover = gpui::rgba(0x2b2b2bff).into();
+        theme.tokens.popover = theme.popover.into();
         theme.border = gpui::rgba(0xffffff26).into();
+        theme.tokens.border = theme.border.into();
         theme.input = gpui::rgba(0xffffff3d).into();
+        theme.tokens.input = theme.input.into();
         theme.muted = gpui::rgba(0xffffff24).into();
+        theme.tokens.muted = theme.muted.into();
         theme.switch = gpui::rgba(0xffffff33).into();
+        theme.tokens.switch = theme.switch.into();
     } else {
         theme.background = gpui::rgba(0xf3f3f300).into();
+        theme.tokens.background = theme.background.into();
         theme.group_box = gpui::rgba(0xffffff85).into();
+        theme.tokens.group_box = theme.group_box.into();
         theme.popover = gpui::rgba(0xf9f9f9ff).into();
+        theme.tokens.popover = theme.popover.into();
         theme.border = gpui::rgba(0x0000001f).into();
+        theme.tokens.border = theme.border.into();
         theme.input = gpui::rgba(0x0000003d).into();
+        theme.tokens.input = theme.input.into();
         theme.muted = gpui::rgba(0x00000014).into();
+        theme.tokens.muted = theme.muted.into();
         theme.switch = gpui::rgba(0x0000002e).into();
+        theme.tokens.switch = theme.switch.into();
     }
 
     // Slider uses independent theme tokens even though Switch uses `primary`
@@ -1958,7 +1974,8 @@ impl QuotifyApp {
                 !display_data.provider.eq_ignore_ascii_case("codex")
                     || !crate::provider::codex::is_reset_credits_window(window)
             })
-            .map(|w| Self::render_progress_row(provider, w, is_dark))
+            .enumerate()
+            .map(|(idx, w)| Self::render_progress_row(provider, idx, w, is_dark))
             .collect::<Vec<_>>();
 
         if let Some(trend_val) = trend {
@@ -2482,6 +2499,7 @@ impl QuotifyApp {
 
     fn render_progress_row(
         provider: &str,
+        idx: usize,
         w: &crate::provider::UsageWindow,
         is_dark: bool,
     ) -> AnyElement {
@@ -2510,10 +2528,10 @@ impl QuotifyApp {
                     .h(px(PROGRESS_TRACK_HEIGHT))
                     .rounded_full()
                     .overflow_hidden()
-                    .child(Progress::new(format!("{provider}-{}-track", w.label)).value(0.0).bg(fill_color).w_full().h_full())
+                    .child(Progress::new(format!("{provider}-{idx}-{}-track", w.label)).value(0.0).bg(fill_color).w_full().h_full())
                     .when(pct > 0.0, |track| {
                         track.child(
-                            Progress::new(format!("{provider}-{}-fill", w.label))
+                            Progress::new(format!("{provider}-{idx}-{}-fill", w.label))
                                 .value(100.0)
                                 .bg(fill_color)
                                 .absolute()
