@@ -36,7 +36,6 @@ const TREND_CHART_HEIGHT: f32 = 112.0;
 const TREND_PLOT_HEIGHT: f32 = 92.0;
 const TREND_VALUE_LABEL_HEIGHT: f32 = 13.0;
 const TREND_BAR_MAX_WIDTH: f32 = 24.0;
-const PROGRESS_TRACK_HEIGHT: f32 = 8.0;
 
 fn secondary_text_color(is_dark: bool) -> Rgba {
     if is_dark {
@@ -242,6 +241,7 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
     theme.primary_active = gpui::rgb(0x005a9e).into();
     theme.ring = gpui::rgb(0x0067c0).into();
     theme.progress_bar = gpui::rgb(0x0067c0).into();
+    theme.tokens.progress_bar = theme.progress_bar.into();
 
     if mode.is_dark() {
         // gpui-component 0.8.1 uses `tokens.background` for Root.
@@ -2524,25 +2524,12 @@ impl QuotifyApp {
             )
             .child(
                 div()
-                    .relative()
                     .flex_1()
-                    .h(px(PROGRESS_TRACK_HEIGHT))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .child(Progress::new(format!("{provider}-{idx}-{}-track", w.label)).value(0.0).bg(fill_color).w_full().h_full())
-                    .when(pct > 0.0, |track| {
-                        track.child(
-                            Progress::new(format!("{provider}-{idx}-{}-fill", w.label))
-                                .value(100.0)
-                                .bg(fill_color)
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .w(relative((pct / 100.0) as f32))
-                                .min_w(px(PROGRESS_TRACK_HEIGHT))
-                                .h_full(),
-                        )
-                    }),
+                    .child(
+                        Progress::new(format!("{provider}-{idx}-{}", w.label))
+                            .value(pct as f32)
+                            .color(fill_color),
+                    ),
             )
             .child(
                 div()
