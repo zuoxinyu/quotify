@@ -1905,7 +1905,7 @@ fn run_window(config: config::AppConfig, config_path: Option<std::path::PathBuf>
             is_movable: true,
             is_resizable: true,
             is_minimizable: true,
-            window_background: gpui::WindowBackgroundAppearance::Transparent,
+            window_background: gpui::WindowBackgroundAppearance::MicaAltBackdrop,
             ..Default::default()
         };
 
@@ -2241,10 +2241,10 @@ fn run_tray(config: config::AppConfig, config_path: Option<std::path::PathBuf>) 
             is_movable: false,
             is_resizable: false,
             is_minimizable: false,
-            // GPUI's Transparent mode installs ACCENT_ENABLE_TRANSPARENTGRADIENT on Windows.
-            // Keep that legacy effect disabled so transparent DirectComposition pixels reveal
-            // the DWM system backdrop instead.
-            window_background: gpui::WindowBackgroundAppearance::Transparent,
+            // GPUI's MicaAltBackdrop instructs the DirectX renderer to clear with transparent
+            // [0.0; 4] without invoking SetWindowCompositionAttribute's legacy accent policy.
+            // Win32 DWM then renders the requested backdrop (Mica Alt, Mica, or Acrylic).
+            window_background: gpui::WindowBackgroundAppearance::MicaAltBackdrop,
             ..Default::default()
         };
 
@@ -3084,6 +3084,53 @@ fn compute_popup_placement(hwnd: HWND) -> FlyoutPlacement {
     }
 }
 
+#[cfg(target_os = "windows")]
+unsafe fn purge_accent_policy(hwnd: HWND) {
+    use windows::core::{BOOL, PCSTR};
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+
+    type SetWindowCompositionAttributeType =
+        unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> BOOL;
+
+    #[repr(C)]
+    struct AccentPolicy {
+        accent_state: u32,
+        accent_flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
+    }
+
+    #[repr(C)]
+    struct WindowCompositionAttribData {
+        attrib: u32,
+        pv_data: *mut std::ffi::c_void,
+        cb_data: usize,
+    }
+
+    unsafe {
+        if let Ok(user32) = GetModuleHandleA(PCSTR::from_raw(c"user32.dll".as_ptr() as *const u8)) {
+            if let Some(proc) = GetProcAddress(
+                user32,
+                PCSTR::from_raw(c"SetWindowCompositionAttribute".as_ptr() as *const u8),
+            ) {
+                let set_attr: SetWindowCompositionAttributeType = std::mem::transmute(proc);
+                let accent = AccentPolicy {
+                    accent_state: 0, // ACCENT_DISABLED
+                    accent_flags: 0,
+                    gradient_color: 0,
+                    animation_id: 0,
+                };
+                let mut data = WindowCompositionAttribData {
+                    attrib: 0x13, // WCA_ACCENT_POLICY
+                    pv_data: &accent as *const _ as *mut _,
+                    cb_data: std::mem::size_of::<AccentPolicy>(),
+                };
+                let _ = set_attr(hwnd, &mut data as *mut _ as _);
+            }
+        }
+    }
+}
+
 fn apply_backdrop(hwnd: HWND, dark: bool, setting: &str) {
     #[cfg(target_os = "windows")]
     {
@@ -3118,6 +3165,8 @@ fn apply_backdrop(hwnd: HWND, dark: bool, setting: &str) {
         };
 
         unsafe {
+            purge_accent_policy(hwnd);
+
             let dark_result = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,

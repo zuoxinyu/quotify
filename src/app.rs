@@ -245,8 +245,9 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
 
     if mode.is_dark() {
         // gpui-component 0.8.1 uses `tokens.background` for Root.
-        // Keep background transparent so the DWM Mica/Acrylic layer shows through.
-        theme.background = gpui::rgba(0x20202000).into();
+        // Keep background transparent black so DirectX premultiplied alpha blends
+        // without additive color leakage and reveals the native DWM Mica/Acrylic layer.
+        theme.background = gpui::rgba(0x00000000).into();
         theme.tokens.background = theme.background.into();
         theme.group_box = gpui::rgba(0x2b2b2b78).into();
         theme.tokens.group_box = theme.group_box.into();
@@ -261,7 +262,7 @@ pub fn apply_component_theme(theme_setting: &str, window: Option<&mut Window>, c
         theme.switch = gpui::rgba(0xffffff33).into();
         theme.tokens.switch = theme.switch.into();
     } else {
-        theme.background = gpui::rgba(0xf3f3f300).into();
+        theme.background = gpui::rgba(0x00000000).into();
         theme.tokens.background = theme.background.into();
         theme.group_box = gpui::rgba(0xffffff85).into();
         theme.tokens.group_box = theme.group_box.into();
